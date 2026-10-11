@@ -46,6 +46,7 @@ console.log('horizontal overflow at 400px:', overflow);
 await page.setViewport({ width: 1440, height: 900, deviceScaleFactor: 1 });
 const waitRun = () => page.waitForFunction(() => document.getElementById('v-run')?.textContent?.startsWith('exit') || document.querySelector('#st-run[data-state="err"]'), { timeout: 30000 });
 await page.click('#plat-win');
+await new Promise((r) => setTimeout(r, 1000));   // the platform's project opens asynchronously (IndexedDB)
 await waitRun();
 console.log('--- Windows');
 console.log((await page.$$eval('.stage', (els) => els.map((e) => (e as HTMLElement).innerText.replace(/\n/g, ' | ')))).join('\n'));
@@ -54,9 +55,10 @@ for (const tab of ['bin', 'macho']) {
   await page.click(`.tab[data-tab="${tab}"]`);
   await page.screenshot({ path: `${out}/web-win-${tab}.png` });
 }
-const ids = await page.$$eval('#example option', (os) => os.map((o) => (o as HTMLOptionElement).value));
+const ids = await page.$$eval('#ex-list li[data-example]', (os) => os.map((o) => (o as HTMLElement).dataset.example!));
 for (const id of ids) {
-  await page.select('#example', id);
+  await page.click(`#ex-list li[data-example="${id}"]`);
+  await new Promise((r) => setTimeout(r, 150));
   const lib = await page.$eval('#mode-exe', (e) => !(e as HTMLInputElement).checked);
   if (lib) {
     const st = await page.$eval('#st-macho', (e) => (e as HTMLElement).innerText.replace(/\n/g, ' | '));
@@ -77,7 +79,43 @@ for (const id of ids) {
   console.log(`${id}: ${st} :: ${first}`);
 }
 await page.click('#plat-mac');
+await new Promise((r) => setTimeout(r, 1000));
 await waitRun();
 console.log('back to macOS:', await page.$eval('#runStatus', (e) => (e as HTMLElement).innerText.replace(/\n/g, ' ')));
+
+// ---------------------------------------------------------------- a project in two files (sidebar, include)
+const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const inline = async (v: string) => {
+  await page.waitForSelector('.tree input');
+  await page.$eval('.tree input', (e) => { (e as HTMLInputElement).value = ''; });
+  await page.type('.tree input', v);
+  await page.keyboard.press('Enter');
+  await pause(500);
+};
+const edit = async (t: string) => {
+  await page.$eval('#src', (e, v) => { (e as HTMLTextAreaElement).value = v as string; e.dispatchEvent(new Event('input')); }, t);
+  await pause(600);
+};
+await page.click('#proj-new');
+await inline('check-web');
+await page.click('#file-new');
+await inline('util');
+await edit('fn twice(v) { return v * 2 }\n');
+await page.click('#file-list li:first-child');
+await pause(300);
+await edit('include "util.hla"\nextern printf(fmt, ...)\nfn main() { printf("twice(21) = %ld\\n", twice(21)) }\n');
+await page.click('#run');
+await waitRun();
+const twice = (await page.$eval('#console', (e) => e.textContent ?? '')).trim();
+console.log(`project in two files: ${await page.$eval('#v-src', (e) => e.textContent)}, ${await page.$eval('#n-src', (e) => e.textContent)} :: ${twice}`);
+if (twice !== 'twice(21) = 42') errors.push(`project in two files printed "${twice}"`);
+// std/file.hla: a file the program writes becomes a file of the project
+await edit('include "std/file.hla"\nfn main() { write_file("out.txt", "written by the program", 22) }\n');
+await page.click('#run');
+await waitRun();
+await pause(500);
+const listed = await page.$$eval('#file-list li .nm', (es) => es.map((e) => e.textContent));
+console.log(`std/file.hla: files after the run: ${listed.join(', ')}`);
+if (!listed.includes('out.txt')) errors.push('out.txt written by the program is not in the project');
 console.log(errors.length ? errors.join('\n') : 'no console errors');
 await browser.close();

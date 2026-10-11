@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { encode } from '../src/asm/encode.ts';
 import { parseOperand, splitOperands } from '../src/asm/parse.ts';
+import { tool } from './lib/toolchain.ts';
 
 const INSNS = `
 mov x0, x1
@@ -260,7 +261,8 @@ fcvtns x0, d1
 
 const dir = mkdtempSync(join(tmpdir(), 'hla-enc-'));
 writeFileSync(join(dir, 't.s'), '.text\n' + INSNS.join('\n') + '\n');
-execFileSync('clang', ['-arch', 'arm64', '-c', join(dir, 't.s'), '-o', join(dir, 't.o')]);
+// --target (not -arch, which only Apple's clang driver understands) so this also runs with LLVM on Windows/Linux
+execFileSync(tool('clang') ?? 'clang', ['--target=arm64-apple-macos', '-c', join(dir, 't.s'), '-o', join(dir, 't.o')]);
 const obj = readFileSync(join(dir, 't.o'));
 
 // locate __text in the object file

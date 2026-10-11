@@ -122,15 +122,14 @@ fn main() {
             [n + Node.next] = 0
         }
     }
-    // x64 has 8 callee-saved registers for let (ARM: 10): reuse q and sum
-    q = &nodes
-    sum = 0
-    while q != 0 {
-        rax = [q + Node.value]
-        sum += rax
-        q = [q + Node.next]
+    let node = &nodes
+    let total = 0
+    while node != 0 {
+        rax = [node + Node.value]
+        total += rax
+        node = [node + Node.next]
     }
-    check(sum, 600, 31)
+    check(total, 600, 31)
 
     // floats in memory
     xmm6 = fl

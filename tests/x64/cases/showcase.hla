@@ -335,10 +335,9 @@ fn main() {
     int_to_str(0)
 
     // ternary & comparison values
-    // (x64 has 8 callee-saved registers for let, ARM has 10: reuse c and m here)
-    c = a > b ? a : b
-    m = a == 7
-    printf("big = %lld, flag = %lld\n", c, m)
+    let big = a > b ? a : b
+    let flag = a == 7
+    printf("big = %lld, flag = %lld\n", big, flag)
 
     // push / pop and an asm block
     push a, b

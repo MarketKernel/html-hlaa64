@@ -1,0 +1,14 @@
+// main.hla — a program in several files (tests/include.ts): include puts a file in place of the line,
+// every file once, paths relative to the including file
+include "util/text.hla"
+include "geometry.hla"
+include "util/text.hla"        // a second include of the same file is skipped
+
+extern printf(fmt, ...)
+
+fn main() {
+    say("several files")
+    printf("square(7) = %lld\n", square(7))
+    printf("perimeter(3, 4) = %lld\n", perimeter(3, 4))
+    printf("GREETING_LEN = %lld\n", GREETING_LEN)
+}

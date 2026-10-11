@@ -7,6 +7,9 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { compile } from '../src/lang/codegen.ts';
 import { runMachO } from '../src/emu/macho-loader.ts';
+import { memoryFiles } from '../src/emu/files.ts';
+import { combineSources } from '../src/lang/include.ts';
+import { basename, dirname } from 'node:path';
 
 const only = process.argv.find((a) => a.startsWith('--only='))?.slice(7);
 // clang builds and native runs of arm64 Mach-O programs are only possible on macOS
@@ -30,8 +33,11 @@ for (const file of files) {
   const expected = readFileSync(expFile, 'utf8');
   const name = file.replace(/[/\\]/g, '_').replace(/\.hla$/, '');
   let asm: string;
+  const src = readFileSync(file, 'utf8');
+  const progArgs: string[] = JSON.parse(/^\/\/ args: (\[.*?\])/m.exec(src)?.[1] ?? '[]');   // command line for main(argc, argv)
   try {
-    asm = compile(readFileSync(file, 'utf8')).asm;
+    // includes (std/file.hla, files next to the program) resolved like the CLI does
+    asm = compile(combineSources(basename(file), (f) => { try { return readFileSync(join(dirname(file), f), 'utf8'); } catch { return null; } }).text).asm;
   } catch (e) {
     console.log(`FAIL ${file}: compile error: ${(e as Error).message}`);
     fail++;
@@ -44,7 +50,7 @@ for (const file of files) {
       const t0 = performance.now();
       let r;
       try {
-        r = runMachO(assemble(asm, { name }));
+        r = runMachO(assemble(asm, { name }), { args: progArgs, files: memoryFiles() });
       } catch (e) {
         console.log(`FAIL ${file} [emu]: ${(e as Error).message}`);
         fail++;
@@ -79,7 +85,7 @@ for (const file of files) {
       fail++;
       continue;
     }
-    const r = spawnSync(exe, [], { encoding: 'utf8', timeout: 10000 });
+    const r = spawnSync(exe, progArgs, { encoding: 'utf8', timeout: 10000, cwd: dir });   // files the program writes land in the temp dir
     if (r.stdout === expected && r.status === 0) {
       pass++;
       console.log(`ok   ${file} [${mode}]`);

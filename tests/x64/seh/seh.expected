@@ -1,0 +1,7 @@
+stack: raise_cb deep guarded check main
+caught RaiseException
+lost registers: 0
+caught access violation
+lost registers: 0
+returned 839
+lost registers: 0

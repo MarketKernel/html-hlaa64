@@ -1,0 +1,95 @@
+// seh.hla — Windows stack unwinding (SEH) through HLA64 frames; built as a library, driven by seh.c.
+// check() puts known values into every non-volatile register and calls the C function guarded(),
+// which calls an HLA64 function under __try. That function overwrites all those registers and
+// raises an exception (in a C callback, or by a bad memory access in its own body). Windows can
+// only give check() its registers back if the .pdata/.xdata of every HLA64 frame on the way is right.
+extern guarded(f, arg)
+
+// every non-volatile register, xmm6-xmm15 and a frame over 4 KB (probed page by page)
+export fn deep(cb: ptr) -> i64 {
+    local buf: u8[8192]
+    let a: rbx = 101
+    let b: rsi = 102
+    let c: rdi = 103
+    let d: rbp = 104
+    let e: r12 = 105
+    let f: r13 = 106
+    let g: r14 = 107
+    let h: r15 = 108
+    xmm6 = 6.5
+    xmm7 = 7.5
+    xmm8 = 8.5
+    xmm9 = 9.5
+    xmm10 = 10.5
+    xmm11 = 11.5
+    xmm12 = 12.5
+    xmm13 = 13.5
+    xmm14 = 14.5
+    xmm15 = 15.5
+    buf[0] = 1
+    buf[8191] = 2
+    cb()
+    // reached only when cb returns
+    return a + b + c + d + e + f + g + h + buf[0] + buf[8191]
+}
+
+// the same frame, but the exception happens inside HLA64 code: a write through a null pointer
+export fn fault(p: ptr) -> i64 {
+    local buf: u8[6000]
+    let a: rbx = 201
+    let b: rsi = 202
+    let c: rdi = 203
+    let d: rbp = 204
+    let e: r12 = 205
+    let f: r13 = 206
+    let g: r14 = 207
+    let h: r15 = 208
+    xmm6 = 1.25
+    xmm15 = 2.25
+    buf[5999] = 3
+    i64[p] = a + h
+    return a + b + c + d + e + f + g + h + buf[5999]
+}
+
+// runs f(arg) through guarded() and counts the non-volatile registers that did not survive
+export fn check(f: ptr, arg: ptr) -> i64 {
+    let a: rbx = 0x1111111111111111
+    let b: rsi = 0x2222222222222222
+    let c: rdi = 0x3333333333333333
+    let d: rbp = 0x4444444444444444
+    let e: r12 = 0x5555555555555555
+    let g: r13 = 0x6666666666666666
+    let h: r14 = 0x7777777777777777
+    let k: r15 = 0x0123456789ABCDEF
+    xmm6 = -6.0
+    xmm7 = -7.0
+    xmm8 = -8.0
+    xmm9 = -9.0
+    xmm10 = -10.0
+    xmm11 = -11.0
+    xmm12 = -12.0
+    xmm13 = -13.0
+    xmm14 = -14.0
+    xmm15 = -15.0
+    guarded(f, arg)
+    let bad: rax = 0
+    if a != 0x1111111111111111 { bad++ }
+    if b != 0x2222222222222222 { bad++ }
+    if c != 0x3333333333333333 { bad++ }
+    if d != 0x4444444444444444 { bad++ }
+    if e != 0x5555555555555555 { bad++ }
+    if g != 0x6666666666666666 { bad++ }
+    if h != 0x7777777777777777 { bad++ }
+    if k != 0x0123456789ABCDEF { bad++ }
+    if xmm6 != -6.0 { bad++ }
+    if xmm7 != -7.0 { bad++ }
+    if xmm8 != -8.0 { bad++ }
+    if xmm9 != -9.0 { bad++ }
+    if xmm10 != -10.0 { bad++ }
+    if xmm11 != -11.0 { bad++ }
+    if xmm12 != -12.0 { bad++ }
+    if xmm13 != -13.0 { bad++ }
+    if xmm14 != -14.0 { bad++ }
+    if xmm15 != -15.0 { bad++ }
+    return bad
+}

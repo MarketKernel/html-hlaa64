@@ -1,0 +1,73 @@
+// spill.hla — more `let` variables than callee-saved registers (x64: 8, ARM64: 10): the rest live
+// in the stack frame. Portable: runs on both targets (tests/run.ts, tests/x64.ts).
+extern printf(fmt, ...)
+
+fn add3(a, b, c) { return a + b + c }
+fn twice(v) { return v * 2 }
+
+// recursion: every call has its own frame slots
+fn deep(n) {
+    let a = n
+    let b = n + 1
+    let c = n + 2
+    let d = n + 3
+    let e = n + 4
+    let f = n + 5
+    let g = n + 6
+    let h = n + 7
+    let i = n + 8
+    let j = n + 9
+    let k = n + 10
+    let l = n + 11
+    if n == 0 { return a + b + c + d + e + f + g + h + i + j + k + l }
+    let r = deep(n - 1)
+    return r + a + b + c + d + e + f + g + h + i + j + k + l
+}
+
+fn main() {
+    let v1 = 1
+    let v2 = 2
+    let v3 = 3
+    let v4 = 4
+    let v5 = 5
+    let v6 = 6
+    let v7 = 7
+    let v8 = 8
+    let v9 = 9
+    let v10 = 10
+    let v11 = 11
+    let v12 = 12
+    let fptr = twice
+    printf("sum = %lld\n", v1 + v2 + v3 + v4 + v5 + v6 + v7 + v8 + v9 + v10 + v11 + v12)
+
+    v12 = add3(v10, v11, v12)          // a call result straight into a frame variable
+    v11 += twice(v1)                   // compound assignment with a call
+    printf("v11 = %lld, v12 = %lld\n", v11, v12)
+    printf("fptr(21) = %lld\n", fptr(21))  // call through a function pointer in the frame
+
+    // loop variables and a computed bound in the frame
+    let total = 0
+    for i in 0..v12 - 30 {
+        for j in v1..v3 { total += i * j }
+    }
+    printf("total = %lld\n", total)
+
+    // shadowing: the initializer reads the outer x
+    let x = 5
+    {
+        let x = x * 10
+        printf("inner x = %lld\n", x)
+    }
+    printf("outer x = %lld\n", x)
+
+    let count = 0
+    while v1 < 1000 {
+        v1 = v1 * 3
+        count++
+    }
+    printf("v1 = %lld after %lld steps\n", v1, count)
+    if v9 > v8 && v10 != v2 { printf("compare ok\n") }
+
+    printf("deep(3) = %lld\n", deep(3))
+    printf("still %lld %lld %lld %lld\n", v2, v5, v9, v10)
+}

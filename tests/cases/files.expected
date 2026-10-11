@@ -1,0 +1,13 @@
+write_file: 11
+append_file: 12
+file_size: 23
+read_file: 23
+first line
+second line
+missing file: read_file -1, file_size -1
+file_close: 0
+chunk of 4: 0123
+chunk of 4: 4567
+chunk of 2: 89
+read 10 bytes
+file_open of a missing file: 0

@@ -1,0 +1,19 @@
+// args.hla — command line arguments: main(argc, argv). Portable: runs on both targets;
+// args: ["one", "two words", "3"]   (the test runners pass these)
+extern printf(fmt, ...)
+extern atoi
+
+fn main(argc: i32, argv: ptr) {
+    let n = argc                 // parameters arrive in argument registers: keep them before a call
+    let args = argv
+    printf("argc = %lld\n", n)
+    let sum = 0
+    for i in 1..n {
+        let a = [args + i * 8]
+        printf("argv[%lld] = \"%s\"\n", i, a)
+        let v = atoi(a)          // C int: 32 bits, the upper half of the register is undefined
+        sum += sext32(v)
+    }
+    printf("sum of numbers = %lld\n", sum)
+    return 0
+}

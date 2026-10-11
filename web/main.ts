@@ -8,6 +8,9 @@ import { assembleAndLinkX, assembleX, writeCoffObject, buildWindowsLibrary, link
 import { runMachO } from '../src/emu/macho-loader.ts';
 import { runPE } from '../src/emu/x64/pe-loader.ts';
 import { zipFiles, type ZipEntry } from './zip.ts';
+import { memoryFiles, writtenText } from '../src/emu/files.ts';
+import { combineSources, errorOrigin, normalizePath, type Combined } from '../src/lang/include.ts';
+import { listProjects, getProject, saveProject, deleteProject, newId, freeName, persistent, type Project, type Mode, type Platform } from './projects.ts';
 
 import exMandelbrot from '../examples/mandelbrot.hla';
 import exShowcase from '../examples/showcase.hla';
@@ -27,8 +30,6 @@ import wxMathlib from '../tests/x64/lib/mathlib.hla';
 declare const __WORKER_SRC__: string;
 declare const __ARTIFACT__: boolean;
 
-type Mode = 'exe' | 'static' | 'dynamic';
-type Platform = 'mac' | 'win';
 interface Example { id: string; title: string; src: string; mode?: Mode; cMain?: string }
 
 const MAC_EXAMPLES: Example[] = [
@@ -62,7 +63,6 @@ const src = $<HTMLTextAreaElement>('src');
 const hl = $('hl');
 const gutter = $('gutter');
 const diag = $('diag');
-const exampleSel = $<HTMLSelectElement>('example');
 const isWindowsHost = /Windows/i.test(navigator.userAgent);
 const store = {
   get(k: string): string | null { try { return localStorage.getItem('hla64:' + k); } catch { return null; } },
@@ -76,7 +76,7 @@ const store = {
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const KW = new Set(['fn', 'function', 'export', 'naked', 'extern', 'const', 'data', 'rodata', 'struct', 'enum', 'alias', 'let',
   'var', 'if', 'else', 'elif', 'while', 'do', 'loop', 'for', 'in', 'step', 'break', 'continue', 'return', 'goto', 'asm',
-  'push', 'pop', 'local', 'unsigned', 'auto', 'set', 'call']);
+  'push', 'pop', 'local', 'unsigned', 'auto', 'set', 'call', 'include']);
 const TYPES = new Set(['i8', 'u8', 'i16', 'u16', 'i32', 'u32', 'i64', 'u64', 'ptr', 'f32', 'f64', 'string']);
 const REG_ARM = /^(?:[xw](?:[12]?\d|30)|[dsqhb](?:[12]?\d|3[01])|sp|wsp|xzr|wzr|fp|lr)$/i;
 const REG_X64 = /^(?:[re]?(?:ax|bx|cx|dx|si|di|sp|bp)|[abcd][lh]|(?:si|di|sp|bp)l|r(?:[89]|1[0-5])[dwb]?|xmm(?:\d|1[0-5])|rip)$/i;
@@ -130,7 +130,7 @@ let errLine = 0;
 
 function renderEditor(): void {
   const text = src.value;
-  let html = hlHla(text);
+  let html = /\.[ch]$/i.test(project.open) ? hlC(text) : hlHla(text);
   const lines = text.split('\n').length;
   if (errLine > 0 && errLine <= lines) {
     const parts = html.split('\n');
@@ -199,7 +199,8 @@ interface Build {
   listing: Listing[];
   instructions: number;
   warnings: string[];
-  error: { stage: 'src' | 'asm'; line: number; col: number; message: string } | null;
+  error: { stage: 'src' | 'asm'; line: number; col: number; message: string; file?: string } | null;
+  combined: Combined | null;
   tCompile: number;
   tAsm: number;
 }
@@ -207,34 +208,47 @@ interface Build {
 let current: Build | null = null;
 let platform: Platform = (store.get('platform') as Platform | null) ?? (isWindowsHost ? 'win' : 'mac');
 const examples = () => PLATFORMS[platform].examples;
-let currentExample = examples()[0];
 let mode: Mode = 'exe';
+// the open project: its files, main file and mode (see the projects section at the end)
+let project: Project = exampleProject(examples()[0]);
 // storage keys: macOS keeps the original names, Windows gets its own namespace
 const key = (k: string) => (platform === 'mac' ? k : 'win:' + k);
 const wordBytes = (w: number) => [w & 0xff, (w >>> 8) & 0xff, (w >>> 16) & 0xff, w >>> 24];
 
-const libName = () => currentExample.id.replace(/[^\w]/g, '_') || 'mylib';
+const stem = (f: string) => f.replace(/^.*\//, '').replace(/\.[^.]*$/, '');
+/** library name: the main file's (mathlib.hla -> mathlib.h, mathlib_static.lib, ...) */
+const libName = () => stem(project.main).replace(/[^\w]/g, '_') || 'mylib';
+const fileText = (name: string): string | null => project.files.find((f) => f.name === name)?.text ?? null;
+/** the C program of a library project (lesson 14 has one) */
+const cMain = (): string | null => fileText('main.c');
 
 function build(): Build {
   const b: Build = {
     platform, mode, asm: null, link: null, object: null, archive: null, pe: null, coff: null, winlib: null,
-    header: null, listing: [], instructions: 0, warnings: [], error: null, tCompile: 0, tAsm: 0,
+    header: null, listing: [], instructions: 0, warnings: [], error: null, tCompile: 0, tAsm: 0, combined: null,
   };
   const win = platform === 'win';
   const t0 = performance.now();
+  let c: Combined | null = null;
   try {
+    // the main file with everything it includes, as one program
+    c = combineSources(project.main, fileText);
+    b.combined = c;
     if (mode === 'exe') {
-      const r = win ? compileX64(src.value) : compile(src.value);
+      const r = win ? compileX64(c.text) : compile(c.text);
       b.asm = r.asm;
-      b.warnings = r.warnings;
+      b.warnings = r.warnings.map(c.warning);
     } else {
-      const r = win ? compileLibraryX64(src.value, libName()) : compileLibrary(src.value, libName());
+      const r = win ? compileLibraryX64(c.text, libName()) : compileLibrary(c.text, libName());
       b.asm = r.asm;
       b.header = r.header;
-      b.warnings = r.warnings;
+      b.warnings = r.warnings.map(c.warning);
     }
   } catch (e) {
-    if (e instanceof CompileError) b.error = { stage: 'src', line: e.line, col: e.col, message: e.message };
+    if (e instanceof CompileError) {
+      const o = errorOrigin(e, c, project.main);
+      b.error = { stage: 'src', line: o.line, col: e.col, message: e.message, file: o.file };
+    }
     else b.error = { stage: 'src', line: 0, col: 0, message: 'internal compiler error: ' + (e as Error).message };
   }
   b.tCompile = performance.now() - t0;
@@ -261,7 +275,7 @@ function build(): Build {
           }
         }
       } else if (mode === 'exe') {
-        b.link = assembleAndLink(b.asm, { name: currentExample.id });
+        b.link = assembleAndLink(b.asm, { name: progName() });
         b.listing = b.link.listing.map((l) => ({ ...l, bytes: wordBytes(l.word) }));
         b.instructions = b.link.instructions;
       } else if (mode === 'dynamic') {
@@ -298,7 +312,8 @@ const outName = (b: Build): string => {
   if (b.platform === 'win') return b.mode === 'exe' ? `${progName()}.exe` : b.mode === 'static' ? `${n}_static.lib` : `${n}.dll`;
   return b.mode === 'exe' ? progName() : b.mode === 'static' ? `lib${n}.a` : `lib${n}.dylib`;
 };
-const progName = () => currentExample.id.replace(/[^\w-]/g, '_') || 'program';
+/** program name: the example's id or the project's name */
+const progName = () => (project.example ?? project.name).replace(/[^\w-]/g, '_') || 'program';
 
 const fmtN = (n: number) => n.toLocaleString('en-US');
 const fmtB = (n: number) => (n >= 10240 ? `${(n / 1024).toFixed(1)} KB` : `${fmtN(n)} B`);
@@ -314,21 +329,15 @@ function setStage(id: string, state: 'ok' | 'err' | 'busy' | '', val: string, no
 function rebuild(): void {
   const b = build();
   current = b;
-  const lines = src.value.split('\n').length;
-  errLine = b.error?.stage === 'src' ? b.error.line : 0;
+  const used = b.combined?.files ?? [project.main];
+  const lines = project.files.filter((f) => used.includes(f.name)).reduce((n, f) => n + f.text.split('\n').length, 0);
+  errLine = b.error?.stage === 'src' && b.error.file === project.open ? b.error.line : 0;
   renderEditor();
+  renderFiles();
 
-  // diagnostics
-  if (b.error) {
-    const where = b.error.stage === 'src' ? `${currentExample.id}.hla:${b.error.line}:${b.error.col}` : b.error.line ? `assembly line ${b.error.line}` : 'linker';
-    diag.innerHTML = `<strong>error</strong> ${esc(where)}: ${esc(b.error.message)}`;
-    diag.hidden = false;
-  } else if (b.warnings.length) {
-    diag.innerHTML = b.warnings.map((w) => `<span class="warn">warning ${esc(w)}</span>`).join('\n');
-    diag.hidden = false;
-  } else diag.hidden = true;
-
-  setStage('src', b.error?.stage === 'src' ? 'err' : 'ok', `${fmtN(lines)} lines`, `${fmtB(new TextEncoder().encode(src.value).length)}`);
+  renderDiag(b);
+  setStage('src', b.error?.stage === 'src' ? 'err' : 'ok', `${fmtN(lines)} lines`,
+    used.length > 1 ? `${used.length} files` : fmtB(new TextEncoder().encode(fileText(project.main) ?? '').length));
   if (b.asm) {
     const asmLines = b.asm.split('\n').length;
     setStage('asm', 'ok', `${fmtN(asmLines)} lines`, `translated in ${b.tCompile.toFixed(1)} ms`);
@@ -374,16 +383,32 @@ function rebuild(): void {
   renderMacho(b);
 }
 
+/** the error (with a link to its file when another one is open) or the warnings under the editor */
+function renderDiag(b: Build): void {
+  if (b.error) {
+    const e = b.error;
+    const where = e.stage === 'src' ? `${e.file}:${e.line}:${e.col}` : e.line ? `assembly line ${e.line}` : 'linker';
+    const jump = e.stage === 'src' && e.file && e.file !== project.open && fileText(e.file) !== null
+      ? ` <button class="link" type="button" data-open="${esc(e.file)}">open ${esc(e.file)}</button>` : '';
+    diag.innerHTML = `<strong>error</strong> ${esc(where)}: ${esc(e.message)}${jump}`;
+    diag.hidden = false;
+  } else if (b.warnings.length) {
+    diag.innerHTML = b.warnings.map((w) => `<span class="warn">warning ${esc(w)}</span>`).join('\n');
+    diag.hidden = false;
+  } else diag.hidden = true;
+}
+
 let editTimer = 0;
 function onEdit(): void {
+  runNote = '';
+  const f = project.files.find((x) => x.name === project.open);
+  if (f) f.text = src.value;
   renderEditor();
   updateCursor();
   clearTimeout(editTimer);
   editTimer = window.setTimeout(() => {
     rebuild();
-    const orig = currentExample.src;
-    if (src.value !== orig) { store.set(key('src:' + currentExample.id), src.value); $('saved').textContent = 'edited · saved in this browser'; }
-    else { store.del(key('src:' + currentExample.id)); $('saved').textContent = ''; }
+    persist();
   }, 220);
 }
 
@@ -589,6 +614,7 @@ function buildCommands(kind: Mode): string {
 }
 
 function renderHeader(b: Build): void {
+  const cm = cMain();
   const v = $('headerView');
   if (b.mode === 'exe') { v.innerHTML = ''; return; }
   if (!b.header) { v.innerHTML = '<p class="warn">Fix the error in the source to generate the header.</p>'; return; }
@@ -605,8 +631,8 @@ ${esc(buildCommands(b.mode))}</pre></div>
         : b.mode === 'static'
         ? `The code of <code>lib${esc(n)}.a</code> is copied into the program at link time.`
         : `The program keeps a reference to <code>@rpath/lib${esc(n)}.dylib</code> and loads it when it starts; keep the .dylib next to the program.`}
-        <b>Download</b> or <b>Copy ${b.platform === 'win' ? 'PowerShell' : 'Terminal'} command</b> give you the header, the library${currentExample.cMain ? ' and the example main.c' : ''}.</p></section>
-    ${currentExample.cMain ? `<section><h3>main.c — example program (lesson 14)</h3><div class="tbl-wrap"><pre class="c-view">${hlC(currentExample.cMain)}</pre></div></section>` : ''}`;
+        <b>Download</b> or <b>Copy ${b.platform === 'win' ? 'PowerShell' : 'Terminal'} command</b> give you the header, the library${cm ? ' and the example main.c' : ''}.</p></section>
+    ${cm ? `<section><h3>main.c — example program (lesson 14)</h3><div class="tbl-wrap"><pre class="c-view">${hlC(cm)}</pre></div></section>` : ''}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -623,10 +649,10 @@ function showTab(name: string): void {
 }
 for (const t of document.querySelectorAll<HTMLElement>('.tab, .stage')) t.addEventListener('click', () => showTab(t.dataset.tab!));
 
-function setMode(m: Mode, persist = true): void {
+function setMode(m: Mode, save = true): void {
   mode = m;
   ($<HTMLInputElement>(`mode-${m}`)).checked = true;
-  if (persist) store.set(key('mode:' + currentExample.id), m);
+  if (save) { project.mode = m; persist(); }
   rebuild();
   if (m !== 'exe') showTab('header');
 }
@@ -658,14 +684,18 @@ function run(): void {
   runStatus('<span class="pill busy">running</span> <button class="btn" id="stop" type="button">Stop</button>');
   $('stop')?.addEventListener('click', () => finish({ exitCode: null, steps: 0, error: 'stopped by user', ms: 0 }));
   const LIMIT = 400_000_000;
+  // the program sees the project's files; what it writes is added to the project it ran in
+  const target = project;
+  const snapshot = Object.fromEntries(target.files.map((f) => [f.name, f.text]));
   let text = '';
   const append = (t: string) => {
     text += t;
     if (text.length > 400_000) text = text.slice(-300_000);
     out.textContent = text;
   };
-  const finish = (r: { exitCode: number | null; steps: number; error: string | null; ms: number }) => {
+  const finish = (r: { exitCode: number | null; steps: number; error: string | null; ms: number; written?: Record<string, string> }) => {
     if (worker) { worker.terminate(); worker = null; }
+    if (r.written && Object.keys(r.written).length) addWritten(target, r.written);
     if (r.error) {
       const e = document.createElement('span');
       e.className = 'e';
@@ -692,19 +722,35 @@ function run(): void {
     };
     worker.onerror = (ev) => { ev.preventDefault(); worker = null; runInPage(); };
     const copy = bytes.slice();
-    worker.postMessage({ bytes: copy.buffer, limit: LIMIT, format }, [copy.buffer]);
+    worker.postMessage({ bytes: copy.buffer, limit: LIMIT, format, files: snapshot }, [copy.buffer]);
   } else runInPage();
 
   function runInPage() {
     // no worker available (some file:// setups): run synchronously with a smaller budget
     const t0 = performance.now();
-    const opts = { limit: 50_000_000, onOutput: (t: string) => { text += t; } };
+    const files = memoryFiles(snapshot);
+    const opts = { limit: 50_000_000, files, onOutput: (t: string) => { text += t; } };
     const r = format === 'pe' ? runPE(bytes, opts) : runMachO(bytes, opts);
     out.textContent = text;
-    finish({ exitCode: r.exitCode, steps: r.steps, error: r.error, ms: performance.now() - t0 });
+    finish({ exitCode: r.exitCode, steps: r.steps, error: r.error, ms: performance.now() - t0, written: writtenText(files) });
   }
 }
 $('run').addEventListener('click', run);
+
+/** files a program wrote become files of its project (text; a changed source rebuilds) */
+function addWritten(p: Project, written: Record<string, string>): void {
+  for (const [name, text] of Object.entries(written)) {
+    const f = p.files.find((x) => x.name === name);
+    if (f) f.text = text; else p.files.push({ name, text });
+  }
+  if (p !== project) { void saveProject(p); return; }
+  persist();
+  if (project.open in written) { src.value = written[project.open]; renderEditor(); }
+  if (Object.keys(written).some(isHla)) rebuild(); else renderFiles();
+  const names = Object.keys(written);
+  runNote = `the program wrote ${names.length > 3 ? names.length + ' files' : names.join(', ')}`;
+  savedNote();
+}
 
 // ---------------------------------------------------------------------------
 // download
@@ -740,8 +786,12 @@ const heredoc = (file: string, text: string) => `cat > ${file} <<'HLA64'\n${text
 // PowerShell: here-strings hold base64 (FromBase64String skips the line breaks) and text files
 const psBinary = (file: string, bytes: Uint8Array) => `$b = @'\n${b64(bytes)}'@\n[IO.File]::WriteAllBytes("$PWD\\${file}", [Convert]::FromBase64String($b))\n`;
 const psText = (file: string, text: string) => `[IO.File]::WriteAllText("$PWD\\${file}", @'\n${text.endsWith('\n') ? text : text + '\n'}'@)\n`;
+// cmd.exe wants CRLF (labels and goto misbehave in LF-only batch files); a pasted here-string has LF
+const psBatch = (file: string, text: string) =>
+  `[IO.File]::WriteAllText("$PWD\\${file}", (@'\n${text.replace(/\r\n/g, '\n')}'@ -replace "\`r?\`n", "\`r\`n"))\n`;
 
 function windowsBundle(b: Build, out: Uint8Array): Bundle {
+  const cm = cMain();
   if (b.mode === 'exe') {
     const name = outName(b);
     return {
@@ -755,39 +805,72 @@ function windowsBundle(b: Build, out: Uint8Array): Bundle {
   }
   const n = libName(), M = macroName(n), wl = b.winlib!;
   const cmd = buildCommands(b.mode);
-  const bat = `@echo off\r\nrem build the example program against the ${b.mode === 'static' ? 'static library' : 'DLL'} (clang or MSVC cl)\r\n`
-    + (b.mode === 'static'
-      ? `where clang >nul 2>nul && (clang main.c ${n}_static.lib -o demo.exe) || (cl /nologo main.c ${n}_static.lib /Fe:demo.exe)\r\n`
-      : `where clang >nul 2>nul && (clang -D${M}_DLL main.c ${n}.lib -o demo.exe) || (cl /nologo /D${M}_DLL main.c ${n}.lib /Fe:demo.exe)\r\n`)
-    + 'demo.exe\r\n';
-  const libs: [string, Uint8Array][] = b.mode === 'static' ? [[`${n}_static.lib`, wl.staticLib]] : [[`${n}.dll`, wl.dll], [`${n}.lib`, wl.importLib]];
+  // A plain console has neither compiler: the LLVM installer does not touch PATH, and cl lives in the
+  // Developer Command Prompt. clang needs that environment too (INCLUDE, LIB: the headers and the C
+  // runtime of Visual Studio and the Windows SDK), so build.bat loads vcvars64.bat first.
+  const [clangArgs, clArgs] = b.mode === 'static'
+    ? [`main.c ${n}_static.lib -o demo.exe`, `/nologo main.c ${n}_static.lib /Fe:demo.exe`]
+    : [`-D${M}_DLL main.c ${n}.lib -o demo.exe`, `/nologo /D${M}_DLL main.c ${n}.lib /Fe:demo.exe`];
+  const bat = [
+    '@echo off',
+    `rem builds main.c against the ${b.mode === 'static' ? 'static library' : 'DLL'} with clang (LLVM) or MSVC cl and runs it`,
+    'setlocal',
+    'cd /d "%~dp0"',
+    'where cl >nul 2>nul || call :vcvars',
+    'set "CC="',
+    'where clang >nul 2>nul && set "CC=clang"',
+    'if not defined CC if exist "%ProgramFiles%\\LLVM\\bin\\clang.exe" set "CC=%ProgramFiles%\\LLVM\\bin\\clang.exe"',
+    `if defined CC "%CC%" ${clangArgs} || exit /b 1`,
+    'if defined CC goto run',
+    'where cl >nul 2>nul || goto none',
+    `cl ${clArgs} || exit /b 1`,
+    ':run',
+    '.\\demo.exe',
+    'exit /b %errorlevel%',
+    ':none',
+    'echo Found neither clang nor cl: install LLVM (winget install LLVM.LLVM) or Visual Studio with "Desktop development with C++".',
+    'exit /b 1',
+    ':vcvars',
+    'set "VSWHERE=%ProgramFiles(x86)%\\Microsoft Visual Studio\\Installer\\vswhere.exe"',
+    'if not exist "%VSWHERE%" exit /b 0',
+    // not for /f: the ")" of "Program Files (x86)" would end its parenthesis
+    '"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath > "%TEMP%\\hla64-vs.txt"',
+    'set "VSDIR="',
+    'set /p VSDIR=<"%TEMP%\\hla64-vs.txt"',
+    'del "%TEMP%\\hla64-vs.txt"',
+    'if defined VSDIR call "%VSDIR%\\VC\\Auxiliary\\Build\\vcvars64.bat" >nul',
+    'exit /b 0',
+    '',
+  ].join('\r\n');
+  const libs: [string, Uint8Array][] = b.mode === 'static' ? [[`${n}_static.lib`, wl.staticLib]] : [[`${n}.dll`, wl.dll!], [`${n}.lib`, wl.importLib!]];
   const entries: ZipEntry[] = [
     { name: `${n}/${n}.h`, data: b.header ?? '' },
     ...libs.map(([f, d]) => ({ name: `${n}/${f}`, data: d })),
     { name: `${n}/${n}.obj`, data: wl.obj },
-    ...(currentExample.cMain ? [{ name: `${n}/main.c`, data: currentExample.cMain }, { name: `${n}/build.bat`, data: bat }] : []),
+    ...(cm ? [{ name: `${n}/main.c`, data: cm }, { name: `${n}/build.bat`, data: bat }] : []),
   ];
   const shell = `New-Item -ItemType Directory -Force ${n} | Out-Null; cd ${n}\n`
     + libs.map(([f, d]) => psBinary(f, d)).join('')
     + psText(`${n}.h`, b.header ?? '')
-    + (currentExample.cMain ? psText('main.c', currentExample.cMain) + cmd + '\n'
+    + (cm ? psText('main.c', cm) + psBatch('build.bat', bat) + '.\\build.bat\n'
       : `"Wrote ${n}.h and ${libs.map(([f]) => f).join(', ')} into $PWD. Write main.c with #include \`"${n}.h\`" and run: ${cmd}"\n`);
   return {
     zipName: `${n}.zip`,
     entries,
     single: null,
     shell,
-    zipHelp: `Saved <b>${esc(n)}.zip</b> with <code>${esc(n)}.h</code>, ${libs.map(([f]) => `<code>${esc(f)}</code>`).join(', ')}, <code>${esc(n)}.obj</code>${currentExample.cMain ? ', <code>main.c</code> and <code>build.bat</code>' : ''}. Unpack it and build the C program (needs clang or Visual Studio's cl):`
-      + `\u0000cd $HOME\\Downloads; Expand-Archive -Force ${n}.zip .; cd ${n}; Get-ChildItem | Unblock-File; ${currentExample.cMain ? '.\\build.bat' : cmd}`,
+    zipHelp: `Saved <b>${esc(n)}.zip</b> with <code>${esc(n)}.h</code>, ${libs.map(([f]) => `<code>${esc(f)}</code>`).join(', ')}, <code>${esc(n)}.obj</code>${cm ? ', <code>main.c</code> and <code>build.bat</code>' : ''}. Unpack it and build the C program (needs clang or Visual Studio's cl):`
+      + `\u0000cd $HOME\\Downloads; Expand-Archive -Force ${n}.zip .; cd ${n}; Get-ChildItem | Unblock-File; ${cm ? '.\\build.bat' : cmd}`,
   };
 }
 
 function bundle(b: Build): Bundle | null {
+  const cm = cMain();
   const out = outputBytes(b);
   if (!out) return null;
   if (b.platform === 'win') return windowsBundle(b, out);
   if (b.mode === 'exe') {
-    const name = currentExample.id.replace(/[^\w-]/g, '_') || 'program';
+    const name = progName();
     return {
       zipName: name + '.zip',
       entries: [{ name, data: out, executable: true }],
@@ -800,24 +883,24 @@ function bundle(b: Build): Bundle | null {
   const n = libName();
   const libFile = b.mode === 'static' ? `lib${n}.a` : `lib${n}.dylib`;
   const build = buildCommands(b.mode);
-  const script = `#!/bin/sh\n# build the example program against ${libFile}\nset -e\n${currentExample.cMain ? build : `# write main.c with #include "${n}.h", then:\n# ${build}`}\n`;
+  const script = `#!/bin/sh\n# build the example program against ${libFile}\nset -e\n${cm ? build : `# write main.c with #include "${n}.h", then:\n# ${build}`}\n`;
   const entries: ZipEntry[] = [
     { name: `${n}/${n}.h`, data: b.header ?? '' },
     { name: `${n}/${libFile}`, data: out },
-    ...(currentExample.cMain ? [{ name: `${n}/main.c`, data: currentExample.cMain }] : []),
+    ...(cm ? [{ name: `${n}/main.c`, data: cm }] : []),
     { name: `${n}/build.sh`, data: script, executable: true },
   ];
   const shell = `mkdir -p ${n} && cd ${n}\n`
     + `base64 --decode > ${libFile} <<'HLA64'\n${b64(out)}HLA64\n`
     + heredoc(`${n}.h`, b.header ?? '')
-    + (currentExample.cMain ? heredoc('main.c', currentExample.cMain) + build + '\n'
+    + (cm ? heredoc('main.c', cm) + build + '\n'
       : `echo "Wrote ${n}.h and ${libFile} into $(pwd). Write main.c with #include \\"${n}.h\\" and run: ${build}"\n`);
   return {
     zipName: `${n}.zip`,
     entries,
     single: null,
     shell,
-    zipHelp: `Saved <b>${esc(n)}.zip</b> with <code>${esc(n)}.h</code>, <code>${esc(libFile)}</code>${currentExample.cMain ? ', <code>main.c</code>' : ''} and <code>build.sh</code>. Unpack it and build the C program:`
+    zipHelp: `Saved <b>${esc(n)}.zip</b> with <code>${esc(n)}.h</code>, <code>${esc(libFile)}</code>${cm ? ', <code>main.c</code>' : ''} and <code>build.sh</code>. Unpack it and build the C program:`
       + `\u0000cd ~/Downloads && unzip -o ${n}.zip && cd ${n} && xattr -cr . && sh build.sh`,
   };
 }
@@ -837,7 +920,7 @@ $('download').addEventListener('click', () => {
     const name = bu.single.name;
     save(name, bu.single.data as Uint8Array);
     if (current.platform === 'win') {
-      showSheet(`Saved <b>${esc(name)}</b> (${fmtB((bu.single.data as Uint8Array).length)}, x64 PE, not signed). Downloads carry the “Mark of the Web”: SmartScreen may say “Windows protected your PC” (More info → Run anyway). Or unblock it and start it from PowerShell:`
+      showSheet(`Saved <b>${esc(name)}</b> (${fmtB((bu.single.data as Uint8Array).length)}, x64 PE, not signed). Downloads carry the “Mark of the Web”: started from Explorer, SmartScreen may say “Windows protected your PC” (More info → Run anyway). From PowerShell it starts as is; <code>Unblock-File</code> removes the mark for good:`
         + `\u0000cd $HOME\\Downloads; Unblock-File .\\${name}; .\\${name}`);
     } else {
       showSheet(`Saved <b>${esc(name)}</b> (${fmtB((bu.single.data as Uint8Array).length)}, arm64 Mach-O, ad-hoc signed). Browsers drop the executable bit and mark downloads as quarantined, so start it from Terminal:`
@@ -850,6 +933,7 @@ $('download').addEventListener('click', () => {
 });
 
 $('copycmd').addEventListener('click', () => {
+  const cm = cMain();
   if (!current) return;
   const bu = bundle(current);
   if (!bu) return;
@@ -859,7 +943,7 @@ $('copycmd').addEventListener('click', () => {
   const done = (ok: boolean) => {
     const what = current!.mode === 'exe'
       ? 'writes the executable into the current directory and runs it'
-      : `creates a folder <b>${esc(libName())}</b> with the header and the library${currentExample.cMain ? ', then compiles main.c against it with clang and runs it' : ''}`;
+      : `creates a folder <b>${esc(libName())}</b> with the header and the library${cm ? ', then builds main.c against it with clang or MSVC cl (build.bat finds either) and runs it' : ''}`;
     showSheet(ok
       ? win
         ? `Copied a ${fmtB(bu.shell.length)} PowerShell command to the clipboard. Paste it into a PowerShell window: it ${what}. Nothing is downloaded, so the files get no Mark of the Web.\u0000${bu.shell.split('\n')[0]} …`
@@ -891,18 +975,406 @@ zipBtn.addEventListener('click', () => {
   showSheet(bu.zipHelp);
 });
 $('sheet').querySelector('.cmd')!.appendChild(zipBtn);
+// ---------------------------------------------------------------------------
+// projects: files on the left, kept in IndexedDB; examples are templates
+// ---------------------------------------------------------------------------
+const NEW_MAIN = `// main.hla — a new project. Add files on the left (+) and include them:
+//   include "util.hla"
+extern printf(fmt, ...)
 
-// ---------------------------------------------------------------------------
-// examples & startup
-// ---------------------------------------------------------------------------
-function fillExamples(): void {
-  exampleSel.textContent = '';
-  for (const ex of examples()) {
-    const o = document.createElement('option');
-    o.value = ex.id;
-    o.textContent = ex.title;
-    exampleSel.appendChild(o);
+fn main() {
+    printf("Hello from HLA64!\\n")
+}
+`;
+
+let userProjects: Project[] = [];            // this platform's projects (not examples)
+let editedExamples = new Set<string>();      // examples with a stored, changed copy
+
+function exampleProject(ex: Example, p: Platform = platform): Project {
+  const main = `${ex.id}.hla`;
+  const files = [{ name: main, text: ex.src }];
+  if (ex.cMain) files.push({ name: 'main.c', text: ex.cMain });
+  return { id: `ex-${p}-${ex.id}`, name: ex.title, platform: p, mode: ex.mode ?? 'exe', main, files, open: main, example: ex.id, updated: 0 };
+}
+
+/** an example project that equals its template is not stored */
+function sameAsTemplate(p: Project): boolean {
+  const ex = PLATFORMS[p.platform].examples.find((e) => e.id === p.example);
+  if (!ex) return false;
+  const t = exampleProject(ex, p.platform);
+  return t.mode === p.mode && t.main === p.main && t.files.length === p.files.length
+    && t.files.every((f, i) => p.files[i].name === f.name && p.files[i].text === f.text);
+}
+
+let saveTimer = 0;
+function persist(): void {
+  const p = project;
+  clearTimeout(saveTimer);
+  saveTimer = window.setTimeout(async () => {
+    if (p.example && sameAsTemplate(p)) { await deleteProject(p.id); editedExamples.delete(p.example); }
+    else { await saveProject(p); if (p.example) editedExamples.add(p.example); }
+    renderProjects();
+    renderExamples();
+    savedNote();
+  }, 300);
+}
+
+let runNote = '';   // what the last run wrote, shown until the next edit
+function savedNote(): void {
+  $('saved').textContent = runNote ? runNote : !persistent ? 'not saved: browser storage is unavailable'
+    : project.example ? (editedExamples.has(project.example) ? 'edited · saved in this browser' : '') : 'saved in this browser';
+  $('storage-note').textContent = persistent ? '' : 'Browser storage is unavailable here: projects last until the page is closed.';
+}
+
+async function refreshLists(): Promise<void> {
+  const all = await listProjects(platform);
+  userProjects = all.filter((p) => !p.example);
+  editedExamples = new Set(all.filter((p) => p.example).map((p) => p.example!));
+  renderFiles();
+  renderProjects();
+  renderExamples();
+}
+
+// ---------------------------------------------------------------- list rows
+type Action = { icon: string; title: string; run: (li: HTMLLIElement) => void; danger?: boolean };
+
+function row(label: string, o: { current?: boolean; tag?: string; dot?: boolean; err?: boolean; cls?: string; title?: string; open?: () => void; actions?: Action[] }): HTMLLIElement {
+  const li = document.createElement('li');
+  if (o.cls) li.className = o.cls;
+  if (o.err) li.classList.add('err');
+  if (o.current) li.setAttribute('aria-current', 'true');
+  li.title = o.title ?? label;
+  if (o.open) { li.tabIndex = 0; li.addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.target === li) o.open!(); }); }
+  const nm = document.createElement('span');
+  nm.className = 'nm';
+  nm.textContent = label;
+  li.appendChild(nm);
+  if (o.dot) { const d = document.createElement('span'); d.className = 'dot'; d.title = 'changed'; li.appendChild(d); }
+  if (o.tag) { const t = document.createElement('span'); t.className = 'tag'; t.textContent = o.tag; li.appendChild(t); }
+  if (o.actions?.length) {
+    const box = document.createElement('span');
+    box.className = 'row-act';
+    for (const a of o.actions) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'icon-btn' + (a.danger ? ' danger' : '');
+      b.textContent = a.icon;
+      b.title = a.title;
+      b.setAttribute('aria-label', a.title);
+      b.addEventListener('click', (e) => { e.stopPropagation(); a.run(li); });
+      box.appendChild(b);
+    }
+    li.appendChild(box);
   }
+  if (o.open) li.addEventListener('click', () => o.open!());
+  return li;
+}
+
+/** a delete button that asks once more in place: the first click turns the row into "Delete?" */
+const confirmDelete = (what: string, f: () => void): Action => ({
+  icon: '✕', title: `Delete ${what}`, danger: true, run: (li) => {
+    if (li.dataset.confirm) { f(); return; }
+    li.dataset.confirm = '1';
+    const nm = li.querySelector('.nm')!;
+    const old = nm.textContent;
+    nm.textContent = `Delete ${what}? ✕ again`;
+    setTimeout(() => { if (li.isConnected) { delete li.dataset.confirm; nm.textContent = old; } }, 3000);
+  },
+});
+
+/** an input in place of a row: Enter or leaving the field commits, Esc cancels */
+function inlineInput(li: HTMLLIElement, initial: string, commit: (v: string) => string | null): void {
+  const input = document.createElement('input');
+  input.value = initial;
+  input.spellcheck = false;
+  li.textContent = '';
+  li.appendChild(input);
+  input.focus();
+  const dot = initial.lastIndexOf('.');
+  input.setSelectionRange(0, dot > 0 ? dot : initial.length);
+  let done = false;
+  const finish = (ok: boolean) => {
+    if (done) return;
+    if (ok && input.value.trim() && input.value.trim() !== initial) {
+      const problem = commit(input.value.trim());
+      if (problem) { input.setCustomValidity(problem); input.reportValidity(); input.title = problem; return; }
+    }
+    done = true;
+    renderFiles();
+    renderProjects();
+  };
+  input.addEventListener('input', () => input.setCustomValidity(''));
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+    if (e.key === 'Escape') { e.preventDefault(); done = true; renderFiles(); renderProjects(); }
+  });
+  input.addEventListener('blur', () => finish(true));
+  li.addEventListener('click', (e) => e.stopPropagation());
+}
+
+// ---------------------------------------------------------------- files
+const isHla = (n: string) => /\.hla$/i.test(n);
+const badName = (n: string): string | null =>
+  !/^[\w.-]+(\/[\w.-]+)*$/.test(n) || n.split('/').some((p) => p === '..' || p === '.') ? 'letters, digits, . - _ and / only'
+    : project.files.some((f) => f.name === n) ? `${n} already exists` : null;
+
+function renderFiles(): void {
+  const ul = $('file-list');
+  ul.textContent = '';
+  $('proj-title').textContent = 'Files';
+  $('proj-title').title = project.name;
+  const errFile = current?.error?.stage === 'src' ? current.error.file : undefined;
+  for (const f of project.files) {
+    const actions: Action[] = [];
+    if (isHla(f.name) && f.name !== project.main) actions.push({ icon: '▶', title: 'Build from this file (make it the main file)', run: () => setMain(f.name) });
+    actions.push({ icon: '✎', title: 'Rename', run: (li) => inlineInput(li, f.name, (v) => renameFile(f.name, v)) });
+    if (!(isHla(f.name) && project.files.filter((x) => isHla(x.name)).length === 1)) actions.push(confirmDelete(f.name, () => deleteFile(f.name)));
+    ul.appendChild(row(f.name, {
+      current: f.name === project.open, tag: f.name === project.main ? 'main' : undefined, err: f.name === errFile,
+      title: f.name === project.main ? `${f.name}: the build starts here` : f.name, open: () => openFile(f.name), actions,
+    }));
+  }
+}
+
+function openFile(name: string): void {
+  const f = project.files.find((x) => x.name === name);
+  if (!f) return;
+  project.open = name;
+  src.value = f.text;
+  src.scrollTop = 0;
+  src.scrollLeft = 0;
+  $('filename').textContent = name;
+  $('filename').title = `${project.name} / ${name}`;
+  errLine = current?.error?.stage === 'src' && current.error.file === name ? current.error.line : 0;
+  renderEditor();
+  renderFiles();
+  if (current) renderDiag(current);
+  updateCursor();
+  persist();
+}
+
+function addFile(name: string, text: string): void {
+  const f = project.files.find((x) => x.name === name);
+  if (f) f.text = text; else project.files.push({ name, text });
+}
+
+function renameFile(from: string, to: string): string | null {
+  if (!/\.\w+$/.test(to)) to += '.hla';
+  const problem = badName(to);
+  if (problem) return problem;
+  if (isHla(from) && !isHla(to) && project.main === from) return 'the main file must stay a .hla file';
+  project.files.find((x) => x.name === from)!.name = to;
+  // includes of the renamed file follow it (paths are relative to the including file)
+  for (const f of project.files) {
+    const dir = f.name.includes('/') ? f.name.slice(0, f.name.lastIndexOf('/') + 1) : '';
+    const rel = (target: string) => {
+      const up = dir.split('/').filter(Boolean).length;
+      return target.startsWith(dir) ? target.slice(dir.length) : '../'.repeat(up) + target;
+    };
+    f.text = f.text.replace(/^(\s*include\s+")([^"]*)(")/gm, (m, a, p, b) => (normalizePath(dir + p) === from ? a + rel(to) + b : m));
+    if (f.name === project.open) src.value = f.text;
+  }
+  if (project.main === from) project.main = to;
+  if (project.open === from) { project.open = to; $('filename').textContent = to; }
+  persist();
+  rebuild();
+  return null;
+}
+
+function deleteFile(name: string): void {
+  project.files = project.files.filter((x) => x.name !== name);
+  if (project.main === name) project.main = project.files.find((x) => isHla(x.name))?.name ?? project.files[0].name;
+  if (project.open === name) openFile(project.main);
+  persist();
+  rebuild();
+}
+
+function setMain(name: string): void {
+  project.main = name;
+  persist();
+  rebuild();
+}
+
+$('file-new').addEventListener('click', () => {
+  const li = document.createElement('li');
+  $('file-list').appendChild(li);
+  inlineInput(li, freeName(project, 'util.hla'), (v) => {
+    if (!/\.\w+$/.test(v)) v += '.hla';
+    const problem = badName(v);
+    if (problem) return problem;
+    project.files.push({ name: v, text: isHla(v) ? `// ${v} — include it from ${project.main}: include "${v}"\n` : '' });
+    persist();
+    setTimeout(() => openFile(v));
+    return null;
+  });
+});
+
+// files from disk: the button, or dropped on the sidebar
+async function addFromDisk(list: FileList | null): Promise<void> {
+  if (!list?.length) return;
+  let last = '';
+  for (const file of Array.from(list)) {
+    const name = file.name.replace(/[^\w.-]/g, '_');
+    addFile(name, (await file.text()).replace(/\r\n/g, '\n'));
+    last = name;
+  }
+  persist();
+  openFile(last);
+  rebuild();
+}
+const fileInput = $<HTMLInputElement>('file-input');
+$('file-upload').addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', () => { void addFromDisk(fileInput.files).then(() => (fileInput.value = '')); });
+const side = $('side');
+side.addEventListener('dragover', (e) => { if (e.dataTransfer?.types.includes('Files')) { e.preventDefault(); side.classList.add('drop'); } });
+side.addEventListener('dragleave', () => side.classList.remove('drop'));
+side.addEventListener('drop', (e) => { e.preventDefault(); side.classList.remove('drop'); void addFromDisk(e.dataTransfer?.files ?? null); });
+
+diag.addEventListener('click', (e) => {
+  const b = (e.target as HTMLElement).closest<HTMLElement>('[data-open]');
+  if (b) openFile(b.dataset.open!);
+});
+
+// ---------------------------------------------------------------- projects and examples
+function renderProjects(): void {
+  const ul = $('proj-list');
+  ul.textContent = '';
+  if (!userProjects.length) {
+    const li = document.createElement('li');
+    li.innerHTML = '<span class="nm" style="color:var(--muted);font-family:var(--ui)">no projects yet: + creates one</span>';
+    li.style.cursor = 'default';
+    ul.appendChild(li);
+  }
+  for (const p of userProjects) {
+    ul.appendChild(row(p.name, {
+      current: p.id === project.id, open: () => void openStored(p.id).then(autorun),
+      actions: [
+        { icon: '✎', title: 'Rename project', run: (li) => inlineInput(li, p.name, (v) => renameProject(p, v)) },
+        confirmDelete(`project ${p.name}`, () => void removeProject(p)),
+      ],
+    }));
+  }
+}
+
+function renderExamples(): void {
+  const ul = $('ex-list');
+  ul.textContent = '';
+  for (const ex of examples()) {
+    const edited = editedExamples.has(ex.id);
+    ul.appendChild(row(ex.title, {
+      cls: 'ex', current: project.example === ex.id, dot: edited, title: edited ? `${ex.title} (changed, saved in this browser)` : ex.title,
+      open: () => void openStored(`ex-${platform}-${ex.id}`).then(autorun),
+      actions: edited ? [{ icon: '↺', title: 'Reset to the original', run: () => void resetExample(ex) }] : [],
+    })).dataset.example = ex.id;
+  }
+}
+
+const projectName = (wanted: string) => {
+  let n = wanted;
+  for (let i = 2; userProjects.some((p) => p.name === n); i++) n = `${wanted} ${i}`;
+  return n;
+};
+
+function renameProject(p: Project, name: string): string | null {
+  if (userProjects.some((x) => x !== p && x.name === name)) return `${name} already exists`;
+  p.name = name;
+  if (p.id === project.id) project.name = name;
+  void saveProject(p.id === project.id ? project : p).then(refreshLists);
+  return null;
+}
+
+async function removeProject(p: Project): Promise<void> {
+  await deleteProject(p.id);
+  await refreshLists();
+  if (p.id === project.id) { await openStored(null); autorun(); }
+}
+
+async function resetExample(ex: Example): Promise<void> {
+  await deleteProject(`ex-${platform}-${ex.id}`);
+  editedExamples.delete(ex.id);
+  if (project.example === ex.id) { openProject(exampleProject(ex)); autorun(); }
+  renderExamples();
+}
+
+async function createProject(name: string, files: Project['files'], from?: Project): Promise<void> {
+  const p: Project = {
+    id: newId(), name: projectName(name), platform, mode: from?.mode ?? 'exe', main: from?.main ?? files[0].name,
+    files, open: from?.open ?? files[0].name, updated: 0,
+  };
+  await saveProject(p);
+  await refreshLists();
+  openProject(p);
+  autorun();
+}
+
+$('proj-new').addEventListener('click', () => {
+  const li = document.createElement('li');
+  $('proj-list').prepend(li);
+  inlineInput(li, projectName('my-project'), (v) => {
+    void createProject(v, [{ name: 'main.hla', text: NEW_MAIN }]);
+    return null;
+  });
+});
+$('proj-dup').addEventListener('click', () => {
+  void createProject(`${project.example ?? project.name} copy`, project.files.map((f) => ({ ...f })), project);
+});
+
+$('proj-zip').addEventListener('click', () => {
+  const dir = progName();
+  saveFile(`${dir}.zip`, zipFiles(project.files.map((f) => ({ name: `${dir}/${f.name}`, data: f.text }))));
+});
+
+function openProject(p: Project, remember = true): void {
+  project = p;
+  runNote = '';
+  if (remember) store.set(key('project'), p.id);
+  mode = p.mode;
+  ($<HTMLInputElement>(`mode-${mode}`)).checked = true;
+  if (!p.files.some((f) => f.name === p.open)) p.open = p.main;
+  const f = p.files.find((x) => x.name === p.open)!;
+  src.value = f.text;
+  src.scrollTop = 0;
+  $('filename').textContent = p.open;
+  $('filename').title = `${p.name} / ${p.open}`;
+  selectedRow = -1;
+  setStage('run', '', '—', '');
+  $('console').textContent = '';
+  runStatus(`<span>Press Run to execute the program in the built-in ${PLATFORMS[platform].emulator}.</span>`);
+  rebuild();
+  renderProjects();
+  renderExamples();
+  savedNote();
+}
+
+/** open a stored project (or an example's template); null or unknown: the first example */
+async function openStored(id: string | null): Promise<void> {
+  const stored = id ? await getProject(id) : null;
+  if (stored && stored.platform === platform) { openProject(stored); return; }
+  const exId = id?.startsWith(`ex-${platform}-`) ? id.slice(`ex-${platform}-`.length) : null;
+  openProject(exampleProject(examples().find((e) => e.id === exId) ?? examples()[0]));
+}
+
+function autorun(): void {
+  if (mode === 'exe') run(); else showTab('header');
+}
+
+/** edits of examples kept in localStorage by earlier versions become example projects (once) */
+async function migrate(): Promise<void> {
+  if (store.get('projects-v1')) return;
+  for (const p of ['mac', 'win'] as Platform[]) {
+    for (const ex of PLATFORMS[p].examples) {
+      const k = (p === 'mac' ? '' : 'win:');
+      const text = store.get(k + 'src:' + ex.id), m = store.get(k + 'mode:' + ex.id) as Mode | null;
+      if (text === null && m === null) continue;
+      const proj = exampleProject(ex, p);
+      if (text !== null) proj.files[0].text = text;
+      if (m) proj.mode = m;
+      if (!sameAsTemplate(proj)) await saveProject(proj);
+    }
+    const last = store.get((p === 'mac' ? '' : 'win:') + 'example');
+    if (last) store.set((p === 'mac' ? '' : 'win:') + 'project', `ex-${p}-${last}`);
+  }
+  store.set('projects-v1', '1');
 }
 
 const copyLabel = () => (platform === 'win' ? 'Copy PowerShell command' : 'Copy Terminal command');
@@ -922,42 +1394,28 @@ function setPlatform(p: Platform): void {
   $('copycmd').textContent = copyLabel();
   $('copycmd').title = p === 'win' ? 'Copies a PowerShell command that recreates the files (no download, no Mark of the Web)' : 'Copies a shell command that recreates and runs the executable';
   $('sheet').hidden = true;
-  fillExamples();
 }
-
-function loadExample(id: string): void {
-  currentExample = examples().find((e) => e.id === id) ?? examples()[0];
-  exampleSel.value = currentExample.id;
-  const edited = store.get(key('src:' + currentExample.id));
-  src.value = edited ?? currentExample.src;
-  $('saved').textContent = edited ? 'edited · saved in this browser' : '';
-  $('filename').textContent = `${currentExample.id}.hla`;
-  store.set(key('example'), currentExample.id);
-  const savedMode = store.get(key('mode:' + currentExample.id)) as Mode | null;
-  mode = savedMode ?? currentExample.mode ?? 'exe';
-  ($<HTMLInputElement>(`mode-${mode}`)).checked = true;
-  src.scrollTop = 0;
-  selectedRow = -1;
-  setStage('run', '', '—', '');
-  $('console').textContent = '';
-  runStatus(`<span>Press Run to execute the program in the built-in ${PLATFORMS[platform].emulator}.</span>`);
-  rebuild();
-}
-exampleSel.addEventListener('change', () => {
-  loadExample(exampleSel.value);
-  if (mode === 'exe') run(); else showTab('header');
-});
 
 // hosted artifact viewer: plain downloads are blocked, files go through the `downloads` capability (.zip)
+type Downloads = { save(r: { filename: string; data: Uint8Array }): Promise<unknown> };
+let artifactDownloads: Downloads | null = null;
+/** a file for the user: a browser download, or the artifact's downloads capability */
+function saveFile(name: string, data: Uint8Array): void {
+  if (!__ARTIFACT__) { save(name, data); return; }
+  artifactDownloads?.save({ filename: name, data }).catch(() => { /* declined */ });
+}
 if (__ARTIFACT__) {
   const dl = $<HTMLButtonElement>('download');
   dl.hidden = true;
   zipBtn.hidden = true;
+  $('proj-zip').hidden = true;
   dl.textContent = 'Download .zip';
-  const w = window as unknown as { claude?: { use(n: string): Promise<{ save(r: { filename: string; data: Uint8Array }): Promise<unknown> } | null> } };
+  const w = window as unknown as { claude?: { use(n: string): Promise<Downloads | null> } };
   w.claude?.use('downloads').then((downloads) => {
     if (!downloads) return;
+    artifactDownloads = downloads;
     dl.hidden = false;
+    $('proj-zip').hidden = false;
     dl.addEventListener('click', (e) => {
       e.stopImmediatePropagation();
       if (!current) return;
@@ -972,12 +1430,12 @@ for (const p of ['mac', 'win'] as Platform[]) {
   $(`plat-${p}`).addEventListener('change', () => {
     if (worker) { worker.terminate(); worker = null; }
     setPlatform(p);
-    loadExample(store.get(key('example')) ?? examples()[0].id);
-    if (mode === 'exe') run(); else showTab('header');
+    void refreshLists().then(() => openStored(store.get(key('project')))).then(autorun);
   });
 }
 
 setPlatform(platform);
-loadExample(store.get(key('example')) ?? examples()[0].id);
 showTab(store.get('tab') ?? 'run');
-if (mode === 'exe') run();
+const lastProject = store.get(key('project'));
+openProject(project, false);               // the first example right away; the stored project follows
+void migrate().then(refreshLists).then(() => openStored(store.get(key('project')) ?? lastProject)).then(autorun);

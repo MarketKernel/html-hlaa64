@@ -137,8 +137,52 @@ kbd { font: 11px var(--code); opacity: 0.75; }
 
 /* ------------------------------------------------------------------ work area */
 .work {
-  flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px;
+  flex: 1; min-height: 0; display: grid; grid-template-columns: 210px minmax(0, 1fr) minmax(0, 1fr); gap: 12px;
   padding-bottom: 12px;
+}
+
+/* project sidebar: files, projects, examples */
+.side-body { flex: 1; min-height: 0; overflow: auto; padding-bottom: 6px; }
+.side-sec {
+  display: flex; align-items: center; gap: 2px; padding: 10px 6px 4px 12px; font-size: 11px; font-weight: 600;
+  letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted);
+}
+.side-sec:first-child { padding-top: 8px; }
+.side-sec .spacer { margin-left: auto; }
+.side-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.icon-btn {
+  border: 1px solid transparent; background: transparent; border-radius: 4px; width: 24px; height: 22px; padding: 0;
+  cursor: pointer; color: var(--muted); font: 600 14px/1 var(--ui); display: inline-grid; place-items: center; flex: none;
+}
+.icon-btn:hover { color: var(--ink); border-color: var(--line-strong); background: var(--panel); }
+.tree { list-style: none; margin: 0; padding: 0 6px; }
+.tree li {
+  display: flex; align-items: center; gap: 4px; min-height: 26px; padding: 0 2px 0 8px; border-radius: 4px;
+  cursor: pointer; font: 12.5px var(--code); color: var(--ink);
+}
+.tree li:hover { background: var(--panel-2); }
+.tree li[aria-current="true"] { background: var(--accent-soft); }
+.tree li .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 4px 0; }
+.tree li .tag { font: 600 10px var(--ui); letter-spacing: 0.04em; color: var(--accent); text-transform: uppercase; flex: none; }
+.tree li .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex: none; }
+.tree li.err .nm { color: var(--err); font-weight: 600; }
+.tree li .row-act { display: none; gap: 0; flex: none; }
+.tree li:hover .row-act, .tree li[aria-current="true"] .row-act, .tree li:focus-within .row-act { display: inline-flex; }
+.tree li .row-act .icon-btn { width: 20px; height: 20px; font-size: 12px; }
+.tree li .row-act .icon-btn.danger:hover { color: var(--err); border-color: var(--err); }
+.tree li.ex .nm { font-family: var(--ui); }
+.tree input {
+  flex: 1; min-width: 0; font: 12.5px var(--code); padding: 3px 6px; border: 1px solid var(--accent);
+  border-radius: 4px; background: var(--panel); color: var(--ink); outline: none;
+}
+.side-foot { flex: none; border-top: 1px solid var(--line); padding: 8px; display: grid; gap: 6px; background: var(--panel-2); }
+.side-foot .btn { justify-content: center; }
+.btn.small { padding: 5px 10px; font-size: 12.5px; }
+.side-note { font-size: 11.5px; color: var(--muted); }
+.side.drop { outline: 2px dashed var(--accent); outline-offset: -4px; }
+.diag button.link { border: 0; background: none; color: var(--accent); cursor: pointer; padding: 0; font: inherit; text-decoration: underline; }
+@media (max-width: 1180px) and (min-width: 861px) {
+  .work { grid-template-columns: 180px minmax(0, 1fr) minmax(0, 1fr); }
 }
 .pane {
   background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
@@ -273,7 +317,8 @@ td.a { color: var(--addr); }
 .sheet .close { justify-self: start; }
 
 @media (max-width: 860px) {
-  .work { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(380px, 55vh) minmax(380px, 1fr); }
+  .work { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(380px, 55vh) minmax(380px, 1fr); }
+  .side { max-height: 42vh; }
   body { height: auto; min-height: 100%; }
 }
 @media (prefers-reduced-motion: no-preference) {
@@ -292,7 +337,6 @@ td.a { color: var(--addr); }
 </div>
 <header class="bar">
   <div class="brand"><span class="mark">HLA<b>64</b></span><span class="sub" id="brand-sub">AArch64 · macOS · offline workbench</span></div>
-  <label class="field" for="example">Example <select id="example"></select></label>
   <div class="seg" role="radiogroup" aria-label="Build as">
     <span class="seg-label">Build as</span>
     <label><input type="radio" name="mode" id="mode-exe" value="exe" checked><span>Program</span></label>
@@ -327,6 +371,27 @@ td.a { color: var(--addr); }
 </section>
 
 <main class="work">
+  <aside class="pane side" id="side" aria-label="Project files">
+    <div class="side-body" id="side-body">
+      <div class="side-sec"><span class="side-title" id="proj-title">Files</span><span class="spacer"></span>
+        <button class="icon-btn" id="file-new" type="button" title="New file" aria-label="New file">+</button>
+        <button class="icon-btn" id="file-upload" type="button" title="Add files from disk (or drop them here)" aria-label="Add files from disk">⇪</button>
+      </div>
+      <ul class="tree" id="file-list"></ul>
+      <div class="side-sec"><span class="side-title">Projects</span><span class="spacer"></span>
+        <button class="icon-btn" id="proj-dup" type="button" title="Copy the open project into a new one" aria-label="Duplicate project">⧉</button>
+        <button class="icon-btn" id="proj-new" type="button" title="New project" aria-label="New project">+</button>
+      </div>
+      <ul class="tree" id="proj-list"></ul>
+      <div class="side-sec"><span class="side-title">Examples</span></div>
+      <ul class="tree" id="ex-list"></ul>
+      <input type="file" id="file-input" multiple hidden>
+    </div>
+    <div class="side-foot">
+      <button class="btn small" id="proj-zip" type="button">Download project .zip</button>
+      <span class="side-note" id="storage-note"></span>
+    </div>
+  </aside>
   <section class="pane">
     <div class="pane-head"><span class="file" id="filename">program.hla</span><span id="cursor">Ln 1, Col 1</span><span class="spacer" id="saved"></span></div>
     <div class="editor">

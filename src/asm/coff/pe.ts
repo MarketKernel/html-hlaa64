@@ -1,9 +1,10 @@
 // PE32+ linker for x86-64 Windows: turns one assembled program (XAssembly) into an
-// .exe or a .dll. Imports are resolved by name against msvcrt.dll / kernel32.dll
+// .exe or a .dll. Imports are resolved by name against msvcrt.dll / kernel32.dll / user32.dll
 // (or a caller-supplied map), with an import address table, `jmp [IAT]` stubs for
 // direct calls, base relocations for ASLR and the exception directory from .pdata.
 import { AsmError } from '../parse.ts';
 import type { XAssembly, XSection } from '../x64/assembler.ts';
+import { SYSTEM_DLLS, systemExports } from './winapi.ts';
 
 export interface PeOptions {
   kind?: 'exe' | 'dll';
@@ -24,14 +25,6 @@ export interface PeResult {
   listing: { addr: number; bytes: number[]; line: number; sect: string }[];
 }
 
-// functions that live in kernel32.dll; everything else is taken from msvcrt.dll
-const KERNEL32 = new Set([
-  'ExitProcess', 'GetStdHandle', 'WriteFile', 'ReadFile', 'WriteConsoleA', 'WriteConsoleW', 'Sleep', 'GetCommandLineA',
-  'GetCommandLineW', 'GetTickCount', 'GetTickCount64', 'QueryPerformanceCounter', 'QueryPerformanceFrequency', 'VirtualAlloc',
-  'VirtualFree', 'GetProcessHeap', 'HeapAlloc', 'HeapFree', 'GetLastError', 'SetLastError', 'CreateFileA', 'CloseHandle',
-  'GetModuleHandleA', 'GetProcAddress', 'LoadLibraryA', 'FreeLibrary', 'SetConsoleOutputCP', 'GetConsoleMode', 'SetConsoleMode',
-]);
-
 const FILE_ALIGN = 0x200, SECT_ALIGN = 0x1000;
 const align = (v: number, a: number) => Math.ceil(v / a) * a;
 
@@ -39,9 +32,9 @@ export function linkPE(asmb: XAssembly, opts: PeOptions = {}): PeResult {
   const dll = opts.kind === 'dll';
   const imageBase = dll ? 0x180000000 : 0x140000000;
   const syms = asmb.symbols;
-  const dllOf = (name: string) => {
+  const dllOf = (name: string): string | null => {
     for (const [d, list] of Object.entries(opts.imports ?? {})) if (list.includes(name)) return d.toLowerCase();
-    return KERNEL32.has(name) ? 'kernel32.dll' : 'msvcrt.dll';
+    return SYSTEM_DLLS.find((d) => systemExports(d).has(name)) ?? null;
   };
 
   // ---------------------------------------------------------------- imports
@@ -50,19 +43,19 @@ export function linkPE(asmb: XAssembly, opts: PeOptions = {}): PeResult {
   for (const s of asmb.sections) {
     for (const f of s.fixups) {
       if (syms.has(f.sym)) continue;
-      if (f.sym.startsWith('__imp_')) {
-        const n = f.sym.slice(6);
-        if (!importNames.includes(n)) importNames.push(n);
-      } else {
-        if (f.kind !== 'rel' && f.kind !== 'abs') throw new AsmError(`undefined symbol '${f.sym}'`, f.line);
-        if (!importNames.includes(f.sym)) importNames.push(f.sym);
-        needStub.add(f.sym);
+      const n = f.sym.startsWith('__imp_') ? f.sym.slice(6) : f.sym;
+      if (n === f.sym && f.kind !== 'rel' && f.kind !== 'abs') throw new AsmError(`undefined symbol '${f.sym}'`, f.line);
+      if (!dllOf(n)) {
+        throw new AsmError(`undefined symbol '${n}': not defined here and not exported by ${[...Object.keys(opts.imports ?? {}), ...SYSTEM_DLLS].join(', ')}`
+          + (dll ? ' (a DLL cannot use functions of the program that loads it: link the static library instead)' : ''), f.line);
       }
+      if (!importNames.includes(n)) importNames.push(n);
+      if (n === f.sym) needStub.add(n);
     }
   }
   const byDll = new Map<string, string[]>();
   for (const n of importNames) {
-    const d = dllOf(n);
+    const d = dllOf(n)!;
     if (!byDll.has(d)) byDll.set(d, []);
     byDll.get(d)!.push(n);
   }
@@ -107,7 +100,7 @@ export function linkPE(asmb: XAssembly, opts: PeOptions = {}): PeResult {
   for (const d of dlls) for (const n of byDll.get(d)!) { hintOff.set(d + '!' + n, p); p += align(2 + n.length + 1, 2); }
   for (const d of dlls) { nameOff.set(d, p); p += d.length + 1; }
   if (dlls.length) idata.data = new Array(align(p, 8)).fill(0);
-  const iatSlot = (n: string) => { const d = dllOf(n); return iatOff.get(d)! + byDll.get(d)!.indexOf(n) * 8; };
+  const iatSlot = (n: string) => { const d = dllOf(n)!; return iatOff.get(d)! + byDll.get(d)!.indexOf(n) * 8; };
 
   // ---------------------------------------------------------------- export directory (dll)
   const exported = [...syms.values()].filter((x) => x.global).map((x) => x.name).sort();

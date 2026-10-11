@@ -2,28 +2,33 @@
 // HLA64 command line driver.
 //   node src/cli.ts compile prog.hla [-o prog.s]       translate to assembly
 //   node src/cli.ts build   prog.hla [-o prog] [--clang] translate + assemble + link
-//   node src/cli.ts run     prog.hla [--clang]          build into a temp dir and run
+//   node src/cli.ts run     prog.hla [--clang] [-- args] build into a temp dir and run
 //   node src/cli.ts asm     prog.s   [-o prog]          assemble+link an .s file with the built-in assembler
 //   node src/cli.ts obj     prog.hla [-o prog.o]        relocatable object file (link it with clang/ld)
 //   node src/cli.ts lib     name.hla [-o dir]           C library: name.h, name.o, libname.a, libname.dylib
-//   node src/cli.ts emu     prog.hla                    run in the built-in emulator
+//   node src/cli.ts emu     prog.hla [-- args]          run in the built-in emulator
 // --target arm64-macos (default on macOS/Linux) or --target x64-windows (default on Windows):
 //   x64-windows builds prog.exe / prog.obj, and lib gives name.h, name.obj, name_static.lib,
 //   name.dll and its import library name.lib; run uses the x64 emulator outside Windows.
-import { readFileSync, writeFileSync, chmodSync, mkdtempSync } from 'node:fs';
+import { readFileSync, writeFileSync, chmodSync, mkdtempSync, mkdirSync } from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { join, basename } from 'node:path';
+import { join, basename, dirname } from 'node:path';
 import { compile, compileLibrary } from './lang/codegen.ts';
 import { compileX64, compileLibraryX64 } from './lang/x64/codegen.ts';
 import { CompileError } from './lang/lexer.ts';
+import { combineSources, errorOrigin, type Combined } from './lang/include.ts';
 
 function usage(): never {
-  console.error('usage: hla <compile|build|run|asm|obj|lib|emu> <file> [-o out] [--target arm64-macos|x64-windows] [--clang] [--zip]');
+  console.error('usage: hla <compile|build|run|asm|obj|lib|emu> <file> [-o out] [--target arm64-macos|x64-windows] [--clang] [--zip] [-- program arguments]');
   process.exit(2);
 }
 
-const args = process.argv.slice(2);
+const argv = process.argv.slice(2);
+// everything after `--` goes to the program (run, emu)
+const dashes = argv.indexOf('--');
+const args = dashes >= 0 ? argv.slice(0, dashes) : argv;
+const progArgs = dashes >= 0 ? argv.slice(dashes + 1) : [];
 const cmd = args.shift() ?? usage();
 const valueOpts = ['-o', '--target'];
 const file = args.find((a, i) => !a.startsWith('-') && !valueOpts.includes(args[i - 1])) ?? usage();
@@ -36,17 +41,22 @@ const x64 = /^(x64|x86[-_]64|win|windows|amd64)/i.test(targetArg ?? '');
 if (!x64 && !/^(arm64|aarch64|mac)/i.test(targetArg ?? '')) { console.error(`unknown target '${targetArg}' (arm64-macos or x64-windows)`); process.exit(2); }
 
 function translate(path: string, lib = false): string {
-  const src = readFileSync(path, 'utf8');
+  // the main file and everything it includes (paths relative to the including file)
+  const dir = dirname(path), main = basename(path);
+  const shown = (f: string) => (dir === '.' ? f : join(dir, f));
+  let c: Combined | null = null;
   try {
-    const name = basename(path).replace(/\.hla$/, '');
-    const r = lib ? (x64 ? compileLibraryX64(src, name) : compileLibrary(src, name)) : x64 ? compileX64(src) : compile(src);
+    c = combineSources(main, (f) => { try { return readFileSync(join(dir, f), 'utf8'); } catch { return null; } });
+    const name = main.replace(/\.hla$/, '');
+    const r = lib ? (x64 ? compileLibraryX64(c.text, name) : compileLibrary(c.text, name)) : x64 ? compileX64(c.text) : compile(c.text);
     if (lib) libHeader = (r as unknown as { header: string }).header;
-    for (const w of r.warnings) console.error(`warning: ${w}`);
+    for (const w of r.warnings) console.error(`warning: ${c.files.length > 1 ? c.warning(w) : w}`);
     return r.asm;
   } catch (e) {
     if (e instanceof CompileError) {
-      console.error(`${path}:${e.line}:${e.col}: error: ${e.message}`);
-      const line = src.split('\n')[e.line - 1];
+      const o = errorOrigin(e, c, main);
+      console.error(`${shown(o.file)}:${o.line}:${e.col}: error: ${e.message}`);
+      const line = c?.lineText(o) ?? (e as { source?: string }).source;
       if (line !== undefined) console.error(`  ${line}\n  ${' '.repeat(Math.max(0, e.col - 1))}^`);
       process.exit(1);
     }
@@ -55,6 +65,12 @@ function translate(path: string, lib = false): string {
 }
 
 let libHeader = '';
+
+/** files of a program in the emulators: the disk, relative to the current directory (as when it runs natively) */
+const diskFiles = {
+  read: (p: string) => { try { return new Uint8Array(readFileSync(p)); } catch { return null; } },
+  write: (p: string, d: Uint8Array) => writeFileSync(p, d),
+};
 
 async function assembleOrExit(asm: string): Promise<import('./asm/assembler.ts').Assembly> {
   const { assemble, AsmError } = await import('./asm/index.ts');
@@ -117,9 +133,22 @@ async function windows(): Promise<void> {
   const exeFor = (f: string) => out ?? stem(f) + '.exe';
   const buildExe = async (asm: string, exe: string) => {
     if (useClang) {
-      writeFileSync(exe.replace(/\.exe$/, '') + '.s', asm);
-      try { execFileSync('clang', ['--target=x86_64-pc-windows-msvc', exe.replace(/\.exe$/, '') + '.s', '-o', exe], { stdio: 'inherit' }); }
-      catch { console.error('clang failed'); process.exit(1); }
+      // clang assembles, lld-link links: the same entry (hla_start) and DLL imports as the built-in linker,
+      // through import libraries written by writeImportLibrary, so neither Visual Studio nor its C runtime is needed
+      const W = await import('./win-toolchain.ts');
+      const clang = W.onPath('clang') ?? W.llvmInstalled('clang');
+      if (!clang) { console.error('clang not found: install LLVM (winget install LLVM.LLVM)'); process.exit(1); }
+      const s = exe.replace(/\.exe$/, '') + '.s';
+      writeFileSync(s, asm);
+      const tmp = mkdtempSync(join(tmpdir(), 'hla-clang-'));
+      const libs = guard(asm, () => X.linkPE(X.assembleX(asm))).imports.map(({ dll, names }) => {
+        const lib = join(tmp, dll.replace(/\.dll$/i, '.lib'));
+        writeFileSync(lib, X.writeImportLibrary(dll, names));
+        return lib;
+      });
+      const r = spawnSync(clang, ['--target=x86_64-pc-windows-msvc', '-fuse-ld=lld', '-nostdlib',
+        '-Wl,/entry:hla_start,/subsystem:console', s, ...libs, '-o', exe], { stdio: 'inherit' });
+      if (r.status !== 0) { console.error('clang failed'); process.exit(1); }
       return;
     }
     const bin = guard(asm, () => X.assembleExecutableX(asm));
@@ -132,7 +161,7 @@ async function windows(): Promise<void> {
   };
   const emulate = async (bin: Uint8Array) => {
     const { runPE } = await import('./emu/x64/pe-loader.ts');
-    const r = runPE(bin, { onOutput: (t, s) => (s === 1 ? process.stdout : process.stderr).write(t) });
+    const r = runPE(bin, { args: progArgs, files: diskFiles, onOutput: (t, s) => (s === 1 ? process.stdout : process.stderr).write(t) });
     if (r.error) console.error(`\nemulator: ${r.error}`);
     console.error(`[x64 emulator: ${r.steps} instructions, exit ${r.exitCode}]`);
     process.exit(r.exitCode ?? 1);
@@ -147,7 +176,7 @@ async function windows(): Promise<void> {
       const dir = mkdtempSync(join(tmpdir(), 'hla-'));
       const exe = join(dir, basename(stem(file)) + '.exe');
       await buildExe(asm, exe);
-      const r = spawnSync(exe, args.slice(args.indexOf('--') + 1 || args.length), { stdio: 'inherit' });
+      const r = spawnSync(exe, progArgs, { stdio: 'inherit' });
       process.exit(r.status ?? 1);
     }
     case 'emu': { const asm = source(); return emulate(guard(asm, () => X.assembleExecutableX(asm))); }
@@ -166,13 +195,17 @@ async function windows(): Promise<void> {
       const lib = guard(asm, () => X.buildWindowsLibrary(asm, name));
       const files: [string, Uint8Array | string][] = [
         [`${name}.h`, libHeader], [`${name}.obj`, lib.obj], [`${name}_static.lib`, lib.staticLib],
-        [`${name}.dll`, lib.dll], [`${name}.lib`, lib.importLib],
       ];
+      if (lib.dll && lib.importLib) files.push([`${name}.dll`, lib.dll], [`${name}.lib`, lib.importLib]);
+      mkdirSync(dir, { recursive: true });
       for (const [f, data] of files) writeFileSync(join(dir, f), data);
       console.error(`exported: ${lib.exports.join(', ')}`);
       console.error(`wrote ${files.map(([f]) => join(dir, f)).join(', ')}`);
-      console.error(`static: clang main.c ${name}_static.lib -o app.exe`);
-      console.error(`DLL:    clang -D${name.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_DLL main.c ${name}.lib -o app.exe   (keep ${name}.dll next to app.exe)`);
+      console.error(`static: clang main.c ${name}_static.lib -o app.exe     (MSVC: cl main.c ${name}_static.lib)`);
+      if (lib.dllError) console.error(`no DLL: ${lib.dllError}`);
+      else console.error(`DLL:    clang -D${name.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_DLL main.c ${name}.lib -o app.exe   (MSVC: cl /D${name.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_DLL main.c ${name}.lib; keep ${name}.dll next to the program)`);
+      if (process.platform === 'win32' && !(await import('./win-toolchain.ts')).onPath('cl'))
+        console.error('(clang and cl need the Visual Studio environment: run them in the "x64 Native Tools Command Prompt")');
       return;
     }
     default: usage();
@@ -202,7 +235,7 @@ switch (cmd) {
     const dir = mkdtempSync(join(tmpdir(), 'hla-'));
     const exe = join(dir, basename(file).replace(/\.hla$/, ''));
     await link(asm, exe);
-    const r = spawnSync(exe, args.slice(args.indexOf('--') + 1 || args.length), { stdio: 'inherit' });
+    const r = spawnSync(exe, progArgs, { stdio: 'inherit' });
     process.exit(r.status ?? (r.signal ? 128 : 1));
   }
   case 'obj': {
@@ -235,6 +268,7 @@ switch (cmd) {
       [`lib${name}.a`, writeArchive([{ name: `${name}.o`, data: obj.bytes, symbols: obj.exports }])],
       [`lib${name}.dylib`, dylib],
     ];
+    mkdirSync(dir, { recursive: true });
     for (const [f, data] of files) writeFileSync(join(dir, f), data);
     console.error(`exported: ${obj.exports.map((s) => s.replace(/^_/, '')).join(', ')}`);
     console.error(`wrote ${files.map(([f]) => join(dir, f)).join(', ')}`);
@@ -257,6 +291,8 @@ switch (cmd) {
       process.exit(1);
     }
     const r = runMachO(bin, {
+      args: progArgs,
+      files: diskFiles,
       onOutput: (t, s) => (s === 1 ? process.stdout : process.stderr).write(t),
     });
     if (r.error) console.error(`\nemulator: ${r.error}`);

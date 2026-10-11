@@ -48,6 +48,8 @@ export function compileLibrary(src: string, name: string): CompileResult & { hea
 
 class CodeGen extends CodeGenBase {
   readonly localPrefix = 'L';
+  volTemps: number[] = [];               // caller-saved x9-x15 the current function does not name
+  reserved = new Set<number>();         // registers that must not become scratch (a moved function pointer)
   readonly builtins = BUILTINS;
 
   constructor(src: string, prog: import('./ast.ts').Program) {
@@ -106,6 +108,9 @@ class CodeGen extends CodeGenBase {
     const avoid = new Set<number>();
     for (const m of fnSrc.matchAll(/\b[xw](19|2[0-8])\b/gi)) avoid.add(Number(m[1]));
     for (const s of this.globals.values()) if (s.k === 'alias') avoid.add(parseReg(s.reg)!.n);
+    // x9-x15 serve as scratch registers too when the function does not name them (temporaries never live across a call)
+    const named = new Set([...fnSrc.matchAll(/\b[xw](9|1[0-5])\b/gi)].map((m) => Number(m[1])));
+    this.volTemps = it.naked ? [] : [9, 10, 11, 12, 13, 14, 15].filter((n) => !named.has(n) && !avoid.has(n));
     const isMain = it.name === 'main';
     this.fn = {
       name: it.name, label: '_' + it.name, retLabel: `L${it.name}.ret`, lines: [], localsSize: 0,
@@ -245,21 +250,21 @@ class CodeGen extends CodeGenBase {
     const extra = this.fn && !this.fn.naked
       ? CALLEE_SAVED.filter((n) => !this.fn!.autoInUse.has(n) && !this.fn!.autoAvoid.has(n)).reverse()
       : [];
-    for (const n of [16, 17, ...extra]) {
-      if (!this.temps.has(n)) { this.temps.add(n); return (bits === 64 ? 'x' : 'w') + n; }
+    for (const n of [16, 17, ...extra, ...this.volTemps]) {
+      if (!this.temps.has(n) && !this.reserved.has(n)) { this.temps.add(n); return (bits === 64 ? 'x' : 'w') + n; }
     }
     return this.err('expression too complex: out of scratch registers; split it into several statements', t);
   }
 
   freeTemp(r: string): void {
     const info = parseReg(r);
-    if (info && !isFpReg(r) && this.temps.has(info.n) && (info.n === 16 || info.n === 17 || info.n >= 19)) this.temps.delete(info.n);
+    if (info && !isFpReg(r) && this.temps.has(info.n) && (info.n === 16 || info.n === 17 || info.n >= 19 || this.volTemps.includes(info.n))) this.temps.delete(info.n);
   }
 
   isTemp(r: string): boolean {
     const n = parseReg(r)?.n;
     if (n === undefined || isFpReg(r)) return false;
-    return n === 16 || n === 17 || (n >= 19 && n <= 28 && this.temps.has(n) && !this.fn?.autoInUse.has(n));
+    return n === 16 || n === 17 || (n >= 19 && n <= 28 && this.temps.has(n) && !this.fn?.autoInUse.has(n)) || (this.volTemps.includes(n) && this.temps.has(n));
   }
 
   allocFTemp(bits: 32 | 64, t: Token): string {
@@ -1051,13 +1056,25 @@ class CodeGen extends CodeGenBase {
         src = this.allocFTemp(ty === 'f32' ? 32 : 64, t);
         this.genFExpr(value, src);
       } else {
-        if (this.hasCall(value)) this.err('assign the call result to a register first, then store it', t);
+        if (this.hasCall(value) && !this.fixedAddress(target)) this.err('assign the call result to a register first, then store it', t);
         src = this.allocTemp(bits, t);
         this.genExpr(value, src);
       }
       const m = this.targetAccess(target, src, t);
       this.storeMem(src, ty, m.mode);
       m.release();
+      return;
+    }
+    if (!fp && this.hasCall(value) && this.fixedAddress(target)) {
+      // `x += f(y)` on a frame/data variable: the call first, then load, combine, store
+      const vv = this.allocTemp(bits, t);
+      this.genExpr(value, vv);
+      const vt = this.allocTemp(bits, t);
+      const fm = this.targetAccess(target, null, t);
+      this.loadMem(vt, ty, fm.mode, t);
+      this.genBinary(binop, { k: 'name', name: vt, t }, { k: 'name', name: vv, t }, vt, t);
+      this.storeMem(vt, ty, fm.mode);
+      fm.release();
       return;
     }
     const m = this.targetAccess(target, null, t);
@@ -1133,6 +1150,7 @@ class CodeGen extends CodeGenBase {
     let target: string;
     let fixed: number | null = null;
     let indirect: string | null = null;
+    let memIndirect: Sym | null = null;
     if (s?.k === 'fn') {
       target = s.label;
       if (e.args.length !== s.nparams) this.warnings.push(`line ${e.t.line}: '${e.name}' expects ${s.nparams} argument(s), got ${e.args.length}`);
@@ -1145,6 +1163,10 @@ class CodeGen extends CodeGenBase {
     } else if (!s && parseReg(e.name)) {
       target = '';
       indirect = view(e.name, 64);
+    } else if (this.fixedAddress({ k: 'name', name: e.name, t: e.t })) {
+      // a function pointer in a scalar frame slot or data variable (e.g. a spilled let): loaded into x17 after the arguments
+      target = '';
+      memIndirect = s!;
     } else {
       return this.err(`unknown function '${e.name}' (declare C functions with: extern ${e.name})`, e.t);
     }
@@ -1162,6 +1184,7 @@ class CodeGen extends CodeGenBase {
       if (free === undefined) this.err(`no free register for the function pointer ${indirect}`, e.t);
       this.emit(`mov x${free}, ${indirect}`);
       indirect = 'x' + free;
+      this.reserved.add(free);   // not a scratch register while the arguments are evaluated
     }
     // variadic arguments go on the stack (Apple arm64 ABI)
     let stackSize = 0;
@@ -1182,7 +1205,10 @@ class CodeGen extends CodeGenBase {
       });
     }
     this.setArgs(regArgs, e.t);
+    if (memIndirect?.k === 'local') { this.localAddr('x17', memIndirect.off); this.emit('ldr x17, [x17]'); indirect = 'x17'; }
+    else if (memIndirect?.k === 'data') { this.emit(`adrp x17, ${memIndirect.label}@PAGE`); this.emit(`ldr x17, [x17, ${memIndirect.label}@PAGEOFF]`); indirect = 'x17'; }
     this.emit(indirect ? `blr ${indirect}` : `bl ${target}`);
+    this.reserved.clear();
     if (stackSize) this.emit(`add sp, sp, #${stackSize}`);
   }
 

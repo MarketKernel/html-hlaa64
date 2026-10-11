@@ -1,0 +1,7 @@
+// util/text.hla — includes ../geometry.hla back: an include cycle is cut, every file comes once
+include "../geometry.hla"
+
+extern puts
+const GREETING_LEN = 5
+
+fn say(s) { puts(s) }

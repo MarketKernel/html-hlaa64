@@ -1,0 +1,5 @@
+// geometry.hla — included by main.hla; includes util/text.hla too (already there: skipped)
+include "util/text.hla"
+
+fn square(x) { return x * x }
+fn perimeter(w, h) { return 2 * (w + h) }

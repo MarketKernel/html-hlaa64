@@ -21,7 +21,7 @@ export type Sym =
   | { k: 'alias'; reg: string; unsigned: boolean; global?: boolean }
   | { k: 'const'; v: bigint }
   | { k: 'data'; label: string; ty: VarType; size: number; ro: boolean }
-  | { k: 'local'; off: number; ty: VarType; size: number }
+  | { k: 'local'; off: number; ty: VarType; size: number; spilled?: boolean }   // spilled: a `let` without a free register
   | { k: 'fn'; label: string; nparams: number }
   | { k: 'extern'; label: string; fixed: number | null }
   | { k: 'struct'; info: StructInfo };
@@ -272,6 +272,12 @@ export abstract class CodeGenBase {
     return { pre: [], api: '' };
   }
 
+  /** compile-time check of a struct layout in the C header */
+  headerStaticAssert(libName: string, cond: string, msg: string): string {
+    void libName;
+    return `_Static_assert(${cond}, "${msg}");`;
+  }
+
   header(libName: string): string {
     const guard = libName.toUpperCase().replace(/[^A-Z0-9]/g, '_') + '_H';
     const { pre, api } = this.headerApi(libName);
@@ -300,7 +306,7 @@ export abstract class CodeGenBase {
           out.push(`    ${c.type}${c.type.endsWith('*') ? '' : ' '}${f.name}${c.dims};   // offset ${info.fields.get(f.name)!.off}`);
         }
         out.push(`} ${it.name};`);
-        out.push(`_Static_assert(sizeof(${it.name}) == ${info.size}, "${it.name}: layout differs from HLA64");`, '');
+        out.push(this.headerStaticAssert(libName, `sizeof(${it.name}) == ${info.size}`, `${it.name}: layout differs from HLA64`), '');
       }
     }
     for (const it of this.prog.items) {
@@ -537,13 +543,37 @@ export abstract class CodeGenBase {
   }
 
   allocAuto(t: Token, bits: 32 | 64 = 64): { reg: string; n: number } {
+    return this.tryAllocAuto(bits) ?? this.err(`no free callee-saved registers left (${this.autoPool().map((n) => this.autoRegName(n, 64)).join(', ')}); reuse a variable, use local, or name a register`, t);
+  }
+
+  tryAllocAuto(bits: 32 | 64 = 64): { reg: string; n: number } | null {
     const f = this.fn!;
     for (const n of this.autoPool()) {
       if (f.autoInUse.has(n) || f.autoAvoid.has(n)) continue;
       f.autoInUse.add(n);
       return { reg: this.autoRegName(n, bits), n };
     }
-    return this.err(`no free callee-saved registers left for let (${this.autoPool().map((n) => this.autoRegName(n, 64)).join(', ')}); reuse a variable, use local, or name a register`, t);
+    return null;
+  }
+
+  /** `let` without a register when every callee-saved register is taken: a 64-bit slot in the frame */
+  spillVar(name: string, unsigned: boolean, t: Token): void {
+    this.declareLocal({ k: 'local', name, ty: { name: unsigned ? 'u64' : 'i64', count: null, t }, t });
+    const s = this.scopes[this.scopes.length - 1].get(name) as Extract<Sym, { k: 'local' }>;
+    s.spilled = true;
+  }
+
+  /** a register variable, or false when it was spilled to the frame (no free register) */
+  isSpilled(name: string): boolean {
+    const s = this.lookup(name);
+    return s?.k === 'local' && !!s.spilled;
+  }
+
+  /** a scalar in the frame or in the data section: its address does not depend on registers a call clobbers */
+  fixedAddress(e: Expr): boolean {
+    if (e.k !== 'name') return false;
+    const s = this.lookup(e.name);
+    return (s?.k === 'local' || s?.k === 'data') && s.ty.count === null && !!s.ty.elem;
   }
 
   defineAlias(d: { name: string; reg: string | null; unsigned: boolean; t: Token }): string {
@@ -697,6 +727,21 @@ export abstract class CodeGenBase {
       this.genInto(d.init, reg);
       return;
     }
+    if (!d.reg || d.reg === 'auto') {
+      const a = this.tryAllocAuto();
+      if (!a) {
+        // spilled: declared under a hidden name first, so `let x = x + 1` still reads the outer x
+        const scope = this.scopes[this.scopes.length - 1];
+        const hidden = `$spill.${d.name}`;
+        this.spillVar(hidden, d.unsigned, d.t);
+        if (d.init) this.genAssign({ k: 'name', name: hidden, t: d.t }, '=', d.init, d.t);
+        scope.set(d.name, scope.get(hidden)!);
+        scope.delete(hidden);
+        this.emit(`// ${d.name} -> frame (all callee-saved registers are taken)`);
+        return;
+      }
+      this.fn!.autoInUse.delete(a.n);
+    }
     if (d.init && (!d.reg || d.reg === 'auto')) {
       const s = this.scopes[this.scopes.length - 1];
       // allocate first, then evaluate (the new register is not referenced by init)
@@ -762,26 +807,40 @@ export abstract class CodeGenBase {
   genForIn(s: Extract<Stmt, { k: 'forin' }>): void {
     this.pushScope();
     let sym = this.lookup(s.v);
-    if (s.reg || !sym || sym.k !== 'alias') {
-      this.defineAlias({ name: s.v, reg: s.reg, unsigned: false, t: s.t });
+    const reuse = !s.reg && sym && (sym.k === 'alias' || (sym.k === 'local' && sym.spilled));
+    if (!reuse) {
+      const free = s.reg ? null : this.tryAllocAuto();
+      if (free) this.fn!.autoInUse.delete(free.n);
+      if (!s.reg && !free) { this.spillVar(s.v, false, s.t); this.emit(`// ${s.v} -> frame (all callee-saved registers are taken)`); }
+      else this.defineAlias({ name: s.v, reg: s.reg, unsigned: false, t: s.t });
       sym = this.lookup(s.v)!;
     }
-    const iv = (sym as { reg: string }).reg;
+    // a spilled loop variable lives in the frame: plain assignments and comparisons through memory
+    const iv = sym!.k === 'alias' ? sym!.reg : null;
+    const v: Expr = { k: 'name', name: s.v, t: s.t };
     let step = 1n;
     if (s.step) {
-      const v = this.constEval(s.step);
-      if (v === null || v === 0n) this.err('step must be a non-zero constant', s.t);
-      step = v;
+      const st = this.constEval(s.step);
+      if (st === null || st === 0n) this.err('step must be a non-zero constant', s.t);
+      step = st;
     }
-    // upper bound: constant, register, or computed once into a hidden register
+    // upper bound: constant, register, or computed once into a hidden register (or frame slot)
     let bound: Expr = s.to;
     if (this.constEval(s.to) === null && this.operand(s.to) === null) {
-      const hidden = this.allocAuto(s.t);
-      this.scopes[this.scopes.length - 1].set(`$bound${hidden.n}`, { k: 'alias', reg: hidden.reg, unsigned: false, auto: hidden.n } as Sym);
-      this.genExpr(s.to, hidden.reg);
-      bound = { k: 'name', name: `$bound${hidden.n}`, t: s.t };
+      const hidden = this.tryAllocAuto();
+      const name = '$bound';   // the loop has its own scope
+      if (hidden) {
+        this.scopes[this.scopes.length - 1].set(name, { k: 'alias', reg: hidden.reg, unsigned: false, auto: hidden.n } as Sym);
+        this.genExpr(s.to, hidden.reg);
+      } else {
+        this.spillVar(name, false, s.t);
+        this.genAssign({ k: 'name', name, t: s.t }, '=', s.to, s.t);
+      }
+      bound = { k: 'name', name, t: s.t };
     }
-    this.genExpr(s.from, iv);
+    this.resetTemps();
+    if (iv) this.genExpr(s.from, iv);
+    else this.genAssign(v, '=', s.from, s.t);
     const l = this.loopLabels(s.label);
     const cond = this.newLabel('cond');
     const body = this.newLabel('body');
@@ -789,9 +848,12 @@ export abstract class CodeGenBase {
     this.label(body);
     this.withLoop(l, () => this.genBlock(s.body));
     this.label(l.cont);
-    this.genBinary('+', { k: 'name', name: s.v, t: s.t }, { k: 'num', v: step, t: s.t }, iv, s.t);
+    this.resetTemps();   // nothing is live between the steps of the loop
+    if (iv) this.genBinary('+', v, { k: 'num', v: step, t: s.t }, iv, s.t);
+    else this.genAssign(v, '+=', { k: 'num', v: step, t: s.t }, s.t);
     this.label(cond);
     const op: BinOp = step > 0n ? (s.inclusive ? '<=' : '<') : (s.inclusive ? '>=' : '>');
+    this.resetTemps();
     this.genBranch({ k: 'bin', op, l: { k: 'name', name: s.v, t: s.t }, r: bound, t: s.t }, body, true);
     this.label(l.brk);
     this.popScope();
@@ -818,6 +880,7 @@ export abstract class CodeGenBase {
           if (s.k === 'alias') text = s.reg;
           else if (s.k === 'const') text = s.v.toString();
           else if (s.k === 'data' || s.k === 'fn' || s.k === 'extern') text = s.label;
+          else if (s.k === 'local' && s.spilled) this.err(`'${tok.text}' has no register (all callee-saved registers are taken, it lives in the frame): name a register for it to use it in asm`, tok);
           else if (s.k === 'local') text = `${s.off}`;
         }
       }

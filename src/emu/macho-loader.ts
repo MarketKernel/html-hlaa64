@@ -2,11 +2,14 @@
 // memory, binds its imports to host-implemented libSystem functions, and runs it.
 import { Cpu, EmuError, ExitSignal, Memory, M64, bitsToF64, f64ToBits } from './cpu.ts';
 import { formatPrintf } from './printf.ts';
+import { FileTable, type EmuFiles } from './files.ts';
 
 export interface RunOptions {
   stdin?: string;
   limit?: number;
   args?: string[];
+  /** where fopen finds and writes files; without it fopen fails (returns NULL) */
+  files?: EmuFiles;
   onOutput?: (text: string, stream: 1 | 2) => void;
 }
 
@@ -165,6 +168,8 @@ export function runMachO(bytes: Uint8Array, opts: RunOptions = {}): RunResult {
   mem.set64(HOSTDATA_BASE + 16, BigInt(STDIN_FILE));
   const streamOf = (p: number): 1 | 2 => (p === STDERR_FILE ? 2 : 1);
   let seed = 1;
+  const files = new FileTable(opts.files, HOSTDATA_BASE + 0x10000);
+  const cstr = (p: number) => new TextDecoder().decode(mem.cstring(p));
 
   const lib: Record<string, (c: Cpu) => void> = {
     puts: (c) => { emit(1, mem.cstring(ptr(c, 0))); emit(1, [10]); ret(c, 1); },
@@ -185,10 +190,25 @@ export function runMachO(bytes: Uint8Array, opts: RunOptions = {}): RunResult {
     vprintf: (c) => { const b = formatPrintf(mem, ptr(c, 0), regArgs(c, 1)); emit(1, b); ret(c, b.length); },
     fflush: (c) => ret(c, 0),
     fwrite: (c) => {
-      const n = Number(X(c, 1)) * Number(X(c, 2));
-      emit(streamOf(ptr(c, 3)), mem.bytes(ptr(c, 0), n));
+      const size = Number(X(c, 1)), n = size * Number(X(c, 2)), f = ptr(c, 3);
+      if (files.has(f)) { ret(c, size ? Math.floor(files.fwrite(f, mem.bytes(ptr(c, 0), n)) / size) : 0); return; }
+      emit(streamOf(f), mem.bytes(ptr(c, 0), n));
       ret(c, X(c, 2));
     },
+    // files (src/emu/files.ts): fopen(path, mode), fread(buf, size, count, f), fseek(f, off, whence), ...
+    fopen: (c) => ret(c, files.fopen(cstr(ptr(c, 0)), cstr(ptr(c, 1)))),
+    fclose: (c) => ret(c, files.has(ptr(c, 0)) ? files.fclose(ptr(c, 0)) : 0),
+    fread: (c) => {
+      const size = Number(X(c, 1)), n = size * Number(X(c, 2)), f = ptr(c, 3);
+      let got: Uint8Array;
+      if (files.has(f)) got = files.fread(f, n) ?? new Uint8Array(0);
+      else { got = stdinBytes.subarray(stdinPos, stdinPos + n); stdinPos += got.length; }
+      mem.setBytes(ptr(c, 0), got);
+      ret(c, size ? Math.floor(got.length / size) : 0);
+    },
+    fseek: (c) => ret(c, files.fseek(ptr(c, 0), Number(BigInt.asIntN(64, X(c, 1))), int(c, 2))),
+    ftell: (c) => ret(c, files.ftell(ptr(c, 0))),
+    feof: (c) => ret(c, files.feof(ptr(c, 0)) ? 1 : 0),
     write: (c) => { const n = Number(X(c, 2)); emit(int(c, 0) === 2 ? 2 : 1, mem.bytes(ptr(c, 1), n)); ret(c, n); },
     read: (c) => {
       const n = Math.min(Number(X(c, 2)), stdinBytes.length - stdinPos);
@@ -395,6 +415,7 @@ export function runMachO(bytes: Uint8Array, opts: RunOptions = {}): RunResult {
       error = e.message + where;
     } else error = (e as Error).message ?? String(e);
   }
+  files.closeAll();
   const tail1 = dec1.decode(), tail2 = dec2.decode();
   if (opts.onOutput) { if (tail1) opts.onOutput(tail1, 1); if (tail2) opts.onOutput(tail2, 2); }
   return {

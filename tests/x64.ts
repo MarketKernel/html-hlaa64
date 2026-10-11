@@ -17,6 +17,8 @@ import { assembleX } from '../src/asm/x64/assembler.ts';
 import { linkPE } from '../src/asm/coff/pe.ts';
 import { runPE } from '../src/emu/x64/pe-loader.ts';
 import { tool } from './lib/toolchain.ts';
+import { memoryFiles } from '../src/emu/files.ts';
+import { combineSources } from '../src/lang/include.ts';
 
 const update = process.argv.includes('--update');
 const verbose = process.argv.includes('--verbose');
@@ -28,7 +30,7 @@ const clang = tool('clang'), lld = tool('lld-link'), dlltool = tool('llvm-dlltoo
 if (withClang && !(clang && lld && dlltool)) { console.log('--clang needs clang, lld-link and llvm-dlltool'); process.exit(2); }
 
 function build(src: string): Uint8Array {
-  const asm = compileX64(src).asm;
+  const asm = compileX64(combineSources('program.hla', (f) => (f === 'program.hla' ? src : null)).text).asm;   // std/ includes
   const pe = linkPE(assembleX(asm));
   if (withClang) clangBuild(asm, pe.imports);
   return pe.bytes;
@@ -36,6 +38,7 @@ function build(src: string): Uint8Array {
 
 // the same assembly through clang + lld-link; the result must behave like ours
 let clangOut: string | null = null;
+let progArgs: string[] = [];   // `// args: [...]` in the source: the command line for main(argc, argv)
 function clangBuild(asm: string, imports: { dll: string; names: string[] }[]): void {
   const base = join(tmp, `c${n++}`);
   writeFileSync(base + '.s', asm);
@@ -52,7 +55,7 @@ function clangBuild(asm: string, imports: { dll: string; names: string[] }[]): v
     libs.push(`${base}.${name}.lib`);
   }
   run(lld!, ['/nologo', '/subsystem:console', '/entry:hla_start', `/out:${base}.exe`, base + '.obj', ...libs]);
-  const r = runPE(new Uint8Array(readFileSync(base + '.exe')), { limit: 50_000_000 });
+  const r = runPE(new Uint8Array(readFileSync(base + '.exe')), { limit: 50_000_000, args: progArgs, files: memoryFiles() });
   if (r.error) throw new Error('clang-built executable: ' + r.error);
   clangOut = r.stdout;
 }
@@ -60,19 +63,22 @@ function clangBuild(asm: string, imports: { dll: string; names: string[] }[]): v
 function check(where: string, src: string, expected: string | null, write?: (out: string) => void): void {
   let out: string;
   clangOut = null;
+  progArgs = JSON.parse(/^\/\/ args: (\[.*?\])/m.exec(src)?.[1] ?? '[]');
   try {
     const exe = build(src);
-    const r = runPE(exe, { limit: 50_000_000 });
+    const r = runPE(exe, { limit: 50_000_000, args: progArgs, files: memoryFiles() });
     if (r.error) throw new Error('emulator: ' + r.error);
     out = r.stdout;
     if (withClang && clangOut !== out) throw new Error(`clang + lld-link build behaves differently:\n${clangOut}`);
     if (native) {
       const path = join(tmp, `p${n++}.exe`);
       writeFileSync(path, exe);
-      const nr = spawnSync(path, [], { encoding: 'utf8' });
+      const nr = spawnSync(path, progArgs, { encoding: 'utf8', cwd: tmp });   // files the program writes land in the temp dir
       // msvcrt writes \n as \r\n to a pipe (text mode)
       const native = nr.stdout.replace(/\r\n/g, '\n');
       if (native !== out) throw new Error(`native output differs from the emulator (exit ${nr.status}):\n${native}`);
+      if (r.exitCode !== null && nr.status !== (r.exitCode >>> 0))
+        throw new Error(`native exit code ${nr.status}, emulator ${r.exitCode}`);
     }
   } catch (e) {
     failed++;
@@ -95,8 +101,15 @@ for (const f of readdirSync(cases).filter((f) => f.endsWith('.hla')).sort()) {
   check(join(cases, f), readFileSync(join(cases, f), 'utf8'), existsSync(exp) ? readFileSync(exp, 'utf8') : null, (o) => writeFileSync(exp, o));
 }
 
-// ---------------------------------------------------------------- portable lesson programs
+// ---------------------------------------------------------------- portable programs from tests/cases (no ARM registers)
 const ARM = /\b([xw]([0-9]|[12][0-9]|30)|[sd]([0-9]|[12][0-9]|3[01])|sp|lr|fp|xzr|wzr)\b|\basm\b|\bsyscall\b|\bnaked\b/;
+for (const f of readdirSync('tests/cases').filter((f) => f.endsWith('.hla')).sort()) {
+  const src = readFileSync(join('tests/cases', f), 'utf8'), exp = join('tests/cases', f.replace(/\.hla$/, '.expected'));
+  if (ARM.test(src.replace(/"(\\.|[^"\\])*"|\/\/.*$/gm, '')) || !existsSync(exp)) continue;
+  check(join('tests/cases', f), src.replace(/%l([dux])/g, '%ll$1'), readFileSync(exp, 'utf8'));
+}
+
+// ---------------------------------------------------------------- portable lesson programs
 const lessons = 'docs/lessons';
 for (const file of readdirSync(lessons).filter((f) => f.endsWith('.md')).sort()) {
   const md = readFileSync(join(lessons, file), 'utf8');
@@ -110,6 +123,19 @@ for (const file of readdirSync(lessons).filter((f) => f.endsWith('.md')).sort())
     check(where, code.replace(/%l([dux])/g, '%ll$1'), m[4]);
   }
 }
+
+// ---------------------------------------------------------------- imports: the DLL comes from the real export lists
+function linkCheck(what: string, src: string, test: (imports: { dll: string; names: string[] }[] | null, error: string) => boolean): void {
+  let imports: { dll: string; names: string[] }[] | null = null, error = '';
+  try { imports = linkPE(assembleX(compileX64(src).asm)).imports; } catch (e) { error = (e as Error).message; }
+  if (test(imports, error)) { passed++; return; }
+  failed++;
+  console.log(`FAIL ${what}: ${error || JSON.stringify(imports)}`);
+}
+linkCheck('imports by DLL', 'extern MessageBoxA, GetCurrentProcessId, printf\nfn main() { printf("%d", GetCurrentProcessId())\nMessageBoxA(0, "a", "b", 0) }',
+  (im) => JSON.stringify(im) === JSON.stringify([
+    { dll: 'kernel32.dll', names: ['GetCurrentProcessId'] }, { dll: 'msvcrt.dll', names: ['exit', 'printf'] }, { dll: 'user32.dll', names: ['MessageBoxA'] }]));
+linkCheck('unknown import', 'extern prinft\nfn main() { prinft("x") }', (im, e) => !im && /undefined symbol 'prinft'/.test(e));
 
 console.log(`x64: ${passed} passed, ${failed} failed, ${skipped} lesson programs skipped (ARM registers or ARM assembly)${native ? ' (native + emulator)' : ' (emulator)'}${withClang ? ', also built with clang + lld-link' : ''}`);
 process.exit(failed ? 1 : 0);

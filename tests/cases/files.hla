@@ -1,0 +1,46 @@
+// files.hla — std/file.hla: the same file functions on macOS and Windows. Portable (both targets);
+// the runners give it an empty directory (natively) or an in-memory file store (emulators).
+include "std/file.hla"
+extern printf(fmt, ...)
+
+data line1 = "first line\n"
+data line2 = "second line\n"
+data buf: u8[256]
+
+fn main() {
+    // the whole file at once
+    let n = write_file("test-out.txt", line1, len(line1))
+    printf("write_file: %lld\n", n)
+    n = append_file("test-out.txt", line2, len(line2))
+    printf("append_file: %lld\n", n)
+    n = file_size("test-out.txt")
+    printf("file_size: %lld\n", n)
+    n = read_file("test-out.txt", buf, sizeof(buf) - 1)
+    buf[n] = 0
+    printf("read_file: %lld\n%s", n, buf)
+    n = read_file("no-such-file.txt", buf, 10)
+    printf("missing file: read_file %lld", n)
+    n = file_size("no-such-file.txt")
+    printf(", file_size %lld\n", n)
+
+    // step by step through a handle
+    let f = file_open("test-digits.txt", "w")
+    for i in 0..10 {
+        buf[0] = '0' + i
+        file_write(f, buf, 1)
+    }
+    printf("file_close: %lld\n", file_close(f))
+    f = file_open("test-digits.txt", "r")
+    let total = 0
+    loop {
+        let got = file_read(f, buf, 4)
+        if got == 0 { break }
+        total += got
+        buf[got] = 0
+        printf("chunk of %lld: %s\n", got, buf)
+    }
+    file_close(f)
+    printf("read %lld bytes\n", total)
+    f = file_open("no-such-file.txt", "r")
+    printf("file_open of a missing file: %lld\n", f)
+}

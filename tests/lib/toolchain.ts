@@ -1,17 +1,13 @@
 // Locates the external reference tools used by the tests (clang, lld-link, llvm-*).
-// macOS: system clang + Homebrew llvm@N / lld@N (keg-only); Windows/Linux: PATH.
+// macOS: system clang + Homebrew llvm@N / lld@N (keg-only); Windows: PATH, then C:\Program Files\LLVM\bin;
+// Linux: PATH. MSVC (cl, link, lib, dumpbin) on Windows: msvcEnv().
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { onPath, llvmInstalled } from '../../src/win-toolchain.ts';
 
+export { msvcEnv } from '../../src/win-toolchain.ts';
 export const isMac = process.platform === 'darwin';
 export const isWindows = process.platform === 'win32';
-const exe = (n: string) => (isWindows ? n + '.exe' : n);
-
-function onPath(name: string): string | null {
-  const r = spawnSync(isWindows ? 'where' : 'which', [exe(name)], { encoding: 'utf8' });
-  return r.status === 0 ? r.stdout.split(/\r?\n/)[0].trim() || null : null;
-}
 
 function homebrew(name: string): string | null {
   for (const root of ['/opt/homebrew/opt', '/usr/local/opt']) {
@@ -33,6 +29,7 @@ export function tool(name: 'clang' | 'lld-link' | 'llvm-dlltool' | 'llvm-readobj
   if (name === 'clang') p = onPath('clang');
   else if (name === 'llvm-objdump' && isMac) p = homebrew(name) ?? onPath('objdump');
   else p = homebrew(name) ?? onPath(name);
+  p ??= llvmInstalled(name);
   cache.set(name, p);
   return p;
 }

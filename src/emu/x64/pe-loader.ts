@@ -3,6 +3,7 @@
 import { X64, EmuError, ExitSignal, Memory } from './cpu.ts';
 import { M64, bitsToF64 } from '../cpu.ts';
 import { formatPrintf } from '../printf.ts';
+import { FileTable, type EmuFiles } from '../files.ts';
 
 export interface PeRunOptions {
   stdin?: string;
@@ -12,6 +13,10 @@ export interface PeRunOptions {
   base?: number;
   /** DLL images the program (or another DLL) imports from, by file name: { "mathlib.dll": bytes } */
   dlls?: Record<string, Uint8Array>;
+  /** command line arguments after the program name (argv[1..]) */
+  args?: string[];
+  /** where fopen finds and writes files; without it fopen fails (returns NULL) */
+  files?: EmuFiles;
 }
 
 export interface PeRunResult {
@@ -178,7 +183,8 @@ export function runPE(bytes: Uint8Array, opts: PeRunOptions = {}): PeRunResult {
   const JUNK = 0xbad0bad0bad0bad0n;
   let fpResult = false;
   const INT_RESULT = new Set(['puts', 'putchar', 'printf', 'sprintf', 'snprintf', '_snprintf', 'strcmp', 'strncmp', 'memcmp', 'atoi',
-    'abs', 'rand', 'toupper', 'tolower', 'isdigit', 'isalpha', 'isspace', 'fflush', 'getchar', 'WriteFile', 'GetStdHandle_']);
+    'abs', 'rand', 'toupper', 'tolower', 'isdigit', 'isalpha', 'isspace', 'fflush', 'getchar', 'WriteFile', 'GetStdHandle_',
+    'fclose', 'fseek', 'ftell', 'feof']);
   const thunkFor = (name: string, fn: (c: X64) => void, raw = false): number => {
     const a = thunkNext;
     thunkNext += 16;
@@ -206,6 +212,8 @@ export function runPE(bytes: Uint8Array, opts: PeRunOptions = {}): PeRunResult {
   const cstr = (p: number) => mem.cstring(p);
   const STDOUT = 0x1001n, STDERR = 0x1002n, STDIN = 0x1000n;
   let seed = 1;
+  const files = new FileTable(opts.files, HEAP + HEAP_SIZE + 0x10000);
+  const str = (p: number) => new TextDecoder().decode(cstr(p));
 
   const msvcrt: Record<string, (c: X64) => void> = {
     puts: (c) => { emit(1, cstr(ptr(c, 0))); emit(1, [10]); ret(c, 1); },
@@ -220,6 +228,29 @@ export function runPE(bytes: Uint8Array, opts: PeRunOptions = {}): PeRunResult {
     },
     fflush: (c) => ret(c, 0),
     exit: (c) => { throw new ExitSignal(int(c, 0)); },
+    // files (src/emu/files.ts); Windows: long is 32 bits (fseek's offset, ftell's result)
+    fopen: (c) => ret(c, files.fopen(str(ptr(c, 0)), str(ptr(c, 1)))),
+    fclose: (c) => ret(c, files.fclose(ptr(c, 0))),
+    fread: (c) => {
+      const size = Number(u64(c, 1)), got = files.fread(ptr(c, 3), size * Number(u64(c, 2))) ?? new Uint8Array(0);
+      mem.setBytes(ptr(c, 0), got);
+      ret(c, size ? Math.floor(got.length / size) : 0);
+    },
+    fwrite: (c) => {
+      const size = Number(u64(c, 1));
+      ret(c, size ? Math.floor(files.fwrite(ptr(c, 3), mem.bytes(ptr(c, 0), size * Number(u64(c, 2)))) / size) : 0);
+    },
+    fseek: (c) => ret(c, files.fseek(ptr(c, 0), int(c, 1), int(c, 2))),
+    ftell: (c) => ret(c, files.ftell(ptr(c, 0))),
+    feof: (c) => ret(c, files.feof(ptr(c, 0)) ? 1 : 0),
+    // __getmainargs(int *argc, char ***argv, char ***env, int wildcard, _startupinfo *): what hla_start passes to main
+    __getmainargs: (c) => {
+      const p = argvBlock();
+      mem.set32(ptr(c, 0), p.argc);
+      mem.set64(ptr(c, 1), BigInt(p.argv));
+      mem.set64(ptr(c, 2), BigInt(p.env));
+      ret(c, 0);
+    },
     _exit: (c) => { throw new ExitSignal(int(c, 0)); },
     abort: () => { throw new ExitSignal(3); },
     strlen: (c) => ret(c, cstr(ptr(c, 0)).length),
@@ -273,7 +304,7 @@ export function runPE(bytes: Uint8Array, opts: PeRunOptions = {}): PeRunResult {
       ret(c, 1);
     },
     Sleep: () => {},
-    GetCommandLineA: (c) => ret(c, cmdline),
+    GetCommandLineA: (c) => ret(c, cmdline()),
     GetTickCount: (c) => ret(c, Math.floor(performance.now())),
   };
   const libs: Record<string, Record<string, (c: X64) => void>> = { 'msvcrt.dll': msvcrt, 'kernel32.dll': kernel32 };
@@ -343,8 +374,21 @@ export function runPE(bytes: Uint8Array, opts: PeRunOptions = {}): PeRunResult {
   mapStack(mem, main);
   mem.map('heap', HEAP, HEAP_SIZE);
   mem.map('thunks', THUNKS, 0x10000, false);
-  const cmdline = HEAP;            // "program\0" at the start of the heap
-  mem.setBytes(cmdline, new TextEncoder().encode('program\0'));
+  // argv[0] is "program"; the strings are put on the heap on first use
+  const argvList = ['program', ...(opts.args ?? [])];
+  const heapString = (text: string) => { const b = new TextEncoder().encode(text + '\0'); const p = malloc(b.length); mem.setBytes(p, b); return p; };
+  let cmdlineAt = 0;
+  let argvAt: { argc: number; argv: number; env: number } | null = null;
+  const cmdline = () => (cmdlineAt ||= heapString(argvList.map((a) => (/[\s"]/.test(a) || a === '' ? `"${a.replace(/"/g, '\\"')}"` : a)).join(' ')));
+  const argvBlock = () => {
+    if (argvAt) return argvAt;
+    const ptrs = argvList.map(heapString);
+    const argv = malloc(8 * (ptrs.length + 1)), env = malloc(8);
+    ptrs.forEach((p, i) => mem.set64(argv + 8 * i, BigInt(p)));
+    mem.set64(argv + 8 * ptrs.length, 0n);
+    mem.set64(env, 0n);
+    return (argvAt = { argc: ptrs.length, argv, env });
+  };
 
   // ---------------------------------------------------------------- start: rsp ≡ 8 (mod 16), return to EXIT
   cpu.rsp = BigInt(STACK_TOP - 4096 - 8);
@@ -364,6 +408,7 @@ export function runPE(bytes: Uint8Array, opts: PeRunOptions = {}): PeRunResult {
     else if (e instanceof EmuError) error = e.message + (e.pc >= 0 ? '' : ` (rip 0x${cpu.rip.toString(16)})`);
     else error = (e as Error).message ?? String(e);
   }
+  files.closeAll();
   const t1 = dec1.decode(), t2 = dec2.decode();
   if (opts.onOutput) { if (t1) opts.onOutput(t1, 1); if (t2) opts.onOutput(t2, 2); }
   return {

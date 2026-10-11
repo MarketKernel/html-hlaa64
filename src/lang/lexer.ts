@@ -39,9 +39,9 @@ const OPS = [
 
 export function lex(src: string): Token[] {
   const toks: Token[] = [];
-  let i = 0;
+  let i = src.charCodeAt(0) === 0xfeff ? 1 : 0;   // a UTF-8 byte order mark (PowerShell 5.1, Notepad) is not part of the program
   let line = 1;
-  let lineStart = 0;
+  let lineStart = i;
   let nl = true;
 
   const err = (msg: string, at = i): never => {

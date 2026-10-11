@@ -1,0 +1,10 @@
+sum = 78
+v11 = 13, v12 = 33
+fptr(21) = 42
+total = 9
+inner x = 50
+outer x = 5
+v1 = 2187 after 7 steps
+compare ok
+deep(3) = 336
+still 2 5 9 10

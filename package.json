@@ -19,8 +19,9 @@
     "test:x64-encoding": "node tests/encoding-x64.ts",
     "test:coff": "node tests/coff-x64.ts",
     "test:x64-lib": "node tests/x64-lib.ts",
-    "test:ci": "node tests/run.ts && node tests/lessons.ts && node tests/x64.ts && node tests/fuzz.ts 1 4",
-    "test:all": "node tests/run.ts && node tests/lessons.ts && node tests/x64.ts && node tests/fuzz.ts 1 4 && node tests/encoding.ts && node tests/encoding-x64.ts && node tests/coff-x64.ts && node tests/x64-lib.ts"
+    "test:ci": "node tests/run.ts && node tests/lessons.ts && node tests/x64.ts && node tests/include.ts && node tests/fuzz.ts 1 4",
+    "test:all": "node tests/run.ts && node tests/lessons.ts && node tests/x64.ts && node tests/include.ts && node tests/fuzz.ts 1 4 && node tests/encoding.ts && node tests/encoding-x64.ts && node tests/coff-x64.ts && node tests/x64-lib.ts",
+    "test:include": "node tests/include.ts"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",
