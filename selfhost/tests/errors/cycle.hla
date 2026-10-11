@@ -1,0 +1,3 @@
+const A = B + 1
+const B = A
+fn main() { return A }

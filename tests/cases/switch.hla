@@ -1,0 +1,45 @@
+// switch: sugar for an if/elif chain (no fall-through; break/continue belong to the loop)
+extern printf(fmt, ...)
+
+enum Tok { Num, Plus, Minus, Star, Ident }
+
+fn kind(c) {
+    switch c {
+        case '0'..='9' { return Tok.Num }
+        case '+' { return Tok.Plus }
+        case '-' { return Tok.Minus }
+        case '*' { return Tok.Star }
+        case 'a'..='z', 'A'..='Z', '_' { return Tok.Ident }
+        default { return -1 }
+    }
+}
+
+data text = "a+1*Z-_?"
+
+fn twice(v) { return v * 2 }
+
+fn main() {
+    let i = 0
+    loop {
+        let c = u8[text + i]
+        if c == 0 { break }
+        printf("%c:%lld ", c, kind(c))
+        i++
+    }
+    printf("\n")
+    for k in 0..6 {
+        switch twice(k) {                // subject computed once
+            case 0 { printf("zero ") }
+            case 2, 4 { printf("small ") }
+            case 6..10 {
+                if k == 4 { continue }   // continue the for loop
+                printf("mid ")
+            }
+            default { printf("big ") }
+        }
+        printf("| ")
+    }
+    printf("\n")
+    switch i { default { printf("only default %lld\n", i) } }
+    switch i { case 1 { printf("never\n") } }
+}

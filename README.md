@@ -40,6 +40,9 @@ node src/cli.ts build examples/hello.hla --target x64-windows  # hello.exe
 
 npm run build:web                              # собрать dist/hla64.html и PWA в dist/pages/
 open dist/hla64.html                           # работает с file://, без сети
+
+./build.sh                                     # то же одной командой (сам ставит инструменты, если их нет)
+./build.sh check open                          # + typecheck и тесты CI перед сборкой, затем открыть страницу
 ```
 
 Онлайн страница живёт на GitHub Pages как устанавливаемое приложение (PWA): после первого
@@ -130,6 +133,14 @@ Lsort_numbers.next5:
 | [mandelbrot.hla](examples/mandelbrot.hla) | множество Мандельброта на d-регистрах |
 | [fizzbuzz.hla](examples/fizzbuzz.hla) | `for … in`, `if/elif/else` |
 | [bare-metal.hla](examples/bare-metal.hla) | без libc: `svc #0x80`, печать чисел в стековый буфер, встроенный ассемблер с числовыми метками |
+
+## Тулчейн на самом HLA64 (`selfhost/`)
+
+В [selfhost/](selfhost/README.md) лежат транслятор и ассемблер, написанные на HLA64:
+`hlc-arm`/`hlc-x64` переводят HLA64 (без регистров) в ассемблер AArch64 или x86-64,
+`hlas-arm`/`hlas-x64` собирают из него подписанный Mach-O или `.exe`. После раскрутки
+TypeScript-версией они пересобирают сами себя побайтно, а их исполняемые файлы совпадают
+с результатом линковщиков из `src/asm`. Проверка — `selfhost/test.sh`.
 
 ## Тесты
 

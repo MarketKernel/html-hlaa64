@@ -1,0 +1,105 @@
+// if/elif/else, loops, break/continue, switch
+extern printf(fmt, ...)
+
+enum Kind { Digit, Letter, Space, Other }
+
+fn kind(c) {
+    switch c {
+        case '0'..='9' { return Kind.Digit }
+        case 'a'..='z', 'A'..='Z', '_' { return Kind.Letter }
+        case ' ', '\t', '\n' { return Kind.Space }
+    }
+    return Kind.Other
+}
+
+fn sign(v) {
+    if v < 0 {
+        return -1
+    } elif v == 0 {
+        return 0
+    } else {
+        return 1
+    }
+}
+
+fn collatz(n: auto) {
+    let steps = 0
+    while n != 1 {
+        if n % 2 == 0 { n = n / 2 } else { n = 3 * n + 1 }
+        steps++
+    }
+    return steps
+}
+
+data text = "Hi 42_x!\t"
+
+fn main() {
+    printf("sign: %lld %lld %lld\n", sign(-7), sign(0), sign(9))
+    printf("collatz(27) = %lld\n", collatz(27))
+
+    // for with steps
+    for i in 0..5 { printf("%lld ", i) }
+    printf("|")
+    for i in 0..=10 step 3 { printf(" %lld", i) }
+    printf(" |")
+    for i in 10..0 step -2 { printf(" %lld", i) }
+    printf(" |")
+    for i in 5..=1 step -1 { printf(" %lld", i) }
+    printf("\n")
+
+    // nested loops with break and continue
+    let found = 0
+    for a in 1..20 {
+        for b in a..20 {
+            if a * b == 91 {
+                found = a * 100 + b
+                break
+            }
+        }
+        if found != 0 { break }
+    }
+    printf("found %lld\n", found)
+    let odd = 0
+    for i in 0..20 {
+        if i % 2 == 0 { continue }
+        odd += i
+    }
+    printf("odd sum %lld\n", odd)
+
+    // do-while and loop
+    let k = 0
+    do { k += 3 } while k < 10
+    printf("k = %lld\n", k)
+    let n = 0
+    loop {
+        n++
+        if n * n > 50 { break }
+    }
+    printf("n = %lld\n", n)
+
+    // switch over characters, a computed subject, no default
+    let i = 0
+    loop {
+        let c = u8[text + i]
+        if c == 0 { break }
+        printf("%lld", kind(c))
+        i++
+    }
+    printf("\n")
+    for v in 0..6 {
+        switch sign(v - 2) * v {
+            case 0 { printf("zero ") }
+            case -1 { printf("minus ") }
+            case 3, 4 { printf("three-four ") }
+            default { printf("other ") }
+        }
+    }
+    printf("\n")
+    let w = 7
+    switch w {
+        case 1 { printf("one\n") }
+    }
+    switch w {
+        default { printf("only default\n") }
+    }
+}

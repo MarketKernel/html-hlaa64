@@ -1,0 +1,35 @@
+// calls anywhere in an expression; values are taken left to right
+extern printf(fmt, ...)
+
+data counter: i64 = 0
+data cells: i64[4] = 0
+
+fn f(n) { return n * 2 }
+fn g(a, b) { return a - b }
+fn next() {
+    counter++
+    return counter * 10
+}
+
+struct Node { a: i64, b: i64 }
+
+fn build(n: auto) {
+    let p = &cells
+    [p + Node.a] = f(n)              // a call result straight into memory
+    [p + Node.b] = g(f(n), f(1)) + 1
+    cells[2] = next() + next()       // 10 + 20
+    cells[3] += f(3)
+    return [p + Node.a] + [p + Node.b]
+}
+
+fn main() {
+    let a = f(1) + f(2)                        // 2 + 4
+    let b = g(f(10), f(3)) * f(2) - g(1, 2)    // (20 - 6) * 4 + 1
+    let c = counter + next()                   // counter is read before the call: 0 + 10
+    let d = next() - counter                   // 20 - 2
+    printf("%d %d %d %d\n", a, b, c, d)
+    let r = build(5)
+    printf("%d | %d %d %d %d\n", r, cells[0], cells[1], cells[2], cells[3])
+    printf("%d\n", f(f(1) + f(2)) + g(f(3), 1))   // 12 + 5
+    return f(0) + g(f(1), f(1))
+}

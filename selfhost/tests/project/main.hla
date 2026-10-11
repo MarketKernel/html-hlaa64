@@ -1,0 +1,10 @@
+// several files: include paths are relative to the including file, each file is read once
+include "util/text.hla"
+include "util/math.hla"
+include "util/text.hla"
+
+fn main() {
+    say_line("project")
+    show_num(square(12))
+    show_num(LIMIT)
+}

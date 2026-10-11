@@ -1,0 +1,978 @@
+// x64/xenc.hla — x86-64 instructions (Intel syntax, LLVM dialect) to bytes. The encodings are
+// the ones LLVM chooses (and src/asm/x64/encode.ts), so the output can be compared byte for byte.
+
+// registers ------------------------------------------------------------------------------
+
+rodata xreg_names: ptr = [
+    "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+    "eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi", "r8d", "r9d", "r10d", "r11d", "r12d", "r13d", "r14d", "r15d",
+    "ax", "cx", "dx", "bx", "sp", "bp", "si", "di", "r8w", "r9w", "r10w", "r11w", "r12w", "r13w", "r14w", "r15w",
+    "al", "cl", "dl", "bl", "spl", "bpl", "sil", "dil", "r8b", "r9b", "r10b", "r11b", "r12b", "r13b", "r14b", "r15b",
+    "ah", "ch", "dh", "bh"
+]
+
+// per name id: 0 when not a register, else 1 | n << 1 | size << 8 | high8 << 16 | rex8 << 17
+data xreg_info: ptr = 0
+
+fn xregs_init() {
+    xreg_info = mem_alloc(MAX_NAMES * 8)
+    for i in 0..68 {
+        let id = intern_cstr(xreg_names[i])
+        let n = i % 16
+        let size = 8
+        if i >= 16 { size = 4 }
+        if i >= 32 { size = 2 }
+        if i >= 48 { size = 1 }
+        let high8 = 0
+        let rex8 = 0
+        if i >= 64 {
+            n = i - 64 + 4
+            high8 = 1
+        } elif i >= 52 && i < 56 {
+            rex8 = 1
+        }
+        [xreg_info + id * 8] = 1 | n << 1 | size << 8 | high8 << 16 | rex8 << 17
+    }
+}
+
+// condition codes: the suffixes of jcc, setcc, cmovcc
+rodata xcond_names: ptr = [
+    "o", "no", "b", "c", "nae", "ae", "nb", "nc", "e", "z", "ne", "nz", "be", "na", "a", "nbe",
+    "s", "ns", "p", "pe", "np", "po", "l", "nge", "ge", "nl", "le", "ng", "g", "nle"
+]
+rodata xcond_values: u8[30] = [0, 1, 2, 2, 2, 3, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 9, 10, 10, 11, 11, 12, 12, 13, 13, 14, 14, 15, 15]
+
+// the condition number of a suffix (the text at p), or -1
+fn xcond_of(p: auto) {
+    for i in 0..30 {
+        if cstr_same(p, xcond_names[i]) { return xcond_values[i] }
+    }
+    return -1
+}
+
+// operands -------------------------------------------------------------------------------
+
+enum XK { Reg, Imm, Mem }
+
+struct XOp {
+    kind: i64       // XK.*
+    reg: i64        // Reg: number 0..15
+    width: i64      // Reg: bytes; Mem: the ptr size (0: not given)
+    high8: i64      // Reg: ah, ch, dh, bh
+    rex8: i64       // Reg: spl, bpl, sil, dil
+    base: i64       // Mem: register, -1 none, 16 = rip
+    index: i64      // Mem: register or -1
+    scale: i64      // Mem: 1, 2, 4, 8
+    sym: i64        // Imm and Mem: symbol name id or -1
+    add: i64        // Imm: the value; Mem: the displacement
+}
+
+data xops: XOp[3]
+data xop_count: i64 = 0
+
+fn xop(i) { return xops + i * XOp.size }
+fn opf(i, field) { return [xops + i * XOp.size + field] }
+
+// the register named by id into operand o; 0 when id is not a register
+fn set_reg(o: auto, id: auto) {
+    let info = [xreg_info + id * 8]
+    if info == 0 { return 0 }
+    [o + XOp.kind] = XK.Reg
+    [o + XOp.reg] = info >> 1 & 15
+    [o + XOp.width] = info >> 8 & 255
+    [o + XOp.high8] = info >> 16 & 1
+    [o + XOp.rex8] = info >> 17 & 1
+    return 1
+}
+
+fn ptr_size(s: auto) {
+    if cstr_same(s, "byte") { return 1 }
+    if cstr_same(s, "word") { return 2 }
+    if cstr_same(s, "dword") { return 4 }
+    if cstr_same(s, "qword") { return 8 }
+    return 0
+}
+
+// [base + index*scale + disp] after the '['
+fn parse_mem(o: auto) {
+    [o + XOp.kind] = XK.Mem
+    [o + XOp.base] = -1
+    [o + XOp.index] = -1
+    [o + XOp.scale] = 1
+    [o + XOp.sym] = -1
+    [o + XOp.add] = 0
+    let neg = 0
+    loop {
+        skip_sp()
+        if u8[ap] == '-' {
+            neg = !neg
+            ap++
+            continue
+        }
+        if u8[ap] == '+' {
+            ap++
+            continue
+        }
+        if u8[ap] >= '0' && u8[ap] <= '9' {
+            let v = read_number()
+            if accept_char('*') {
+                // scale*reg
+                let rid = expect_ident()
+                if [xreg_info + rid * 8] == 0 { asm_fail("bad index register") }
+                mem_index(o, rid, v, neg)
+            } elif neg {
+                [o + XOp.add] = [o + XOp.add] - v
+            } else {
+                [o + XOp.add] = [o + XOp.add] + v
+            }
+        } else {
+            let id = expect_ident()
+            let info = [xreg_info + id * 8]
+            if cstr_same(name_str(id), "rip") {
+                if neg || [o + XOp.base] != -1 { asm_fail("bad rip operand") }
+                [o + XOp.base] = 16
+            } elif info != 0 {
+                if accept_char('*') {
+                    mem_index(o, id, read_number(), neg)
+                } else {
+                    if info >> 8 & 255 != 8 || neg { asm_fail("bad address register") }
+                    if [o + XOp.base] == -1 { [o + XOp.base] = info >> 1 & 15 }
+                    elif [o + XOp.index] == -1 { [o + XOp.index] = info >> 1 & 15 }
+                    else { asm_fail("too many registers in the address") }
+                }
+            } else {
+                if neg { asm_fail("cannot subtract a symbol") }
+                if [o + XOp.sym] != -1 { asm_fail("two symbols in the address") }
+                [o + XOp.sym] = id
+            }
+        }
+        neg = 0
+        skip_sp()
+        if u8[ap] == ']' {
+            ap++
+            break
+        }
+        if u8[ap] == '-' {
+            neg = 1
+            ap++
+        } elif u8[ap] == '+' {
+            ap++
+        } else {
+            asm_fail("expected + - or ] in the address")
+        }
+    }
+    if [o + XOp.index] == 4 { asm_fail("rsp cannot be an index register") }
+    if [o + XOp.base] == 16 && [o + XOp.index] != -1 { asm_fail("rip-relative addressing cannot have an index") }
+    return 0
+}
+
+fn mem_index(o: auto, rid: auto, scale: auto, neg: auto) {
+    let info = [xreg_info + rid * 8]
+    if info >> 8 & 255 != 8 || neg { asm_fail("bad index register") }
+    if scale != 1 && scale != 2 && scale != 4 && scale != 8 { asm_fail("the scale must be 1, 2, 4 or 8") }
+    if [o + XOp.index] != -1 { asm_fail("two index registers") }
+    [o + XOp.index] = info >> 1 & 15
+    [o + XOp.scale] = scale
+}
+
+// one operand at ap
+fn parse_xop(o: auto) {
+    [o + XOp.width] = 0
+    [o + XOp.sym] = -1
+    [o + XOp.add] = 0
+    skip_sp()
+    let save = ap
+    let id = read_ident()
+    if id >= 0 {
+        if set_reg(o, id) { return 0 }
+        let ps = ptr_size(name_str(id))
+        if ps != 0 {
+            let p = expect_ident()
+            if !cstr_same(name_str(p), "ptr") { asm_fail("expected ptr") }
+            expect_char('[')
+            parse_mem(o)
+            [o + XOp.width] = ps
+            return 0
+        }
+        if cstr_same(name_str(id), "offset") { id = expect_ident() }
+        // a symbol (+ n)
+        [o + XOp.kind] = XK.Imm
+        [o + XOp.sym] = id
+        let add = 0
+        if accept_char('+') { add = read_number() }
+        elif accept_char('-') {
+            add = read_number()
+            add = 0 - add
+        }
+        [o + XOp.add] = add
+        return 0
+    }
+    ap = save
+    if accept_char('[') {
+        parse_mem(o)
+        return 0
+    }
+    [o + XOp.kind] = XK.Imm
+    [o + XOp.add] = read_number()
+    return 0
+}
+
+fn parse_xops() {
+    xop_count = 0
+    if at_end() { return 0 }
+    loop {
+        if xop_count >= 3 { asm_fail("too many operands") }
+        parse_xop(xop(xop_count))
+        xop_count++
+        if !accept_char(',') { break }
+    }
+    if !at_end() { asm_fail("unexpected text after the operands") }
+    return 0
+}
+
+fn is_reg(i) { return i < xop_count && [xops + i * XOp.size + XOp.kind] == XK.Reg }
+fn is_mem(i) { return i < xop_count && [xops + i * XOp.size + XOp.kind] == XK.Mem }
+fn is_imm(i) { return i < xop_count && [xops + i * XOp.size + XOp.kind] == XK.Imm }
+
+fn need_count(n: auto) {
+    if xop_count != n { asm_fail("wrong number of operands") }
+}
+
+fn need_reg(i: auto) {
+    if !is_reg(i) { asm_fail("expected a register") }
+    return opf(i, XOp.reg)
+}
+
+fn need_rm(i: auto) {
+    if !is_reg(i) && !is_mem(i) { asm_fail("expected a register or memory") }
+    return i
+}
+
+// a number (not a symbol) as operand i
+fn need_num(i: auto) {
+    if !is_imm(i) { asm_fail("expected an immediate") }
+    let o = xop(i)
+    if [o + XOp.sym] != -1 { asm_fail("unexpected symbol") }
+    return [o + XOp.add]
+}
+
+// the operand size of r/m operand i (register size, ptr size, or that of the other register)
+fn size_of(i: auto, other: auto) {
+    let o = xop(i)
+    if [o + XOp.width] != 0 { return [o + XOp.width] }
+    if other >= 0 && is_reg(other) { return opf(other, XOp.width) }
+    asm_fail("the operand size is unknown: add byte/word/dword/qword ptr")
+    return 0
+}
+
+fn fits8(v) { return v >= -128 && v <= 127 }
+fn fits32s(v) { return v >= -2147483648 && v <= 2147483647 }
+
+// the instruction being encoded ------------------------------------------------------------
+
+data ib: u8[32]                     // its bytes
+data ib_len: i64 = 0
+
+// its fixups (at most two): offset in the instruction, size, rel (1) or abs (0), symbol, addend
+struct IFix { off: i64, len: i64, rel: i64, sym: i64, add: i64 }
+data ifixes: IFix[2]
+data ifix_count: i64 = 0
+
+fn ib_put(v: auto) {
+    ib[ib_len] = v & 0xFF
+    ib_len++
+}
+
+fn ib_le(v: auto, n: auto) {
+    for i in 0..n { ib_put(v >>> (i * 8)) }
+}
+
+fn ib_fix(off: auto, size: auto, rel: auto, sym: auto, add: auto) {
+    let f = ifixes + ifix_count * IFix.size
+    ifix_count++
+    [f + IFix.off] = off
+    [f + IFix.len] = size
+    [f + IFix.rel] = rel
+    [f + IFix.sym] = sym
+    [f + IFix.add] = add
+}
+
+// the parts of an encoding, set before x_emit
+data p66: i64 = 0                   // operand-size prefix
+data pw: i64 = 0                    // REX.W
+data pop1: i64 = 0                  // opcode byte(s): pop0 = -1 for a one-byte opcode
+data pop0: i64 = -1
+data preg: i64 = -1                 // ModRM.reg (register or opcode extension), -1: no ModRM
+data prm: i64 = -1                  // the operand in ModRM.rm, -1: none
+data popreg: i64 = -1               // register in the low 3 bits of the opcode, -1: none
+data pimm_size: i64 = 0             // immediate bytes (0: none)
+data pimm: i64 = 0
+data pimm_sym: i64 = -1
+data pbyte_ops: i64 = 0             // bit i: operand i is an 8-bit register (REX rules)
+
+fn parts(w: auto, op: auto) {
+    p66 = 0
+    pw = w
+    pop0 = -1
+    pop1 = op
+    preg = -1
+    prm = -1
+    popreg = -1
+    pimm_size = 0
+    pimm = 0
+    pimm_sym = -1
+    pbyte_ops = 0
+}
+
+// operand size s: 66 prefix for 16 bits, REX.W for 64
+fn parts_sized(s: auto, op: auto) {
+    parts(s == 8, op)
+    p66 = s == 2
+}
+
+fn two_byte(op: auto) {
+    pop0 = 0x0F
+    pop1 = op
+}
+
+fn with_imm(v: auto, size: auto) {
+    pimm = v
+    pimm_size = size
+}
+
+fn x_emit() {
+    ib_len = 0
+    ifix_count = 0
+    if p66 { ib_put(0x66) }
+    let rexw = pw
+    let rexr = 0
+    let rexx = 0
+    let rexb = 0
+    let modrm = -1
+    let sib = -1
+    let disp_size = 0
+    let disp = 0
+    let disp_sym = -1
+    if preg >= 0 { rexr = preg >> 3 & 1 }
+    if prm >= 0 {
+        let reg3 = preg & 7
+        if preg < 0 { reg3 = 0 }
+        let o = xop(prm)
+        if [o + XOp.kind] == XK.Reg {
+            rexb = [o + XOp.reg] >> 3 & 1
+            modrm = 0xC0 | reg3 << 3 | [o + XOp.reg] & 7
+        } elif [o + XOp.base] == 16 {
+            modrm = reg3 << 3 | 5
+            disp_size = 4
+            if [o + XOp.sym] < 0 { asm_fail("a rip-relative operand needs a symbol") }
+            disp_sym = [o + XOp.sym]
+            disp = [o + XOp.add]
+        } else {
+            if [o + XOp.sym] >= 0 { asm_fail("an absolute address: use [rip + symbol]") }
+            let d = [o + XOp.add]
+            let base = [o + XOp.base]
+            let index = [o + XOp.index]
+            let sc = 0
+            while (1 << sc) < [o + XOp.scale] { sc++ }
+            if base < 0 {
+                // [index*scale + disp32]: SIB without a base
+                let ix = 4
+                if index >= 0 {
+                    rexx = index >> 3 & 1
+                    ix = index & 7
+                }
+                modrm = reg3 << 3 | 4
+                sib = sc << 6 | ix << 3 | 5
+                disp_size = 4
+                disp = d
+            } else {
+                rexb = base >> 3 & 1
+                let mode = 0
+                if d == 0 && base & 7 != 5 {
+                    mode = 0
+                } elif fits8(d) {
+                    mode = 1
+                    disp_size = 1
+                    disp = d
+                } elif fits32s(d) {
+                    mode = 2
+                    disp_size = 4
+                    disp = d
+                } else {
+                    asm_fail("displacement out of 32-bit range")
+                }
+                if index >= 0 || base & 7 == 4 {
+                    let ix = 4
+                    if index >= 0 {
+                        rexx = index >> 3 & 1
+                        ix = index & 7
+                    }
+                    modrm = mode << 6 | reg3 << 3 | 4
+                    sib = sc << 6 | ix << 3 | base & 7
+                } else {
+                    modrm = mode << 6 | reg3 << 3 | base & 7
+                }
+            }
+        }
+    }
+    if popreg >= 0 { rexb = popreg >> 3 & 1 }
+    // 8-bit registers: spl..dil need REX, ah..bh cannot have it
+    let any_rex8 = 0
+    let any_high8 = 0
+    for i in 0..xop_count {
+        if pbyte_ops >> i & 1 {
+            let o = xop(i)
+            if [o + XOp.rex8] { any_rex8 = 1 }
+            if [o + XOp.high8] { any_high8 = 1 }
+        }
+    }
+    let need_rex = rexw || rexr || rexx || rexb || any_rex8
+    if need_rex && any_high8 { asm_fail("ah/bh/ch/dh cannot be used with registers that need a REX prefix") }
+    if need_rex { ib_put(0x40 | rexw << 3 | rexr << 2 | rexx << 1 | rexb) }
+    if pop0 >= 0 { ib_put(pop0) }
+    if popreg >= 0 { ib_put(pop1 | popreg & 7) } else { ib_put(pop1) }
+    if modrm >= 0 { ib_put(modrm) }
+    if sib >= 0 { ib_put(sib) }
+    let disp_off = ib_len
+    ib_le(disp, disp_size)
+    if pimm_size > 0 {
+        if pimm_sym >= 0 {
+            if pimm_size != 8 && pimm_size != 4 { asm_fail("symbolic immediates need 32 or 64 bits") }
+            ib_fix(ib_len, pimm_size, 0, pimm_sym, pimm)
+            ib_le(0, pimm_size)
+        } else {
+            ib_le(pimm, pimm_size)
+        }
+    }
+    if disp_sym >= 0 { ib_fix(disp_off, 4, 1, disp_sym, disp) }
+    return 0
+}
+
+// instructions ---------------------------------------------------------------------------
+
+enum XM {
+    Add, Or, Adc, Sbb, And, Sub, Xor, Cmp,
+    Rol, Ror, Rcl, Rcr, Shl, Sal, Shr, Sar,
+    Not, Neg, Mul, Div, Idiv, Inc, Dec,
+    Mov, Movabs, Movzx, Movsx, Movsxd, Lea, Xchg, Test, Imul,
+    Cqo, Cdq, Cdqe, Cwde, Push, Pop, Ret, Nop, Int3, Ud2, Hlt, Leave, Call, Jmp
+}
+
+rodata xm_names: ptr = [
+    "add", "or", "adc", "sbb", "and", "sub", "xor", "cmp",
+    "rol", "ror", "rcl", "rcr", "shl", "sal", "shr", "sar",
+    "not", "neg", "mul", "div", "idiv", "inc", "dec",
+    "mov", "movabs", "movzx", "movsx", "movsxd", "lea", "xchg", "test", "imul",
+    "cqo", "cdq", "cdqe", "cwde", "push", "pop", "ret", "nop", "int3", "ud2", "hlt", "leave", "call", "jmp"
+]
+
+data xm_base: i64 = 0
+
+fn xm_init() {
+    xm_base = name_count
+    for i in 0..XM.count { intern_cstr(xm_names[i]) }
+}
+
+// a jump to a label for the assembler to place: jump_cond (-1: jmp), jump_sym, jump_add
+data is_jump: i64 = 0
+data jump_cond: i64 = 0
+data jump_sym: i64 = 0
+data jump_add: i64 = 0
+
+fn byte_op(i: auto) {
+    if is_reg(i) && opf(i, XOp.width) == 1 { pbyte_ops = pbyte_ops | 1 << i }
+}
+
+// encodes the instruction mn (a name id) with the operands in xops: bytes in ib, or is_jump
+fn x_encode(mn: auto) {
+    is_jump = 0
+    let text = name_str(mn)
+    let k = mn - xm_base
+    if k < 0 || k >= XM.count { k = -1 }
+    // jcc label, setcc, cmovcc
+    if k < 0 && u8[text] == 'j' {
+        let cc = xcond_of(text + 1)
+        if cc < 0 { asm_fail_name("unknown instruction", mn) }
+        need_count(1)
+        if !is_imm(0) || opf(0, XOp.sym) < 0 { asm_fail("conditional jumps need a label") }
+        is_jump = 1
+        jump_cond = cc
+        jump_sym = opf(0, XOp.sym)
+        jump_add = opf(0, XOp.add)
+        return 0
+    }
+    if k < 0 && mem_same(text, "set", 3) {
+        let cc = xcond_of(text + 3)
+        if cc < 0 { asm_fail_name("unknown instruction", mn) }
+        need_count(1)
+        need_rm(0)
+        if is_reg(0) && opf(0, XOp.width) != 1 { asm_fail("setcc needs an 8-bit register") }
+        parts(0, 0x90 + cc)
+        two_byte(0x90 + cc)
+        preg = 0
+        prm = 0
+        byte_op(0)
+        return x_emit()
+    }
+    if k < 0 && mem_same(text, "cmov", 4) {
+        let cc = xcond_of(text + 4)
+        if cc < 0 { asm_fail_name("unknown instruction", mn) }
+        need_count(2)
+        let r = need_reg(0)
+        parts_sized(opf(0, XOp.width), 0)
+        two_byte(0x40 + cc)
+        preg = r
+        prm = need_rm(1)
+        return x_emit()
+    }
+    if k < 0 { asm_fail_name("unknown instruction", mn) }
+
+    if k <= XM.Cmp { return x_alu(k) }
+    if k <= XM.Sar { return x_shift(k) }
+    if k <= XM.Dec {
+        // not neg mul div idiv: F6/F7 /x; inc dec: FE/FF /x
+        need_count(1)
+        need_rm(0)
+        let s = size_of(0, -1)
+        let op = 0xF6
+        let ext = 0
+        switch k {
+            case XM.Not { ext = 2 }
+            case XM.Neg { ext = 3 }
+            case XM.Mul { ext = 4 }
+            case XM.Div { ext = 6 }
+            case XM.Idiv { ext = 7 }
+            case XM.Inc { op = 0xFE }
+            case XM.Dec { op = 0xFE; ext = 1 }
+        }
+        if s != 1 { op++ }
+        parts_sized(s, op)
+        preg = ext
+        prm = 0
+        if s == 1 { byte_op(0) }
+        return x_emit()
+    }
+    switch k {
+        case XM.Mov { return x_mov() }
+        case XM.Movabs {
+            need_count(2)
+            let r = need_reg(0)
+            if opf(0, XOp.width) != 8 { asm_fail("movabs needs a 64-bit register") }
+            parts(1, 0xB8)
+            popreg = r
+            with_imm(opf(1, XOp.add), 8)
+            pimm_sym = opf(1, XOp.sym)
+            return x_emit()
+        }
+        case XM.Movzx, XM.Movsx {
+            need_count(2)
+            let r = need_reg(0)
+            need_rm(1)
+            let ss = size_of(1, -1)
+            if ss != 1 && ss != 2 { asm_fail("the source must be 8 or 16 bits") }
+            let op = 0xB6
+            if k == XM.Movzx && ss == 2 { op = 0xB7 }
+            if k == XM.Movsx { op = 0xBE + (ss == 2) }
+            parts_sized(opf(0, XOp.width), 0)
+            two_byte(op)
+            preg = r
+            prm = 1
+            if ss == 1 { byte_op(1) }
+            return x_emit()
+        }
+        case XM.Movsxd {
+            need_count(2)
+            let r = need_reg(0)
+            parts(opf(0, XOp.width) == 8, 0x63)
+            preg = r
+            prm = need_rm(1)
+            return x_emit()
+        }
+        case XM.Lea {
+            need_count(2)
+            let r = need_reg(0)
+            if !is_mem(1) { asm_fail("lea needs a memory operand") }
+            parts_sized(opf(0, XOp.width), 0x8D)
+            preg = r
+            prm = 1
+            return x_emit()
+        }
+        case XM.Xchg {
+            need_count(2)
+            // the memory operand (if any) goes into r/m
+            let ai = 0
+            let bi = 1
+            if is_mem(1) {
+                ai = 1
+                bi = 0
+            }
+            need_rm(ai)
+            let b = need_reg(bi)
+            let bs = opf(bi, XOp.width)
+            if is_reg(ai) && bs > 1 && opf(ai, XOp.width) == bs && (opf(ai, XOp.reg) == 0 || b == 0) {
+                // xchg rax, r: 90+r
+                parts_sized(bs, 0x90)
+                popreg = opf(ai, XOp.reg)
+                if popreg == 0 { popreg = b }
+                return x_emit()
+            }
+            let op = 0x87
+            if bs == 1 { op = 0x86 }
+            parts_sized(bs, op)
+            preg = b
+            prm = ai
+            return x_emit()
+        }
+        case XM.Test {
+            need_count(2)
+            need_rm(0)
+            if is_imm(1) {
+                let s = size_of(0, -1)
+                let v = need_num(1)
+                let acc = is_reg(0) && opf(0, XOp.reg) == 0
+                if s == 1 {
+                    if acc {
+                        parts(0, 0xA8)
+                    } else {
+                        parts(0, 0xF6)
+                        preg = 0
+                        prm = 0
+                        byte_op(0)
+                    }
+                    with_imm(v, 1)
+                    return x_emit()
+                }
+                let isz = 4
+                if s == 2 { isz = 2 }
+                if acc {
+                    parts_sized(s, 0xA9)
+                } else {
+                    parts_sized(s, 0xF7)
+                    preg = 0
+                    prm = 0
+                }
+                with_imm(v, isz)
+                return x_emit()
+            }
+            let src = need_reg(1)
+            let s = opf(1, XOp.width)
+            let op = 0x85
+            if s == 1 { op = 0x84 }
+            parts_sized(s, op)
+            preg = src
+            prm = 0
+            if s == 1 {
+                byte_op(0)
+                byte_op(1)
+            }
+            return x_emit()
+        }
+        case XM.Imul {
+            if xop_count == 1 {
+                need_rm(0)
+                let s = size_of(0, -1)
+                let op = 0xF7
+                if s == 1 { op = 0xF6 }
+                parts_sized(s, op)
+                preg = 5
+                prm = 0
+                return x_emit()
+            }
+            let r = need_reg(0)
+            let s = opf(0, XOp.width)
+            if xop_count == 2 && !is_imm(1) {
+                parts_sized(s, 0)
+                two_byte(0xAF)
+                preg = r
+                prm = need_rm(1)
+                return x_emit()
+            }
+            let src = 0
+            let v = 0
+            if xop_count == 3 {
+                src = need_rm(1)
+                v = need_num(2)
+            } else {
+                v = need_num(1)
+            }
+            if fits8(v) {
+                parts_sized(s, 0x6B)
+                with_imm(v, 1)
+            } else {
+                parts_sized(s, 0x69)
+                if s == 2 { with_imm(v, 2) } else { with_imm(v, 4) }
+            }
+            preg = r
+            prm = src
+            return x_emit()
+        }
+        case XM.Cqo { return fixed2(0x48, 0x99) }
+        case XM.Cdq { return fixed1(0x99) }
+        case XM.Cdqe { return fixed2(0x48, 0x98) }
+        case XM.Cwde { return fixed1(0x98) }
+        case XM.Push, XM.Pop {
+            need_count(1)
+            if k == XM.Push && is_imm(0) {
+                let v = need_num(0)
+                if fits8(v) {
+                    parts(0, 0x6A)
+                    with_imm(v, 1)
+                } else {
+                    parts(0, 0x68)
+                    with_imm(v, 4)
+                }
+                return x_emit()
+            }
+            if is_reg(0) {
+                if opf(0, XOp.width) != 8 { asm_fail("push/pop need a 64-bit register") }
+                if k == XM.Push { parts(0, 0x50) } else { parts(0, 0x58) }
+                popreg = opf(0, XOp.reg)
+                return x_emit()
+            }
+            if !is_mem(0) { asm_fail("expected a register or memory") }
+            if k == XM.Push {
+                parts(0, 0xFF)
+                preg = 6
+            } else {
+                parts(0, 0x8F)
+                preg = 0
+            }
+            prm = 0
+            return x_emit()
+        }
+        case XM.Ret {
+            if xop_count == 1 {
+                parts(0, 0xC2)
+                with_imm(need_num(0), 2)
+                return x_emit()
+            }
+            return fixed1(0xC3)
+        }
+        case XM.Nop { return fixed1(0x90) }
+        case XM.Int3 { return fixed1(0xCC) }
+        case XM.Ud2 { return fixed2(0x0F, 0x0B) }
+        case XM.Hlt { return fixed1(0xF4) }
+        case XM.Leave { return fixed1(0xC9) }
+        case XM.Call {
+            need_count(1)
+            if is_imm(0) {
+                let o = xop(0)
+                if [o + XOp.sym] < 0 { asm_fail("call needs a symbol") }
+                ib_len = 0
+                ifix_count = 0
+                ib_put(0xE8)
+                ib_fix(1, 4, 1, [o + XOp.sym], [o + XOp.add])
+                ib_le(0, 4)
+                return 0
+            }
+            parts(0, 0xFF)
+            preg = 2
+            prm = need_rm(0)
+            return x_emit()
+        }
+        case XM.Jmp {
+            need_count(1)
+            if is_imm(0) {
+                if opf(0, XOp.sym) < 0 { asm_fail("jmp needs a label") }
+                is_jump = 1
+                jump_cond = -1
+                jump_sym = opf(0, XOp.sym)
+                jump_add = opf(0, XOp.add)
+                return 0
+            }
+            parts(0, 0xFF)
+            preg = 4
+            prm = need_rm(0)
+            return x_emit()
+        }
+    }
+    asm_fail_name("unsupported instruction", mn)
+    return 0
+}
+
+fn fixed1(a: auto) {
+    ib_len = 0
+    ifix_count = 0
+    ib_put(a)
+    return 0
+}
+
+fn fixed2(a: auto, b: auto) {
+    ib_len = 0
+    ifix_count = 0
+    ib_put(a)
+    ib_put(b)
+    return 0
+}
+
+// add or adc sbb and sub xor cmp (x = 0..7)
+fn x_alu(x: auto) {
+    need_count(2)
+    need_rm(0)
+    if is_imm(1) {
+        let s = size_of(0, -1)
+        let v = need_num(1)
+        let acc = is_reg(0) && opf(0, XOp.reg) == 0
+        if s == 1 {
+            if acc {
+                parts(0, 0x04 + 8 * x)
+            } else {
+                parts(0, 0x80)
+                preg = x
+                prm = 0
+                byte_op(0)
+            }
+            with_imm(v, 1)
+            return x_emit()
+        }
+        if fits8(v) {
+            parts_sized(s, 0x83)
+            preg = x
+            prm = 0
+            with_imm(v, 1)
+            return x_emit()
+        }
+        let isz = 4
+        if s == 2 { isz = 2 }
+        if s == 8 && !fits32s(v) { asm_fail("the immediate does not fit in 32 bits (load it into a register first)") }
+        if acc {
+            parts_sized(s, 0x05 + 8 * x)
+        } else {
+            parts_sized(s, 0x81)
+            preg = x
+            prm = 0
+        }
+        with_imm(v, isz)
+        return x_emit()
+    }
+    if is_reg(1) {
+        let src = opf(1, XOp.reg)
+        let s = opf(1, XOp.width)
+        if is_reg(0) && opf(0, XOp.width) != s { asm_fail("operand sizes differ") }
+        let op = 0x01 + 8 * x
+        if s == 1 { op = 8 * x }
+        parts_sized(s, op)
+        preg = src
+        prm = 0
+        if s == 1 {
+            byte_op(1)
+            byte_op(0)
+        }
+        return x_emit()
+    }
+    let r = need_reg(0)
+    let s = opf(0, XOp.width)
+    if !is_mem(1) { asm_fail("expected memory") }
+    let op = 0x03 + 8 * x
+    if s == 1 { op = 0x02 + 8 * x }
+    parts_sized(s, op)
+    preg = r
+    prm = 1
+    if s == 1 { byte_op(0) }
+    return x_emit()
+}
+
+// rol ror rcl rcr shl sal shr sar: k - XM.Rol is the /x of the encoding (sal = shl, sar = 7)
+fn x_shift(k: auto) {
+    let x = k - XM.Rol
+    if k == XM.Sal { x = 4 }
+    if k == XM.Shr { x = 5 }
+    if k == XM.Sar { x = 7 }
+    if xop_count != 1 && xop_count != 2 { asm_fail("wrong number of operands") }
+    need_rm(0)
+    let s = size_of(0, -1)
+    let b8 = s == 1
+    if xop_count == 1 {
+        parts_sized(s, 0xD1 - b8)
+    } elif is_reg(1) {
+        let c = xop(1)
+        if [c + XOp.reg] != 1 || [c + XOp.width] != 1 || [c + XOp.high8] { asm_fail("the shift count register must be cl") }
+        parts_sized(s, 0xD3 - b8)
+    } else {
+        let v = need_num(1)
+        if v == 1 {
+            parts_sized(s, 0xD1 - b8)
+        } else {
+            parts_sized(s, 0xC1 - b8)
+            with_imm(v & 0xFF, 1)
+        }
+    }
+    preg = x
+    prm = 0
+    if b8 { byte_op(0) }
+    return x_emit()
+}
+
+fn x_mov() {
+    need_count(2)
+    need_rm(0)
+    if is_imm(1) {
+        let s = size_of(0, -1)
+        let o = xop(1)
+        if [o + XOp.sym] >= 0 { asm_fail("absolute addresses are not position independent: use lea reg, [rip + sym]") }
+        let n = [o + XOp.add]
+        if is_reg(0) {
+            let r = opf(0, XOp.reg)
+            if s == 8 {
+                if fits32s(n) {
+                    parts(1, 0xC7)
+                    preg = 0
+                    prm = 0
+                    with_imm(n, 4)
+                    return x_emit()
+                }
+                parts(1, 0xB8)
+                popreg = r
+                with_imm(n, 8)
+                return x_emit()
+            }
+            if s == 1 {
+                parts(0, 0xB0)
+                popreg = r
+                with_imm(n, 1)
+                byte_op(0)
+                return x_emit()
+            }
+            parts_sized(s, 0xB8)
+            popreg = r
+            with_imm(n, s)
+            return x_emit()
+        }
+        if s == 8 && !fits32s(n) { asm_fail("the immediate does not fit in 32 bits") }
+        if s == 1 {
+            parts(0, 0xC6)
+            with_imm(n, 1)
+        } else {
+            parts_sized(s, 0xC7)
+            if s == 2 { with_imm(n, 2) } else { with_imm(n, 4) }
+        }
+        preg = 0
+        prm = 0
+        return x_emit()
+    }
+    if is_reg(1) {
+        let src = opf(1, XOp.reg)
+        let s = opf(1, XOp.width)
+        if is_reg(0) && opf(0, XOp.width) != s { asm_fail("operand sizes differ (use movzx/movsx/movsxd)") }
+        let op = 0x89
+        if s == 1 { op = 0x88 }
+        parts_sized(s, op)
+        preg = src
+        prm = 0
+        if s == 1 {
+            byte_op(1)
+            byte_op(0)
+        }
+        return x_emit()
+    }
+    let r = need_reg(0)
+    let s = opf(0, XOp.width)
+    if !is_mem(1) { asm_fail("expected memory") }
+    let op = 0x8B
+    if s == 1 { op = 0x8A }
+    parts_sized(s, op)
+    preg = r
+    prm = 1
+    if s == 1 { byte_op(0) }
+    return x_emit()
+}

@@ -1,0 +1,67 @@
+// arithmetic, bit operations, comparisons, constants
+extern printf(fmt, ...)
+
+const BIG = 0x123456789ABCDEF0
+const MASK = (1 << 20) - 1
+const NEG = -100000
+
+fn show(label, v: auto) {
+    printf("%s = %lld\n", label, v)
+}
+
+fn main() {
+    let a = 17
+    let b = -5
+    show("a + b", a + b)
+    show("a - b", a - b)
+    show("a * b", a * b)
+    show("a / b", a / b)
+    show("a % b", a % b)
+    show("b / 2", b / 2)
+    show("b % 3", b % 3)
+    show("a << 3", a << 3)
+    show("b >> 1", b >> 1)
+    show("b >>> 60", b >>> 60)
+    show("a & 6", a & 6)
+    show("a | 6", a | 6)
+    show("a ^ 6", a ^ 6)
+    show("~a", ~a)
+    show("-a", -a)
+    show("!a", !a)
+    show("!0", !0)
+    show("a < b", a < b)
+    show("a >= b", a >= b)
+    show("a == 17", a == 17)
+    show("a != 17", a != 17)
+    show("a > 0 && b > 0", a > 0 && b > 0)
+    show("a > 0 || b > 0", a > 0 || b > 0)
+    show("a > b ? a : b", a > b ? a : b)
+    show("BIG", BIG)
+    show("BIG >>> 32", BIG >>> 32)
+    show("MASK", MASK)
+    show("NEG", NEG)
+    show("NEG * 3", NEG * 3)
+    show("precedence", a + b * 2 - (a - b) / 3)
+    show("x & 1 == 0", a & 1 == 0)
+    let c = 1
+    c += 4
+    c -= 1
+    c *= 10
+    c /= 3
+    c %= 7
+    c <<= 4
+    c >>= 1
+    c |= 1
+    c &= 0xFF
+    c ^= 0x0F
+    show("c", c)
+    let big = 4000000000
+    big = big * 4 + 7
+    show("big", big)
+    show("-1 >>> 1", -1 >>> 1)
+    show("5 - 10", 5 - 10)
+    show("4096 + a", a + 4096)
+    show("a - 5000", a - 5000)
+    show("a * 8", a * 8)
+    show("a * 7", a * 7)
+}

@@ -280,6 +280,7 @@ export function runMachO(bytes: Uint8Array, opts: RunOptions = {}): RunResult {
     usleep: (c) => ret(c, 0),
     sleep: (c) => ret(c, 0),
     getenv: (c) => ret(c, 0),
+    system: (c) => ret(c, -1),     // no shell in the emulator
     toupper: (c) => { const v = int(c, 0); ret(c, v >= 97 && v <= 122 ? v - 32 : v); },
     tolower: (c) => { const v = int(c, 0); ret(c, v >= 65 && v <= 90 ? v + 32 : v); },
     isdigit: (c) => { const v = int(c, 0); ret(c, v >= 48 && v <= 57 ? 1 : 0); },

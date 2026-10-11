@@ -1,0 +1,1 @@
+tests/errors/cycle.hla:2:11: error: the constant depends on itself: 'A'

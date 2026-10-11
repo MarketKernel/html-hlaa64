@@ -1,0 +1,1 @@
+tests/errors/missing-comma.hla:3:14: error: expected ')' after the arguments

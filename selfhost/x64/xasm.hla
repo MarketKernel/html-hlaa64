@@ -1,0 +1,682 @@
+// x64/xasm.hla — x86-64 assembly (Intel syntax, COFF dialect) to sections. A section is first a
+// list of items (labels, bytes, jumps, alignment, space); jumps start short (2 bytes) and become
+// near (5/6 bytes) until every target is in reach; then the bytes are laid out. .seh_* directives
+// become the Windows unwind information (.xdata and .pdata).
+
+// COFF section characteristics
+const SCN_CODE = 0x20
+const SCN_IDATA = 0x40
+const SCN_UDATA = 0x80
+const SCN_EXEC = 0x20000000
+const SCN_READ = 0x40000000
+const SCN_WRITE = 0x80000000
+
+// items ----------------------------------------------------------------------------------
+
+enum IK { Label, Bytes, Jump, Align, Space }
+
+struct Item {
+    sect: ptr
+    kind: i64       // IK.*
+    a: i64          // Label: name id; Bytes: offset in the pool; Jump: condition (-1: jmp); Align: bytes; Space: count
+    b: i64          // Bytes: length; Jump: target name id; Align: 1 for code (nop padding)
+    c: i64          // Bytes: first fixup in the fixup pool; Jump: addend
+    d: i64          // Bytes: number of fixups; Jump: 1 when near (rel32)
+    insn: i64       // Bytes: an instruction
+    line: i64
+    off: i64        // offset in the section (layout)
+}
+
+data items: ptr = 0
+data item_count: i64 = 0
+data item_cap: i64 = 0
+data pool: Buf                      // the bytes of all Bytes items
+
+// fixups of Bytes items: offset in the item, size, rel/abs/rva, symbol, addend
+enum XF { Rel, Abs, Rva }
+struct PFix { off: i64, len: i64, kind: i64, sym: i64, add: i64 }
+data pfixes: ptr = 0
+data pfix_count: i64 = 0
+data pfix_cap: i64 = 0
+
+fn item_at(i) { return items + i * Item.size }
+
+fn new_item(kind: auto) {
+    if item_count >= item_cap {
+        item_cap = item_cap * 2 + 4096
+        items = mem_resize(items, item_cap * Item.size)
+    }
+    let it = items + item_count * Item.size
+    item_count++
+    [it + Item.sect] = cur_sect
+    [it + Item.kind] = kind
+    [it + Item.a] = 0
+    [it + Item.b] = 0
+    [it + Item.c] = 0
+    [it + Item.d] = 0
+    [it + Item.insn] = 0
+    [it + Item.line] = line_no
+    [it + Item.off] = 0
+    return it
+}
+
+fn add_pfix(off: auto, size: auto, kind: auto, sym: auto, add: auto) {
+    if pfix_count >= pfix_cap {
+        pfix_cap = pfix_cap * 2 + 1024
+        pfixes = mem_resize(pfixes, pfix_cap * PFix.size)
+    }
+    let f = pfixes + pfix_count * PFix.size
+    pfix_count++
+    [f + PFix.off] = off
+    [f + PFix.len] = size
+    [f + PFix.kind] = kind
+    [f + PFix.sym] = sym
+    [f + PFix.add] = add
+}
+
+// a Bytes item with the n bytes at p (its fixups are added after it with add_pfix)
+fn bytes_item(p: auto, n: auto, insn: auto) {
+    let it = new_item(IK.Bytes)
+    [it + Item.a] = [pool + Buf.used]
+    [it + Item.b] = n
+    [it + Item.c] = pfix_count
+    [it + Item.insn] = insn
+    buf_add(pool, p, n)
+    return it
+}
+
+// data bytes extend the last item when it is plain data of the same section
+fn data_bytes(p: auto, n: auto) {
+    if item_count > 0 {
+        let last = items + (item_count - 1) * Item.size
+        if [last + Item.sect] == cur_sect && [last + Item.kind] == IK.Bytes && [last + Item.insn] == 0 && [last + Item.d] == 0 && [last + Item.a] + [last + Item.b] == [pool + Buf.used] {
+            buf_add(pool, p, n)
+            [last + Item.b] = [last + Item.b] + n
+            return 0
+        }
+    }
+    bytes_item(p, n, 0)
+    return 0
+}
+
+fn label_item(id: auto) {
+    let it = new_item(IK.Label)
+    [it + Item.a] = id
+}
+
+// sections -------------------------------------------------------------------------------
+
+// the COFF section with this name (made when new); kind: the flag string of .section, or 0
+fn coff_section(name: auto, kind: auto) {
+    for i in 0..sect_count {
+        let s = sect_at(i)
+        if cstr_same([s + Sect.sname], name) { return s }
+    }
+    let flags = 0
+    let zero = 0
+    if kind != 0 {
+        flags = SCN_READ
+        let x = 0
+        let b = 0
+        let w = 0
+        let i = 0
+        while u8[kind + i] != 0 {
+            let c = u8[kind + i]
+            if c == 'x' { x = 1 }
+            if c == 'b' { b = 1 }
+            if c == 'w' { w = 1 }
+            i++
+        }
+        if x { flags = flags | SCN_CODE | SCN_EXEC }
+        if b { flags = flags | SCN_UDATA } elif !x { flags = flags | SCN_IDATA }
+        if w { flags = flags | SCN_WRITE }
+        zero = b
+    } elif cstr_same(name, ".text") || mem_same(name, ".text$", 6) {
+        flags = SCN_CODE | SCN_EXEC | SCN_READ
+    } elif cstr_same(name, ".bss") || mem_same(name, ".bss$", 5) {
+        flags = SCN_UDATA | SCN_READ | SCN_WRITE
+        zero = 1
+    } elif cstr_same(name, ".rdata") || cstr_same(name, ".xdata") || cstr_same(name, ".pdata") || mem_same(name, ".rdata$", 7) {
+        flags = SCN_IDATA | SCN_READ
+    } else {
+        flags = SCN_IDATA | SCN_READ | SCN_WRITE
+    }
+    let s = get_section("", name, flags)
+    [s + Sect.zerofill] = zero
+    [s + Sect.code] = (flags & SCN_EXEC) != 0
+    // default alignments as clang uses them: code 16, writable data and bss 4, the rest 1
+    let align = 1
+    if flags & SCN_EXEC { align = 16 } elif flags & SCN_WRITE { align = 4 }
+    [s + Sect.align] = align
+    return s
+}
+
+// the hooks of the data directives (asm/core.hla): bytes become items ------------------------
+
+data one: u8[8]
+
+fn out_byte(v: auto) {
+    one[0] = v
+    data_bytes(one, 1)
+}
+
+fn out_value(v: auto, size: auto) {
+    for i in 0..size { one[i] = v >>> (i * 8) }
+    data_bytes(one, size)
+}
+
+fn out_symbol(id: auto, add: auto, size: auto) {
+    if size != 8 && size != 4 { asm_fail("symbol addresses need .quad (or .long for an RVA)") }
+    for i in 0..8 { one[i] = 0 }
+    bytes_item(one, size, 0)
+    add_pfix(0, size, XF.Abs, id, add)
+    let it = items + (item_count - 1) * Item.size
+    [it + Item.d] = 1
+}
+
+fn out_space(n: auto, fill: auto) {
+    if fill != 0 {
+        for i in 0..n { out_byte(fill) }
+        return 0
+    }
+    let it = new_item(IK.Space)
+    [it + Item.a] = n
+    return 0
+}
+
+fn out_align(p2: auto) {
+    let n = 1 << p2
+    if n > [cur_sect + Sect.align] { [cur_sect + Sect.align] = n }
+    let it = new_item(IK.Align)
+    [it + Item.a] = n
+    [it + Item.b] = [cur_sect + Sect.code]
+}
+
+fn mark_global(id: auto) {
+    let a = asym_at(id)
+    [a + ASym.global] = 1
+}
+
+// unwind information ---------------------------------------------------------------------
+
+enum UOp { Push, Alloc, SetFrame, SaveReg, SaveXmm }
+
+struct SehFn { name: i64, prolog_end: i64, end: i64, first: i64, count: i64, frame_reg: i64, frame_off: i64, has_frame: i64, line: i64 }
+struct SehCode { label: i64, op: i64, reg: i64, off: i64 }
+
+const MAX_SEH = 8192
+data sehs: ptr = 0
+data seh_count: i64 = 0
+data seh_codes: ptr = 0
+data seh_code_count: i64 = 0
+data cur_seh: ptr = 0
+data marker_count: i64 = 0
+data mbuf: Buf
+
+// a label item with a new name .Lseh$N; its name id
+fn marker() {
+    [mbuf + Buf.used] = 0
+    fmt1(mbuf, ".Lseh$%d", marker_count)
+    marker_count++
+    let id = intern([mbuf + Buf.ptr], [mbuf + Buf.used])
+    label_item(id)
+    return id
+}
+
+// a 64-bit register name for .seh_pushreg ...
+fn seh_reg() {
+    let id = expect_ident()
+    let info = [xreg_info + id * 8]
+    if info == 0 || info >> 8 & 255 != 8 { asm_fail("bad register in an unwind directive") }
+    return info >> 1 & 15
+}
+
+fn seh_directive(s: auto) {
+    if cstr_same(s, ".seh_proc") {
+        if seh_count >= MAX_SEH { asm_fail("too many functions") }
+        let id = expect_ident()
+        cur_seh = sehs + seh_count * SehFn.size
+        seh_count++
+        [cur_seh + SehFn.name] = id
+        [cur_seh + SehFn.first] = seh_code_count
+        [cur_seh + SehFn.prolog_end] = -1
+        [cur_seh + SehFn.end] = -1
+        [cur_seh + SehFn.line] = line_no
+        return 1
+    }
+    let op = -1
+    if cstr_same(s, ".seh_pushreg") { op = UOp.Push }
+    elif cstr_same(s, ".seh_stackalloc") { op = UOp.Alloc }
+    elif cstr_same(s, ".seh_setframe") { op = UOp.SetFrame }
+    elif cstr_same(s, ".seh_savereg") { op = UOp.SaveReg }
+    elif cstr_same(s, ".seh_savexmm") { op = UOp.SaveXmm }
+    if op >= 0 {
+        if cur_seh == 0 { asm_fail("an unwind directive outside of .seh_proc") }
+        let label = marker()
+        let c = seh_codes + seh_code_count * SehCode.size
+        seh_code_count++
+        [cur_seh + SehFn.count] = [cur_seh + SehFn.count] + 1
+        [c + SehCode.label] = label
+        [c + SehCode.op] = op
+        [c + SehCode.reg] = 0
+        [c + SehCode.off] = 0
+        if op == UOp.Alloc {
+            [c + SehCode.off] = read_number()
+        } elif op == UOp.SaveXmm {
+            asm_fail(".seh_savexmm is not supported")
+        } else {
+            [c + SehCode.reg] = seh_reg()
+            if op != UOp.Push {
+                expect_char(',')
+                [c + SehCode.off] = read_number()
+            }
+        }
+        if op == UOp.SetFrame {
+            let fo = [c + SehCode.off]
+            if fo % 16 != 0 || fo > 240 { asm_fail("the frame offset must be a multiple of 16, at most 240") }
+            [cur_seh + SehFn.has_frame] = 1
+            [cur_seh + SehFn.frame_reg] = [c + SehCode.reg]
+            [cur_seh + SehFn.frame_off] = fo
+        }
+        return 1
+    }
+    if cstr_same(s, ".seh_endprologue") {
+        if cur_seh == 0 { asm_fail(".seh_endprologue outside of .seh_proc") }
+        let label = marker()
+        [cur_seh + SehFn.prolog_end] = label
+        return 1
+    }
+    if cstr_same(s, ".seh_endproc") {
+        if cur_seh == 0 { asm_fail(".seh_endproc without .seh_proc") }
+        let label = marker()
+        [cur_seh + SehFn.end] = label
+        cur_seh = 0
+        return 1
+    }
+    return 0
+}
+
+// lines ----------------------------------------------------------------------------------
+
+// the rest of the line up to a comma, as a C string
+fn read_upto_comma() {
+    skip_sp()
+    let p = ap
+    while u8[ap] != 0 && u8[ap] != ',' { ap++ }
+    let q = ap
+    while q > p && (u8[q - 1] == ' ' || u8[q - 1] == '\t') { q-- }
+    return cstr_from(p, q - p)
+}
+
+fn x_directive(name: auto) {
+    let s = name_str(name)
+    if cstr_same(s, ".intel_syntax") {
+        while u8[ap] != 0 { ap++ }
+    } elif cstr_same(s, ".text") {
+        cur_sect = coff_section(".text", 0)
+    } elif cstr_same(s, ".data") {
+        cur_sect = coff_section(".data", 0)
+    } elif cstr_same(s, ".bss") {
+        cur_sect = coff_section(".bss", 0)
+    } elif cstr_same(s, ".section") {
+        let sname = read_upto_comma()
+        let kind = 0
+        if accept_char(',') {
+            let f = read_upto_comma()
+            // the flags without quotes
+            let k = mem_alloc(cstr_len(f) + 1)
+            let n = 0
+            let i = 0
+            while u8[f + i] != 0 {
+                if u8[f + i] != '"' {
+                    u8[k + n] = u8[f + i]
+                    n++
+                }
+                i++
+            }
+            kind = k
+        }
+        while accept_char(',') { read_upto_comma() }
+        cur_sect = coff_section(sname, kind)
+    } elif cstr_same(s, ".align") {
+        let n = read_number()
+        let p2 = 0
+        while (1 << p2) < n { p2++ }
+        if (1 << p2) != n { asm_fail("the alignment must be a power of two") }
+        out_align(p2)
+    } elif seh_directive(s) {
+        // done
+    } elif !data_directive(name) {
+        asm_fail_name("unknown directive", name)
+    }
+    if !at_end() { asm_fail("unexpected text after the directive") }
+}
+
+fn x_line() {
+    loop {
+        if at_end() { return 0 }
+        let save = ap
+        let id = read_ident()
+        if id >= 0 && accept_char(':') {
+            label_item(id)
+            continue
+        }
+        ap = save
+        break
+    }
+    let word = read_ident()
+    if word < 0 { asm_fail("expected an instruction or a directive") }
+    let text = name_str(word)
+    if u8[text] == '.' {
+        x_directive(word)
+        return 0
+    }
+    if [cur_sect + Sect.code] == 0 { asm_fail_name("an instruction outside of a code section:", word) }
+    parse_xops()
+    x_encode(word)
+    if is_jump {
+        let it = new_item(IK.Jump)
+        [it + Item.a] = jump_cond
+        [it + Item.b] = jump_sym
+        [it + Item.c] = jump_add
+        return 0
+    }
+    bytes_item(ib, ib_len, 1)
+    let it = items + (item_count - 1) * Item.size
+    for i in 0..ifix_count {
+        let f = ifixes + i * IFix.size
+        let kind = XF.Abs
+        if [f + IFix.rel] { kind = XF.Rel }
+        add_pfix([f + IFix.off], [f + IFix.len], kind, [f + IFix.sym], [f + IFix.add])
+    }
+    [it + Item.d] = ifix_count
+    return 0
+}
+
+// layout ---------------------------------------------------------------------------------
+
+// the sections' fixups after layout: offset, size, kind, symbol, addend, end of the instruction
+struct SFix { sect: ptr, off: i64, len: i64, kind: i64, sym: i64, add: i64, end: i64, line: i64 }
+data sfixes: ptr = 0
+data sfix_count: i64 = 0
+data sfix_cap: i64 = 0
+
+fn add_sfix(s: auto, off: auto, size: auto, kind: auto, sym: auto, add: auto, end: auto, line: auto) {
+    if sfix_count >= sfix_cap {
+        sfix_cap = sfix_cap * 2 + 1024
+        sfixes = mem_resize(sfixes, sfix_cap * SFix.size)
+    }
+    let f = sfixes + sfix_count * SFix.size
+    sfix_count++
+    [f + SFix.sect] = s
+    [f + SFix.off] = off
+    [f + SFix.len] = size
+    [f + SFix.kind] = kind
+    [f + SFix.sym] = sym
+    [f + SFix.add] = add
+    [f + SFix.end] = end
+    [f + SFix.line] = line
+}
+
+// where each label is: its item (by name id), set before the layout
+data label_item_of: ptr = 0
+
+// the offset of a label in its section (after the layout)
+fn sym_off(id) { return [asyms + id * ASym.size + ASym.off] }
+
+fn jump_len(it) {
+    if [it + Item.d] == 0 { return 2 }
+    if [it + Item.a] < 0 { return 5 }
+    return 6
+}
+
+// the offsets of the items of section s
+fn place_items(s: auto) {
+    let off = 0
+    for i in 0..item_count {
+        let it = items + i * Item.size
+        if [it + Item.sect] != s { continue }
+        [it + Item.off] = off
+        switch [it + Item.kind] {
+            case IK.Bytes { off = off + [it + Item.b] }
+            case IK.Jump { off = off + jump_len(it) }
+            case IK.Align {
+                let a = [it + Item.a]
+                off = (off + a - 1) / a * a
+            }
+            case IK.Space { off = off + [it + Item.a] }
+        }
+    }
+    return off
+}
+
+// multi-byte nops, the sequences LLVM uses for code alignment
+rodata nop_seqs: ptr = [
+    "", "\x90", "\x66\x90", "\x0f\x1f\x00", "\x0f\x1f\x40\x00", "\x0f\x1f\x44\x00\x00",
+    "\x66\x0f\x1f\x44\x00\x00", "\x0f\x1f\x80\x00\x00\x00\x00", "\x0f\x1f\x84\x00\x00\x00\x00\x00",
+    "\x66\x0f\x1f\x84\x00\x00\x00\x00\x00", "\x66\x2e\x0f\x1f\x84\x00\x00\x00\x00\x00"
+]
+
+fn nop_fill(b: auto, n: auto) {
+    while n > 0 {
+        let k = n
+        if k > 10 { k = 10 }
+        buf_add(b, nop_seqs[k], k)
+        n = n - k
+    }
+}
+
+fn layout_sections() {
+    // every label: its item, and no name twice
+    label_item_of = mem_alloc(MAX_NAMES * 8)
+    for i in 0..item_count {
+        let it = items + i * Item.size
+        if [it + Item.kind] != IK.Label { continue }
+        let id = [it + Item.a]
+        if [label_item_of + id * 8] != 0 {
+            line_no = [it + Item.line]
+            asm_fail_name("symbol is already defined:", id)
+        }
+        [label_item_of + id * 8] = it
+    }
+    for si in 0..sect_count {
+        let s = sect_at(si)
+        // jumps to symbols outside this section are always near
+        for i in 0..item_count {
+            let it = items + i * Item.size
+            if [it + Item.sect] != s || [it + Item.kind] != IK.Jump { continue }
+            let target = [label_item_of + [it + Item.b] * 8]
+            if target == 0 { [it + Item.d] = 1 }
+            elif [target + Item.sect] != s { [it + Item.d] = 1 }
+        }
+        for iter in 0..1000 {
+            place_items(s)
+            let changed = 0
+            for i in 0..item_count {
+                let it = items + i * Item.size
+                if [it + Item.sect] != s || [it + Item.kind] != IK.Jump || [it + Item.d] != 0 { continue }
+                let target = [label_item_of + [it + Item.b] * 8]
+                let d = [target + Item.off] + [it + Item.c] - ([it + Item.off] + 2)
+                if d < -128 || d > 127 {
+                    [it + Item.d] = 1
+                    changed = 1
+                }
+            }
+            if !changed { break }
+        }
+    }
+    // the bytes
+    for si in 0..sect_count {
+        let s = sect_at(si)
+        let out = s + Sect.bytes
+        let zero = [s + Sect.zerofill]
+        let size = 0
+        for i in 0..item_count {
+            let it = items + i * Item.size
+            if [it + Item.sect] != s { continue }
+            line_no = [it + Item.line]
+            switch [it + Item.kind] {
+                case IK.Label {
+                    let a = asym_at([it + Item.a])
+                    [a + ASym.sect] = si + 1
+                    [a + ASym.off] = size
+                    def_count++
+                    [a + ASym.order] = def_count
+                }
+                case IK.Bytes {
+                    let n = [it + Item.b]
+                    let p = [pool + Buf.ptr] + [it + Item.a]
+                    if zero {
+                        for k in 0..n {
+                            if u8[p + k] != 0 { asm_fail("cannot put data into a zerofill section") }
+                        }
+                    } else {
+                        for k in 0..[it + Item.d] {
+                            let f = pfixes + ([it + Item.c] + k) * PFix.size
+                            add_sfix(s, size + [f + PFix.off], [f + PFix.len], [f + PFix.kind], [f + PFix.sym], [f + PFix.add], size + n, line_no)
+                        }
+                        buf_add(out, p, n)
+                    }
+                    size = size + n
+                }
+                case IK.Jump {
+                    let cond = [it + Item.a]
+                    let start = size
+                    let fsize = 1
+                    if [it + Item.d] {
+                        fsize = 4
+                        if cond < 0 { buf_char(out, 0xE9) }
+                        else {
+                            buf_char(out, 0x0F)
+                            buf_char(out, 0x80 + cond)
+                        }
+                        emit_to(out, 0, 4)
+                    } else {
+                        if cond < 0 { buf_char(out, 0xEB) } else { buf_char(out, 0x70 + cond) }
+                        buf_char(out, 0)
+                    }
+                    let len = jump_len(it)
+                    add_sfix(s, start + len - fsize, fsize, XF.Rel, [it + Item.b], [it + Item.c], start + len, line_no)
+                    size = size + len
+                }
+                case IK.Align {
+                    let a = [it + Item.a]
+                    let pad = (a - size % a) % a
+                    if !zero {
+                        if [it + Item.b] { nop_fill(out, pad) } else { emit_to(out, 0, pad) }
+                    }
+                    size = size + pad
+                }
+                case IK.Space {
+                    if !zero { emit_to(out, 0, [it + Item.a]) }
+                    size = size + [it + Item.a]
+                }
+            }
+        }
+        [s + Sect.length] = size
+    }
+    line_no = 0
+}
+
+// .xdata and .pdata from the .seh_* directives
+fn unwind_info() {
+    if seh_count == 0 { return 0 }
+    let xdata = coff_section(".xdata", 0)
+    let pdata = coff_section(".pdata", 0)
+    if [xdata + Sect.align] < 4 { [xdata + Sect.align] = 4 }
+    if [pdata + Sect.align] < 4 { [pdata + Sect.align] = 4 }
+    let xb = xdata + Sect.bytes
+    let pb = pdata + Sect.bytes
+    local slots: i64[64]
+    for fi in 0..seh_count {
+        let f = sehs + fi * SehFn.size
+        line_no = [f + SehFn.line]
+        let start = sym_off([f + SehFn.name])
+        let prolog = 0
+        if [f + SehFn.prolog_end] >= 0 { prolog = sym_off([f + SehFn.prolog_end]) - start }
+        if prolog > 255 { asm_fail("the prologue is longer than 255 bytes") }
+        // unwind codes, the newest first
+        let n = 0
+        let ci = [f + SehFn.first] + [f + SehFn.count] - 1
+        while ci >= [f + SehFn.first] {
+            let c = seh_codes + ci * SehCode.size
+            let at = sym_off([c + SehCode.label]) - start
+            let off = [c + SehCode.off]
+            switch [c + SehCode.op] {
+                case UOp.Push {
+                    slots[n] = at | (0 | [c + SehCode.reg] << 4) << 8
+                    n++
+                }
+                case UOp.Alloc {
+                    if off % 8 != 0 { asm_fail(".seh_stackalloc must be a multiple of 8") }
+                    if off <= 128 {
+                        slots[n] = at | (2 | (off / 8 - 1) << 4) << 8
+                        n++
+                    } elif off <= 512 * 1024 - 8 {
+                        slots[n] = at | 1 << 8
+                        slots[n + 1] = off / 8
+                        n = n + 2
+                    } else {
+                        slots[n] = at | (1 | 1 << 4) << 8
+                        slots[n + 1] = off & 0xFFFF
+                        slots[n + 2] = off >>> 16
+                        n = n + 3
+                    }
+                }
+                case UOp.SetFrame {
+                    slots[n] = at | 3 << 8
+                    n++
+                }
+                case UOp.SaveReg {
+                    slots[n] = at | (4 | [c + SehCode.reg] << 4) << 8
+                    slots[n + 1] = off / 8
+                    n = n + 2
+                }
+            }
+            if n > 60 { asm_fail("too many unwind codes") }
+            ci--
+        }
+        let xo = [xb + Buf.used]
+        let fr = 0
+        if [f + SehFn.has_frame] { fr = [f + SehFn.frame_reg] | [f + SehFn.frame_off] / 16 << 4 }
+        buf_char(xb, 1)
+        buf_char(xb, prolog)
+        buf_char(xb, n)
+        buf_char(xb, fr)
+        for k in 0..n {
+            buf_char(xb, slots[k] & 0xFF)
+            buf_char(xb, slots[k] >> 8 & 0xFF)
+        }
+        if n % 2 { emit_to(xb, 0, 2) }
+        // the label $unwind$name at the start of this function's record
+        [mbuf + Buf.used] = 0
+        fmt1(mbuf, "$unwind$%s", name_str([f + SehFn.name]))
+        let xl = intern([mbuf + Buf.ptr], [mbuf + Buf.used])
+        let a = asym_at(xl)
+        [a + ASym.sect] = sect_index(xdata) + 1
+        [a + ASym.off] = xo
+        def_count++
+        [a + ASym.order] = def_count
+        let po = [pb + Buf.used]
+        emit_to(pb, 0, 12)
+        add_sfix(pdata, po, 4, XF.Rva, [f + SehFn.name], 0, 0, line_no)
+        add_sfix(pdata, po + 4, 4, XF.Rva, [f + SehFn.end], 0, 0, line_no)
+        add_sfix(pdata, po + 8, 4, XF.Rva, xl, 0, 0, line_no)
+    }
+    [xdata + Sect.length] = [xb + Buf.used]
+    [pdata + Sect.length] = [pb + Buf.used]
+    line_no = 0
+    return 0
+}
+
+fn assemble_x64(src: auto) {
+    items = 0
+    sehs = mem_alloc(MAX_SEH * SehFn.size)
+    seh_codes = mem_alloc(MAX_SEH * 8 * SehCode.size)
+    next_src = src
+    cur_sect = coff_section(".text", 0)
+    while next_line() { x_line() }
+    if cur_seh != 0 { asm_fail(".seh_proc is not closed with .seh_endproc") }
+    layout_sections()
+    unwind_info()
+}

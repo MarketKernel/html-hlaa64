@@ -1,0 +1,34 @@
+// values stored into 8/16/32-bit memory: the low bits that need the high ones (right shifts,
+// division, big shift amounts) are computed in 64 bits
+extern printf(fmt, ...)
+
+data out: u8[8]
+data halves: u32[2]
+data shorts: i16[2]
+
+fn main() {
+    let n = 0x1122334455667788
+    for k in 0..8 { out[k] = n >>> (k * 8) & 0xFF }      // little-endian bytes of n
+    for k in 0..8 { printf("%02llx ", out[k]) }
+    printf("\n")
+    let bits = 24
+    for k in 0..8 { out[7 - k] = bits >>> (k * 8) & 0xFF }
+    for k in 0..8 { printf("%lld ", out[k]) }
+    printf("\n")
+    halves[0] = n >> 32
+    halves[1] = n / 0x100000000
+    printf("%llx %llx\n", halves[0], halves[1])
+    let big = 0x7FFF00000000
+    shorts[0] = big >>> 32
+    shorts[1] = big % 0x10000 + 5
+    printf("%lld %lld\n", shorts[0], shorts[1])
+    out[0] = 1
+    out[0] <<= 40 >> 38                                  // shift by a computed amount
+    let sh = 33
+    out[1] = 1 << sh                                     // 64-bit: 0 in the low byte
+    out[2] = 200
+    out[2] >>= 1
+    out[3] = 0
+    out[3] += n >>> 56
+    printf("%lld %lld %lld %lld\n", out[0], out[1], out[2], out[3])
+}

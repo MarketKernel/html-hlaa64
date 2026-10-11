@@ -1,0 +1,197 @@
+// front/consts.hla — values known while translating: constants, sizes, the layout of data.
+
+// the value of a constant expression (stops with an error when it is not one)
+fn const_eval(e: auto) {
+    switch [e + Node.kind] {
+        case NK.Num { return [e + Node.val] }
+        case NK.Name { return const_of_name([e + Node.val], [e + Node.tok]) }
+        case NK.SizeOf { return size_of([e + Node.val], [e + Node.tok], 0) }
+        case NK.LenOf { return size_of([e + Node.val], [e + Node.tok], 1) }
+        case NK.Unary {
+            let v = const_eval([e + Node.a])
+            switch [e + Node.op] {
+                case Op.Minus { return 0 - v }
+                case Op.Tilde { return v ^ -1 }
+            }
+            return v == 0
+        }
+        case NK.Binary {
+            let l = const_eval([e + Node.a])
+            let r = const_eval([e + Node.b])
+            return fold(e, l, r)
+        }
+        case NK.Cond {
+            let c = const_eval([e + Node.a])
+            if c != 0 { return const_eval([e + Node.b]) }
+            return const_eval([e + Node.c])
+        }
+    }
+    fail_tok([e + Node.tok], "expected a constant")
+    return 0
+}
+
+// l op r for the operator of the Binary node e
+fn fold(e: auto, l: auto, r: auto) {
+    switch [e + Node.op] {
+        case Op.Plus { return l + r }
+        case Op.Minus { return l - r }
+        case Op.Star { return l * r }
+        case Op.Slash, Op.Percent {
+            if r == 0 { fail_tok([e + Node.tok], "division by zero") }
+            if [e + Node.op] == Op.Slash { return l / r }
+            return l % r
+        }
+        case Op.Amp { return l & r }
+        case Op.Pipe { return l | r }
+        case Op.Caret { return l ^ r }
+        case Op.Shl { return l << r }
+        case Op.Shr { return l >> r }
+        case Op.Ushr { return l >>> r }
+        case Op.Eq { return l == r }
+        case Op.Ne { return l != r }
+        case Op.Lt { return l < r }
+        case Op.Le { return l <= r }
+        case Op.Gt { return l > r }
+        case Op.Ge { return l >= r }
+        case Op.AndAnd { return l != 0 && r != 0 }
+        case Op.OrOr { return l != 0 || r != 0 }
+    }
+    fail_tok([e + Node.tok], "unknown operator")
+    return 0
+}
+
+// 1 when const_eval(e) gives a value (no variables, calls or memory)
+fn is_const(e: auto) {
+    switch [e + Node.kind] {
+        case NK.Num, NK.SizeOf, NK.LenOf { return 1 }
+        case NK.Name {
+            let id = [e + Node.val]
+            if find_local(id) != 0 { return 0 }
+            let rec = name_at(id)
+            return [rec + Name.kind] == Sym.Const
+        }
+        case NK.Unary { return is_const([e + Node.a]) }
+        case NK.Binary, NK.Cond {
+            if !is_const([e + Node.a]) { return 0 }
+            if !is_const([e + Node.b]) { return 0 }
+            if [e + Node.kind] == NK.Cond { return is_const([e + Node.c]) }
+            return 1
+        }
+    }
+    return 0
+}
+
+fn const_of_name(id: auto, tok: auto) {
+    let rec = name_at(id)
+    if [rec + Name.kind] != Sym.Const { fail_name(tok, "not a constant:", id) }
+    let state = [rec + Name.state]
+    if state == 2 { return [rec + Name.val] }
+    if state == 1 { fail_name(tok, "the constant depends on itself:", id) }
+    [rec + Name.state] = 1
+    let v = const_eval([rec + Name.node])
+    [rec + Name.val] = v
+    [rec + Name.state] = 2
+    return v
+}
+
+// sizeof(name) in bytes, or len(name) in elements (a string without its final 0)
+fn size_of(id: auto, tok: auto, want_len: auto) {
+    let loc = find_local(id)
+    if loc != 0 {
+        if [loc + Local.kind] == LK.Var {
+            if want_len { fail_name(tok, "len() needs an array:", id) }
+            return 8
+        }
+        if want_len { return [loc + Local.elems] }
+        return [loc + Local.bytes]
+    }
+    let rec = name_at(id)
+    let kind = [rec + Name.kind]
+    if kind == Sym.Struct && !want_len { return [rec + Name.bytes] }
+    if kind != Sym.Data {
+        let ty = ty_of_kw(id)
+        if ty != Ty.None && !want_len { return ty_size(ty) }
+        fail_name(tok, "sizeof/len needs data, a local or a type:", id)
+    }
+    layout_data(id)
+    if !want_len { return [rec + Name.bytes] }
+    if [rec + Name.elems] < 0 { fail_name(tok, "len() needs an array:", id) }
+    if [rec + Name.state] == 1 { return [rec + Name.elems] - 1 }
+    return [rec + Name.elems]
+}
+
+// the element type of `name: type` (the name id of i8 ... ptr or of a struct): sets the type,
+// the struct id, the element size and its alignment
+data type_ty: i64 = 0
+data type_sid: i64 = 0
+data type_size: i64 = 0
+data type_align: i64 = 0
+
+fn resolve_type(tid: auto, tok: auto) {
+    let ty = ty_of_kw(tid)
+    type_sid = 0
+    if ty != Ty.None {
+        type_ty = ty
+        type_size = ty_size(ty)
+        type_align = type_size
+        return 0
+    }
+    let rec = name_at(tid)
+    if [rec + Name.kind] != Sym.Struct { fail_name(tok, "unknown type", tid) }
+    type_ty = Ty.Struct
+    type_sid = tid
+    type_size = [rec + Name.bytes]
+    type_align = [rec + Name.val]
+    return 0
+}
+
+// the type, element count and size of a data item (once)
+data layout_done: ptr = 0              // u8[MAX_NAMES]
+
+fn layout_data(id: auto) {
+    if layout_done == 0 { layout_done = mem_alloc(MAX_NAMES) }
+    if u8[layout_done + id] { return 0 }
+    u8[layout_done + id] = 1
+    let rec = name_at(id)
+    let n = [rec + Name.node]
+    let tok = [n + Node.tok]
+    let tid = [n + Node.c]
+    let init = [n + Node.d]
+    let first = [n + Node.a]
+    // without a type: a string, or one 64-bit value
+    type_ty = Ty.I64
+    type_sid = 0
+    type_size = 8
+    type_align = 8
+    if tid >= 0 { resolve_type(tid, tok) }
+    let elems = -1
+    if [n + Node.b] != 0 {
+        elems = const_eval([n + Node.b])
+        if elems <= 0 { fail_tok(tok, "an array needs at least one element") }
+    }
+    if init == 2 {
+        let count = 0
+        let e = first
+        while e != 0 {
+            count++
+            e = [e + Node.next]
+        }
+        if elems < 0 { elems = count }
+        if count > elems { fail_tok(tok, "more values than elements") }
+    } elif init == 1 && tid < 0 && [first + Node.kind] == NK.Str {
+        type_ty = Ty.U8
+        type_size = 1
+        type_align = 1
+        elems = [first + Node.val] + 1
+        [rec + Name.state] = 1
+    }
+    if type_ty == Ty.Struct && init != 0 { fail_tok(tok, "structs cannot have initial values") }
+    [rec + Name.ty] = type_ty
+    [rec + Name.sid] = type_sid
+    [rec + Name.elems] = elems
+    let total = type_size
+    if elems > 0 { total = type_size * elems }
+    [rec + Name.bytes] = total
+    [rec + Name.val] = type_align
+    return 0
+}

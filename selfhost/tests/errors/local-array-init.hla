@@ -1,0 +1,3 @@
+fn main() {
+    local buf: u8[4] = 1
+}

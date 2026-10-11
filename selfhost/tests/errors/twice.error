@@ -1,0 +1,1 @@
+tests/errors/twice.hla:2:6: error: already defined: 'f'

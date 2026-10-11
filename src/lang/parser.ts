@@ -8,7 +8,7 @@ import { isReg as armIsReg } from './registers.ts';
 const KEYWORDS = new Set([
   'fn', 'function', 'export', 'naked', 'extern', 'const', 'data', 'rodata', 'struct', 'enum', 'alias',
   'let', 'var', 'if', 'else', 'elif', 'while', 'do', 'loop', 'for', 'break', 'continue',
-  'return', 'goto', 'asm', 'push', 'pop', 'local', 'unsigned', 'set', 'call', 'auto',
+  'return', 'goto', 'asm', 'push', 'pop', 'local', 'unsigned', 'set', 'call', 'auto', 'switch',
 ]);
 
 // Go-style precedence: bitwise operators bind tighter than comparisons,
@@ -36,6 +36,7 @@ class Parser {
   toks: Token[];
   pos = 0;
   src: string;
+  switches = 0;
 
   isReg: (text: string) => boolean;
 
@@ -324,6 +325,7 @@ class Parser {
       case 'set': this.next(); return this.assignStmt();
       case 'call': { this.next(); const e = this.expr(); this.endStmt(); return { k: 'expr', e, t }; }
       case 'if': return this.ifStmt();
+      case 'switch': return this.switchStmt();
       case 'while': {
         this.next();
         const cond = this.expr();
@@ -368,12 +370,15 @@ class Parser {
         return { k: t.text as 'push' | 'pop', regs, t };
       }
       case 'local': {
+        // local name: type[N] | local name: type = init | local name = init (i64)
         this.next();
         const name = this.ident('local name');
-        this.expect(':');
-        const ty = this.typeRef();
+        let ty: TypeRef = { name: 'i64', count: null, t: name };
+        if (this.accept(':')) ty = this.typeRef();
+        else if (!this.is('=')) this.expect(':');
+        const init = this.accept('=') ? this.expr() : null;
         this.endStmt();
-        return { k: 'local', name: name.text, ty, t: name };
+        return { k: 'local', name: name.text, ty, init, t: name };
       }
       case 'const': {
         this.next();
@@ -490,6 +495,51 @@ class Parser {
       } else break;
     }
     return { k: 'if', arms, els, t };
+  }
+
+  /**
+   * switch v { case 1, 2 { } case 'a'..='z' { } default { } } — sugar for an if/elif chain: the first
+   * matching case runs, there is no fall-through, and break/continue belong to the enclosing loop.
+   * A subject that is not a plain name is computed once into a hidden variable.
+   */
+  switchStmt(): Stmt {
+    const t = this.next();
+    const subject = this.expr();
+    const plain = subject.k === 'name' || subject.k === 'num';
+    const v: Expr = plain ? subject : { k: 'name', name: `__switch${++this.switches}`, t };
+    const arms: { cond: Expr; body: Stmt[] }[] = [];
+    let els: Stmt[] | null = null;
+    this.expect('{', 'to open the switch');
+    this.skipSemis();
+    while (!this.isOp('}')) {
+      const c = this.cur;
+      if (c.kind === 'eof') this.err("unexpected end of file: missing '}'");
+      if (this.is('default') || this.is('else')) {
+        if (els) this.err('a switch has only one default');
+        this.next();
+        els = this.block();
+      } else if (this.is('case')) {
+        if (els) this.err("'case' after 'default'");
+        this.next();
+        let cond: Expr | null = null;
+        do {
+          const lo = this.expr();
+          let one: Expr;
+          if (this.isOp('..') || this.isOp('..=')) {
+            const op = this.next().text === '..=' ? '<=' : '<';
+            const hi = this.expr();
+            one = { k: 'bin', op: '&&', l: { k: 'bin', op: '>=', l: v, r: lo, t: c }, r: { k: 'bin', op, l: v, r: hi, t: c }, t: c };
+          } else one = { k: 'bin', op: '==', l: v, r: lo, t: c };
+          cond = cond ? { k: 'bin', op: '||', l: cond, r: one, t: c } : one;
+        } while (this.accept(','));
+        arms.push({ cond, body: this.block() });
+      } else this.err(`expected 'case' or 'default' in switch, found '${c.text}'`);
+      this.skipSemis();
+    }
+    this.expect('}');
+    const body: Stmt[] = arms.length ? [{ k: 'if', arms, els, t }] : els ?? [];
+    if (!plain) body.unshift({ k: 'let', decls: [{ name: (v as { name: string }).name, reg: null, unsigned: false, init: subject, t }], t });
+    return body.length === 1 ? body[0] : { k: 'block', body, t };
   }
 
   forStmt(): Stmt {

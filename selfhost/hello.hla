@@ -1,0 +1,23 @@
+// hello.hla — a program for the self-hosted tools to build.
+//
+// In the workbench this is the input of the example "Translator in HLA64 (hla -> s)": the main file
+// is the translator, its arguments are above the console, Run writes the assembly into Files.
+//   hlc-arm.hla    hello.hla hello.s        HLA64 -> AArch64 assembly (macOS)
+//   hlc-x64.hla    hello.hla hello-x64.s    HLA64 -> x86-64 assembly (Windows)
+// The example "Assembler in HLA64 (s -> executable)" turns hello.s / hello-x64.s (made from this file
+// by hlc; selfhost/test.sh checks they are up to date) into a macOS or a Windows executable.
+// The translator translates itself too: hlc-arm.hla with the arguments "hlc-arm.hla hlc.s".
+extern puts, printf(fmt, ...)
+
+fn fib(n: auto) {
+    if n < 2 { return n }
+    return fib(n - 1) + fib(n - 2)
+}
+
+fn main() {
+    puts("Hello from a toolchain written in HLA64!")
+    for i in 1..=10 {
+        let f = fib(i)
+        printf("fib(%d) = %d\n", i, f)
+    }
+}

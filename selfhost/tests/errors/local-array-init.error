@@ -1,0 +1,1 @@
+tests/errors/local-array-init.hla:2:11: error: only a single value can have an initial value (not an array or a struct)

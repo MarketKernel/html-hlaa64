@@ -1,0 +1,439 @@
+// asm/core.hla — what every assembler here shares: sections with their bytes, symbols, fixups
+// (places to patch once addresses are known), reading a line, and the data directives.
+// The data directives hand their bytes to hooks each assembler defines: out_byte, out_value,
+// out_symbol, out_space, out_align, mark_global.
+
+// what a fixup patches: a branch, an adrp page, a page offset, a 64-bit address in data ...
+enum FK { Branch26, Branch19, Page21, PageOff12, Abs64, Rel32 }
+
+// sections -------------------------------------------------------------------------------
+
+struct Sect {
+    seg: ptr        // C string: "__TEXT"
+    sname: ptr      // C string: "__text"
+    flags: i64      // Mach-O section type and attributes
+    align: i64      // log2
+    bytes: Buf      // contents (empty for zerofill)
+    length: i64     // bytes so far (zerofill sections have no bytes, only the length)
+    zerofill: i64
+    code: i64       // 1 for instructions (alignment is padded with nop)
+    addr: i64       // given by the linker
+    fileoff: i64
+}
+
+const MAX_SECTS = 16
+data sects: Sect[MAX_SECTS]
+data sect_count: i64 = 0
+data cur_sect: ptr = 0              // the section being filled
+
+fn sect_at(i) { return sects + i * Sect.size }
+
+// the section seg,name (made when new)
+fn get_section(seg: auto, name: auto, flags: auto) {
+    for i in 0..sect_count {
+        let s = sects + i * Sect.size
+        if cstr_same([s + Sect.seg], seg) && cstr_same([s + Sect.sname], name) { return s }
+    }
+    if sect_count >= MAX_SECTS { asm_fail("too many sections") }
+    let s = sects + sect_count * Sect.size
+    sect_count++
+    let segc = cstr_from(seg, cstr_len(seg))
+    let namec = cstr_from(name, cstr_len(name))
+    [s + Sect.seg] = segc
+    [s + Sect.sname] = namec
+    [s + Sect.flags] = flags
+    return s
+}
+
+fn sect_index(s) { return (s - sects) / Sect.size }
+
+// bytes into the current section
+fn emit_byte(v: auto) {
+    let s = cur_sect
+    if [s + Sect.zerofill] {
+        if v & 0xFF != 0 { asm_fail("cannot put data into a zerofill section") }
+        [s + Sect.length] = [s + Sect.length] + 1
+        return 0
+    }
+    buf_char(s + Sect.bytes, v & 0xFF)
+    [s + Sect.length] = [s + Sect.length] + 1
+    return 0
+}
+
+fn emit_le(v: auto, n: auto) {
+    for i in 0..n { emit_byte(v >>> (i * 8)) }
+}
+
+fn sect_u32(s, off) {
+    let p = [s + Sect.bytes + Buf.ptr] + off
+    return u8[p] | u8[p + 1] << 8 | u8[p + 2] << 16 | u8[p + 3] << 24
+}
+
+fn sect_put32(s: auto, off: auto, v: auto) {
+    let p = [s + Sect.bytes + Buf.ptr] + off
+    for i in 0..4 { u8[p + i] = v >>> (i * 8) }
+}
+
+fn sect_put64(s: auto, off: auto, v: auto) {
+    let p = [s + Sect.bytes + Buf.ptr] + off
+    for i in 0..8 { u8[p + i] = v >>> (i * 8) }
+}
+
+// symbols --------------------------------------------------------------------------------
+
+struct ASym {
+    sect: i64       // section index + 1; 0: not defined here
+    off: i64
+    global: i64
+    order: i64      // the order of definition (the symbol table keeps it for equal addresses)
+}
+
+data asyms: ptr = 0                 // ASym[MAX_NAMES], indexed by name id
+data def_count: i64 = 0
+
+fn asym_at(id) { return asyms + id * ASym.size }
+fn sym_defined(id) { return [asyms + id * ASym.size + ASym.sect] != 0 }
+
+fn define_label(id: auto) {
+    let a = asym_at(id)
+    if [a + ASym.sect] != 0 { asm_fail_name("symbol is already defined:", id) }
+    [a + ASym.sect] = sect_index(cur_sect) + 1
+    [a + ASym.off] = [cur_sect + Sect.length]
+    def_count++
+    [a + ASym.order] = def_count
+}
+
+// the address of a defined symbol (after layout)
+fn sym_addr(id: auto) {
+    let a = asym_at(id)
+    if [a + ASym.sect] == 0 { asm_fail_name("undefined symbol", id) }
+    let s = sect_at([a + ASym.sect] - 1)
+    return [s + Sect.addr] + [a + ASym.off]
+}
+
+// fixups ---------------------------------------------------------------------------------
+
+struct Fix {
+    sect: ptr
+    off: i64
+    kind: i64       // FK.*
+    sym: i64        // name id
+    add: i64
+    scale: i64      // pageoff12: log2 of the access size
+    line: i64
+}
+
+data fixes: ptr = 0
+data fix_count: i64 = 0
+data fix_cap: i64 = 0
+
+fn add_fix(kind: auto, sym: auto, add: auto, scale: auto) {
+    if fix_count >= fix_cap {
+        fix_cap = fix_cap * 2 + 1024
+        fixes = mem_resize(fixes, fix_cap * Fix.size)
+    }
+    let f = fixes + fix_count * Fix.size
+    fix_count++
+    [f + Fix.sect] = cur_sect
+    [f + Fix.off] = [cur_sect + Sect.length]
+    [f + Fix.kind] = kind
+    [f + Fix.sym] = sym
+    [f + Fix.add] = add
+    [f + Fix.scale] = scale
+    [f + Fix.line] = line_no
+}
+
+fn fix_at(i) { return fixes + i * Fix.size }
+
+// errors and the current line ------------------------------------------------------------
+
+data src_name: ptr = 0
+data line_no: i64 = 0
+data ap: ptr = 0                    // the reading position in the current line
+data amsg: Buf
+
+fn asm_fail(text: auto) {
+    [amsg + Buf.used] = 0
+    if line_no > 0 { fmt3(amsg, "%s:%d: error: %s", src_name, line_no, text) }
+    else { fmt2(amsg, "%s: error: %s", src_name, text) }
+    sys_fail(buf_cstr(amsg))
+}
+
+data amsg2: Buf
+
+fn asm_fail_name(text: auto, id: auto) {
+    [amsg2 + Buf.used] = 0
+    fmt2(amsg2, "%s '%s'", text, name_str(id))
+    asm_fail(buf_cstr(amsg2))
+}
+
+fn skip_sp() {
+    while u8[ap] == ' ' || u8[ap] == '\t' { ap++ }
+}
+
+fn at_end() {
+    skip_sp()
+    return u8[ap] == 0
+}
+
+fn accept_char(c: auto) {
+    skip_sp()
+    if u8[ap] == c {
+        ap++
+        return 1
+    }
+    return 0
+}
+
+fn expect_char(c: auto) {
+    if !accept_char(c) {
+        [amsg2 + Buf.used] = 0
+        fmt1(amsg2, "expected '%c'", c)
+        asm_fail(buf_cstr(amsg2))
+    }
+}
+
+fn is_sym_char(c) {
+    return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '.' || c == '$'
+}
+
+// a symbol or word at ap: its name id (-1 when there is none; a name does not start with a digit)
+fn read_ident() {
+    skip_sp()
+    let c = u8[ap]
+    if c >= '0' && c <= '9' { return -1 }
+    let p = ap
+    while is_sym_char(u8[ap]) { ap++ }
+    if ap == p { return -1 }
+    return intern(p, ap - p)
+}
+
+fn expect_ident() {
+    let id = read_ident()
+    if id < 0 { asm_fail("expected a name") }
+    return id
+}
+
+// a number: 42, -7, 0x2A, 0b101, 'c'
+fn read_number() {
+    skip_sp()
+    let neg = 0
+    if u8[ap] == '-' {
+        neg = 1
+        ap++
+    } elif u8[ap] == '+' {
+        ap++
+    }
+    let base = 10
+    if u8[ap] == '0' && (u8[ap + 1] == 'x' || u8[ap + 1] == 'X') {
+        base = 16
+        ap = ap + 2
+    } elif u8[ap] == '0' && (u8[ap + 1] == 'b' || u8[ap + 1] == 'B') {
+        base = 2
+        ap = ap + 2
+    }
+    let v = 0
+    let digits = 0
+    loop {
+        let d = hex_digit(u8[ap])
+        if d < 0 || d >= base { break }
+        v = v * base + d
+        digits++
+        ap++
+    }
+    if digits == 0 { asm_fail("expected a number") }
+    if neg { return 0 - v }
+    return v
+}
+
+fn at_number() {
+    skip_sp()
+    let c = u8[ap]
+    return c >= '0' && c <= '9' || c == '-' || c == '+'
+}
+
+// "text" with \n \t \\ \" and octal escapes: the bytes go to the current section
+fn read_string_into_section() {
+    expect_char('"')
+    loop {
+        let c = u8[ap]
+        if c == 0 { asm_fail("unterminated string") }
+        ap++
+        if c == '"' { break }
+        if c != '\\' {
+            out_byte(c)
+            continue
+        }
+        let e = u8[ap]
+        ap++
+        switch e {
+            case 'n' { out_byte(10) }
+            case 't' { out_byte(9) }
+            case 'r' { out_byte(13) }
+            case '0'..='7' {
+                let v = e - '0'
+                let k = 1
+                while k < 3 && u8[ap] >= '0' && u8[ap] <= '7' {
+                    v = v * 8 + u8[ap] - '0'
+                    ap++
+                    k++
+                }
+                out_byte(v)
+            }
+            default { out_byte(e) }
+        }
+    }
+}
+
+// directives shared by the assemblers ------------------------------------------------------
+
+// .byte/.short/.long/.quad: numbers, and for .quad (.long on Windows) also symbol[+n]
+fn data_values(size: auto) {
+    loop {
+        if at_number() {
+            out_value(read_number(), size)
+        } else {
+            let id = expect_ident()
+            let add = 0
+            if accept_char('+') { add = read_number() }
+            out_symbol(id, add, size)
+        }
+        if !accept_char(',') { break }
+    }
+}
+
+// one of the data directives; 0 when the name is not one of them
+fn data_directive(name: auto) {
+    let s = name_str(name)
+    if cstr_same(s, ".byte") { data_values(1) }
+    elif cstr_same(s, ".short") || cstr_same(s, ".2byte") || cstr_same(s, ".hword") || cstr_same(s, ".value") { data_values(2) }
+    elif cstr_same(s, ".long") || cstr_same(s, ".4byte") || cstr_same(s, ".int") { data_values(4) }
+    elif cstr_same(s, ".quad") || cstr_same(s, ".8byte") || cstr_same(s, ".xword") { data_values(8) }
+    elif cstr_same(s, ".space") || cstr_same(s, ".zero") || cstr_same(s, ".skip") {
+        let n = read_number()
+        let fill = 0
+        if accept_char(',') { fill = read_number() }
+        if n < 0 || n > 0x10000000 { asm_fail("bad .space size") }
+        out_space(n, fill)
+    } elif cstr_same(s, ".ascii") {
+        loop {
+            read_string_into_section()
+            if !accept_char(',') { break }
+        }
+    } elif cstr_same(s, ".asciz") || cstr_same(s, ".string") {
+        loop {
+            read_string_into_section()
+            out_byte(0)
+            if !accept_char(',') { break }
+        }
+    } elif cstr_same(s, ".p2align") {
+        let p2 = read_number()
+        while accept_char(',') { read_number() }
+        out_align(p2)
+    } elif cstr_same(s, ".balign") {
+        let n = read_number()
+        let p2 = 0
+        while (1 << p2) < n { p2++ }
+        if (1 << p2) != n { asm_fail("the alignment must be a power of two") }
+        out_align(p2)
+    } elif cstr_same(s, ".globl") || cstr_same(s, ".global") {
+        loop {
+            mark_global(expect_ident())
+            if !accept_char(',') { break }
+        }
+    } else {
+        return 0
+    }
+    return 1
+}
+
+// writing binary files ------------------------------------------------------------------
+
+fn put8(b: auto, v: auto) { buf_char(b, v & 0xFF) }
+fn put16(b: auto, v: auto) { emit_to(b, v, 2) }
+fn put32(b: auto, v: auto) { emit_to(b, v, 4) }
+fn put64(b: auto, v: auto) { emit_to(b, v, 8) }
+
+fn emit_to(b: auto, v: auto, n: auto) {
+    for i in 0..n { buf_char(b, v >>> (i * 8) & 0xFF) }
+}
+
+// a name in a fixed-size field (segment and section names: 16 bytes)
+fn put_name(b: auto, s: auto, n: auto) {
+    let len = cstr_len(s)
+    for i in 0..n {
+        if i < len { buf_char(b, u8[s + i]) } else { buf_char(b, 0) }
+    }
+}
+
+fn put_uleb(b: auto, v: auto) {
+    loop {
+        let byte = v & 0x7F
+        v = v >>> 7
+        if v != 0 { byte = byte | 0x80 }
+        buf_char(b, byte)
+        if v == 0 { break }
+    }
+}
+
+fn put_sleb(b: auto, v: auto) {
+    loop {
+        let byte = v & 0x7F
+        v = v >> 7
+        if v == 0 && byte & 0x40 == 0 || v == -1 && byte & 0x40 != 0 {
+            buf_char(b, byte)
+            break
+        }
+        buf_char(b, byte | 0x80)
+    }
+}
+
+fn pad_to(b: auto, a: auto) {
+    while [b + Buf.used] % a != 0 { buf_char(b, 0) }
+}
+
+fn put_be32(b: auto, v: auto) {
+    buf_char(b, v >>> 24 & 0xFF)
+    buf_char(b, v >>> 16 & 0xFF)
+    buf_char(b, v >>> 8 & 0xFF)
+    buf_char(b, v & 0xFF)
+}
+
+fn put_be64(b: auto, v: auto) {
+    put_be32(b, v >>> 32)
+    put_be32(b, v & 0xFFFFFFFF)
+}
+
+fn align_to(v, a) { return (v + a - 1) / a * a }
+
+fn new_buf() { return mem_alloc(Buf.size) }
+
+// lines --------------------------------------------------------------------------------
+
+data next_src: ptr = 0              // where the next line starts
+
+// the next line of the source as a C string at ap (the newline becomes 0, a // comment outside
+// a string is cut off); 0 at the end of the source
+fn next_line() {
+    let p = next_src
+    if u8[p] == 0 { return 0 }
+    line_no++
+    let start = p
+    while u8[p] != 0 && u8[p] != '\n' { p++ }
+    if u8[p] == '\n' {
+        u8[p] = 0
+        next_src = p + 1
+    } else {
+        next_src = p
+    }
+    let quoted = 0
+    let q = start
+    while u8[q] != 0 {
+        let c = u8[q]
+        if c == '"' && (q == start || u8[q - 1] != '\\') { quoted = !quoted }
+        if !quoted && c == '/' && u8[q + 1] == '/' { u8[q] = 0 }
+        else { q++ }
+    }
+    ap = start
+    return 1
+}

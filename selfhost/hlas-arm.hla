@@ -1,0 +1,63 @@
+// hlas-arm.hla — the assembler and linker written in HLA64: AArch64 assembly (Apple dialect) ->
+// a signed arm64 macOS executable.
+//   hlas-arm input.s output
+include "lib/sys.hla"
+include "lib/text.hla"
+include "lib/intern.hla"
+include "lib/sha256.hla"
+include "asm/core.hla"
+include "arm/encode.hla"
+include "arm/macho.hla"
+
+data exe: Buf
+
+// the file name of a path, with characters other than letters, digits, _ . - turned into _
+// (the identifier of the code signature)
+fn sign_ident(path: auto) {
+    let start = path
+    let p = path
+    while u8[p] != 0 {
+        if u8[p] == '/' || u8[p] == '\\' { start = p + 1 }
+        p++
+    }
+    let n = p - start
+    let s = cstr_from(start, n)
+    for i in 0..n {
+        let c = u8[s + i]
+        if (!is_sym_char(c) || c == '$') && c != '-' { u8[s + i] = '_' }
+    }
+    if n == 0 { return "a.out" }
+    return s
+}
+
+fn main(argc, argv) {
+    let count = argc
+    let args = argv
+    if count != 3 {
+        say("usage: hlas-arm input.s output")
+        return 2
+    }
+    let input = [args + 8]
+    let output = [args + 16]
+    intern_init()
+    arm_init()
+    asyms = mem_alloc(MAX_NAMES * ASym.size)
+    src_name = input
+    let src = read_whole(input)
+    if src == 0 {
+        [amsg + Buf.used] = 0
+        fmt1(amsg, "error: cannot read '%s'", input)
+        sys_fail(buf_cstr(amsg))
+    }
+    next_src = src
+    cur_sect = macho_section("__TEXT", "__text", 0)
+    while next_line() { arm_line() }
+    link_macho(exe, sign_ident(output))
+    if write_whole(output, [exe + Buf.ptr], [exe + Buf.used]) != 0 {
+        [amsg + Buf.used] = 0
+        fmt1(amsg, "error: cannot write '%s'", output)
+        sys_fail(buf_cstr(amsg))
+    }
+    make_executable(output)
+    return 0
+}

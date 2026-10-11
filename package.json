@@ -11,6 +11,7 @@
     "fuzz": "node tests/fuzz.ts 1 8",
     "test:encoding": "node tests/encoding.ts",
     "check:web": "node tools/check-web.ts",
+    "check:selfhost-web": "node tools/check-selfhost-web.ts",
     "check:pwa": "node tools/check-pwa.ts",
     "build:icons": "node tools/build-icons.ts",
     "test:lessons": "node tests/lessons.ts",

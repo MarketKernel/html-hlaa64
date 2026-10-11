@@ -228,6 +228,9 @@ export function runPE(bytes: Uint8Array, opts: PeRunOptions = {}): PeRunResult {
     },
     fflush: (c) => ret(c, 0),
     exit: (c) => { throw new ExitSignal(int(c, 0)); },
+    // no environment and no command processor in the emulator
+    getenv: (c) => ret(c, 0),
+    system: (c) => ret(c, -1),
     // files (src/emu/files.ts); Windows: long is 32 bits (fseek's offset, ftell's result)
     fopen: (c) => ret(c, files.fopen(str(ptr(c, 0)), str(ptr(c, 1)))),
     fclose: (c) => ret(c, files.fclose(ptr(c, 0))),

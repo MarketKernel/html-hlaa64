@@ -48,3 +48,6 @@ npm-debug.log*
 
 # private notes and task descriptions (not part of the project)
 /private/
+
+# selfhost: compilers and programs built by selfhost/test.sh
+/selfhost/build/

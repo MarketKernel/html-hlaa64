@@ -1,0 +1,2 @@
+extern puts, printf(fmt, ...)
+const BASE = 42

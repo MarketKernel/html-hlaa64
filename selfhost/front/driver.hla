@@ -1,0 +1,26 @@
+// front/driver.hla — the program: hlc input.hla output.s
+
+data asm_out: Buf
+
+fn main(argc, argv) {
+    let count = argc
+    let args = argv
+    if count != 3 {
+        say("usage: hlc input.hla output.s")
+        return 2
+    }
+    let input = [args + 8]
+    let output = [args + 16]
+    names_init()
+    lex_file(input, -1, 0, 0)
+    new_tok(TK.Eof, 0, lx_end_line, 1, 1)
+    parse_program()
+    gen_program()
+    be_finish(asm_out)
+    if write_whole(output, [asm_out + Buf.ptr], [asm_out + Buf.used]) != 0 {
+        [msg + Buf.used] = 0
+        fmt1(msg, "error: cannot write '%s'", output)
+        sys_fail(buf_cstr(msg))
+    }
+    return 0
+}

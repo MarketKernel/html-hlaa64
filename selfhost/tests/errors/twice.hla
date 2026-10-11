@@ -1,0 +1,3 @@
+fn f() { }
+data f: i64 = 0
+fn main() { }

@@ -1,0 +1,54 @@
+// recursion, many arguments, function pointers, variadic calls
+extern printf(fmt, ...)
+extern qsort, puts
+
+fn fib(n: auto) {
+    if n < 2 { return n }
+    let a = fib(n - 1)
+    return a + fib(n - 2)
+}
+
+fn ack(m: auto, n: auto) {
+    if m == 0 { return n + 1 }
+    if n == 0 { return ack(m - 1, 1) }
+    return ack(m - 1, ack(m, n - 1))
+}
+
+fn eight(a, b, c, d, e, f, g, h) {
+    return a + b * 2 + c * 3 + d * 4 + e * 5 + f * 6 + g * 7 + h * 8
+}
+
+fn twice(v) { return v * 2 }
+fn square(v) { return v * v }
+
+fn apply(f: auto, v: auto) {
+    return f(v)
+}
+
+data ops: ptr = [twice, square]
+
+fn cmp_i64(a, b) {
+    let x = [a]
+    let y = [b]
+    if x < y { return -1 }
+    if x > y { return 1 }
+    return 0
+}
+
+data nums: i64[6] = [5, -2, 9, 0, 3, -7]
+
+fn main() {
+    printf("fib(20) = %lld\n", fib(20))
+    printf("ack(2, 3) = %lld\n", ack(2, 3))
+    printf("eight = %lld\n", eight(1, 2, 3, 4, 5, 6, 7, 8))
+    printf("apply %lld %lld\n", apply(twice, 21), apply(square, 12))
+    let f = ops[1]
+    printf("ops[1](9) = %lld\n", f(9))
+    printf("nested %lld\n", twice(square(twice(3))))
+    printf("%lld %lld %lld %lld %lld %lld %lld %lld %lld %lld\n", 1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+    printf("%s and %s, %c%c\n", "strings", "chars", 'o', 'k')
+    qsort(nums, len(nums), 8, cmp_i64)
+    for i in 0..len(nums) { printf("%lld ", nums[i]) }
+    printf("\n")
+    puts("done")
+}

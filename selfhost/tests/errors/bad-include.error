@@ -1,0 +1,1 @@
+tests/errors/bad-include.hla:1:1: error: cannot read 'tests/errors/nowhere.hla'

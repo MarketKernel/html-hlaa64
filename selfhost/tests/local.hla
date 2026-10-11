@@ -1,0 +1,27 @@
+// `local`: a variable that always lives in the stack frame, with an initial value or without
+extern printf(fmt, ...)
+
+fn sq(n) { return n * n }
+
+fn main() {
+    local total = 0                 // i64
+    local small: u8 = 250           // a typed value: stores keep 8 bits
+    local i: i64                    // no initial value
+    for i in 1..=5 { total += sq(i) }
+    printf("total %d, i after the loop %d\n", total, i)
+    small += 10
+    printf("small %d\n", small)
+    local x = 7
+    {
+        local x = x * 2             // the outer x: the new one is not visible yet
+        printf("inner x %d\n", x)
+    }
+    printf("outer x %d\n", x)
+    let k = 0
+    for k in 0..3 { }
+    printf("let k after the loop %d\n", k)
+    local n: i32 = -5
+    for n in n..0 step 2 { printf("n %d\n", n) }
+    printf("n after %d\n", n)
+    return 0
+}

@@ -1,0 +1,43 @@
+// hlas-x64.hla — the assembler and linker written in HLA64: x86-64 assembly (Intel syntax) ->
+// a Windows x64 executable (PE32+).
+//   hlas-x64 input.s output.exe
+include "lib/sys.hla"
+include "lib/text.hla"
+include "lib/intern.hla"
+include "asm/core.hla"
+include "x64/winapi.hla"
+include "x64/xenc.hla"
+include "x64/xasm.hla"
+include "x64/pe.hla"
+
+data exe: Buf
+
+fn main(argc, argv) {
+    let count = argc
+    let args = argv
+    if count != 3 {
+        say("usage: hlas-x64 input.s output.exe")
+        return 2
+    }
+    let input = [args + 8]
+    let output = [args + 16]
+    intern_init()
+    xregs_init()
+    xm_init()
+    asyms = mem_alloc(MAX_NAMES * ASym.size)
+    src_name = input
+    let src = read_whole(input)
+    if src == 0 {
+        [amsg + Buf.used] = 0
+        fmt1(amsg, "error: cannot read '%s'", input)
+        sys_fail(buf_cstr(amsg))
+    }
+    assemble_x64(src)
+    link_pe(exe)
+    if write_whole(output, [exe + Buf.ptr], [exe + Buf.used]) != 0 {
+        [amsg + Buf.used] = 0
+        fmt1(amsg, "error: cannot write '%s'", output)
+        sys_fail(buf_cstr(amsg))
+    }
+    return 0
+}

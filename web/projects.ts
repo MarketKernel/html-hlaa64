@@ -16,6 +16,7 @@ export interface Project {
   files: ProjectFile[];
   open: string;             // the file in the editor
   example?: string;         // built from this example (it can be reset to the original)
+  args?: Record<string, string>;   // command line arguments for a run, per main file
   updated: number;
 }
 
@@ -50,7 +51,7 @@ function tx<T>(mode: IDBTransactionMode, f: (s: IDBObjectStore) => IDBRequest<T>
   }));
 }
 
-const copy = (p: Project): Project => ({ ...p, files: p.files.map((f) => ({ ...f })) });
+const copy = (p: Project): Project => ({ ...p, files: p.files.map((f) => ({ ...f })), ...(p.args ? { args: { ...p.args } } : {}) });
 
 export async function listProjects(platform: Platform): Promise<Project[]> {
   const all = (await tx<Project[]>('readonly', (s) => s.getAll())) ?? [...memory.values()];

@@ -26,6 +26,19 @@ export function writtenText(m: ReturnType<typeof memoryFiles>): Record<string, s
   return Object.fromEntries([...m.written].map((p) => [p, dec.decode(m.files.get(p))]));
 }
 
+/** what a program wrote, split: UTF-8 text without NUL bytes, and everything else (executables...) */
+export function writtenFiles(m: ReturnType<typeof memoryFiles>): { text: Record<string, string>; binary: Record<string, Uint8Array> } {
+  const dec = new TextDecoder('utf-8', { fatal: true });
+  const text: Record<string, string> = {}, binary: Record<string, Uint8Array> = {};
+  for (const p of m.written) {
+    const d = m.files.get(p)!;
+    let t: string | null = null;
+    if (!d.includes(0)) try { t = dec.decode(d); } catch { /* not UTF-8 */ }
+    if (t === null) binary[p] = d; else text[p] = t;
+  }
+  return { text, binary };
+}
+
 interface Open { path: string; data: Uint8Array; size: number; pos: number; read: boolean; write: boolean; append: boolean; dirty: boolean; eof: boolean }
 
 export class FileTable {

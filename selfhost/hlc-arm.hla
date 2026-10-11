@@ -1,0 +1,15 @@
+// hlc-arm.hla — the HLA64 translator written in HLA64: HLA64 source -> AArch64 assembly (macOS).
+//   hlc-arm input.hla output.s
+// The front end (lexer, parser, code generator) is shared by all targets; the backend decides
+// which instructions come out.
+include "lib/sys.hla"
+include "lib/text.hla"
+include "lib/intern.hla"
+include "front/names.hla"
+include "front/lexer.hla"
+include "front/ast.hla"
+include "front/parser.hla"
+include "front/consts.hla"
+include "front/codegen.hla"
+include "front/driver.hla"
+include "arm/backend.hla"

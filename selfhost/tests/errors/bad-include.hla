@@ -1,0 +1,2 @@
+include "nowhere.hla"
+fn main() { }

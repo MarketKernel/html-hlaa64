@@ -1,27 +1,34 @@
 // Web Worker: runs a Mach-O image in the ARM64 emulator or a PE image in the x64 emulator,
-// streaming its output. The program sees the project's files; the ones it writes come back in `written`.
+// streaming its output. The program sees the project's files and its command line arguments; the files
+// it writes come back in `written` (text) and `binary`.
 import { runMachO } from '../src/emu/macho-loader.ts';
 import { runPE } from '../src/emu/x64/pe-loader.ts';
-import { memoryFiles, writtenText } from '../src/emu/files.ts';
+import { memoryFiles, writtenFiles } from '../src/emu/files.ts';
 
-self.onmessage = (ev: MessageEvent<{ bytes: ArrayBuffer; limit: number; format?: 'macho' | 'pe'; files?: Record<string, string> }>) => {
+self.onmessage = (ev: MessageEvent<{ bytes: ArrayBuffer; limit: number; format?: 'macho' | 'pe'; files?: Record<string, string>; args?: string[] }>) => {
   let buf = '';
   let last = performance.now();
   const flush = () => { if (buf) { postMessage({ type: 'out', text: buf }); buf = ''; } last = performance.now(); };
   const t0 = performance.now();
   const files = memoryFiles(ev.data.files ?? {});
+  const done = (r: { exitCode: number | null; steps: number; error: string | null }) => {
+    flush();
+    const w = writtenFiles(files);
+    const binary = Object.values(w.binary).map((d) => d.slice());
+    postMessage({ type: 'done', ...r, ms: performance.now() - t0, written: w.text, binary: Object.fromEntries(Object.keys(w.binary).map((k, i) => [k, binary[i]])) },
+      { transfer: binary.map((d) => d.buffer) });
+  };
   try {
     const opts = {
       limit: ev.data.limit,
       files,
+      args: ev.data.args ?? [],
       onOutput: (t: string) => { buf += t; if (buf.length > 4096 || performance.now() - last > 40) flush(); },
     };
     const bytes = new Uint8Array(ev.data.bytes);
     const r = ev.data.format === 'pe' ? runPE(bytes, opts) : runMachO(bytes, opts);
-    flush();
-    postMessage({ type: 'done', exitCode: r.exitCode, steps: r.steps, error: r.error, ms: performance.now() - t0, written: writtenText(files) });
+    done({ exitCode: r.exitCode, steps: r.steps, error: r.error });
   } catch (e) {
-    flush();
-    postMessage({ type: 'done', exitCode: null, steps: 0, error: (e as Error).message, ms: performance.now() - t0, written: writtenText(files) });
+    done({ exitCode: null, steps: 0, error: (e as Error).message });
   }
 };

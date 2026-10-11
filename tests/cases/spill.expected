@@ -6,5 +6,7 @@ inner x = 50
 outer x = 5
 v1 = 2187 after 7 steps
 compare ok
+elif after a frame update
+steps = 3
 deep(3) = 336
 still 2 5 9 10

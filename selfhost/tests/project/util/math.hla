@@ -1,0 +1,6 @@
+include "../common.hla"
+include "./text.hla"
+
+const LIMIT = BASE * 10
+
+fn square(v) { return v * v }

@@ -1,0 +1,4 @@
+include "../common.hla"
+
+fn say_line(s) { puts(s) }
+fn show_num(v) { printf("%lld\n", v) }

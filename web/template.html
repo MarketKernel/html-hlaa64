@@ -281,6 +281,20 @@ td.a { color: var(--addr); }
 /* console */
 .console { padding: 10px 12px; font: 12.5px/18px var(--code); white-space: pre; margin: 0; min-width: max-content; }
 .console .e { color: var(--err); }
+.console .cmd { color: var(--muted); }
+.console .out { display: inline-flex; gap: 8px; align-items: center; margin: 2px 0; padding: 4px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel-2); }
+.console .out .btn { padding: 2px 8px; font-size: 12px; }
+.args-bar {
+  flex: none; display: flex; align-items: center; gap: 8px; padding: 5px 12px; border-bottom: 1px solid var(--line);
+  background: var(--panel-2); font: 12px var(--code); color: var(--muted);
+}
+.args-bar label { font: 600 11px var(--ui); letter-spacing: 0.04em; text-transform: uppercase; }
+.args-bar .argv0 { color: var(--ink); white-space: nowrap; }
+.args-bar input {
+  flex: 1; min-width: 0; font: 12.5px var(--code); padding: 3px 6px; border: 1px solid var(--line-strong);
+  border-radius: 4px; background: var(--panel); color: var(--ink); outline: none;
+}
+.args-bar input:focus { border-color: var(--accent); }
 .run-status {
   flex: none; display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; padding: 6px 12px;
   border-top: 1px solid var(--line); background: var(--panel-2); font: 12px var(--code); color: var(--muted);
@@ -421,6 +435,7 @@ td.a { color: var(--addr); }
     </div>
     <div class="panel" id="tab-macho" hidden><div class="mach" id="machoView"></div></div>
     <div class="panel" id="tab-header" hidden><div class="mach" id="headerView"></div></div>
+    <div class="args-bar" id="argsBar"><label for="args">Arguments</label><span class="argv0" id="argv0">program</span><input id="args" spellcheck="false" autocapitalize="off" autocomplete="off" placeholder="none: the command line after the program name"></div>
     <div class="panel" id="tab-run"><pre class="console" id="console"></pre></div>
     <div class="run-status" id="runStatus"><span>Press Run to execute the program in the built-in ARM64 emulator.</span></div>
   </section>

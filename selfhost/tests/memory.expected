@@ -1,0 +1,19 @@
+counter 7 small -3
+counter 13
+bytes 1 2 250 255 0
+shorts -1 300 -30000
+ushorts 65535 7
+ints sum 57, sizeof 20, len 5
+uints 4000000000 1
+longs -1 9223372036854775807 0
+Hello has 5 letters, sizeof 6
+zero one two 
+-123456 6 -25536 255
+longs[2] = 77
+u32 4294967295 i32 -1
+i8 -6 u8 250 i16 -1 u16 65535
+Point.size 16, Line.size 40, Line.upto 16
+points[2] = 20 -2 c
+line one 99
+tmp 1235 word ABCDE pts 555 sizeof 16 32
+0123456789 10

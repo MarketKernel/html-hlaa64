@@ -73,7 +73,7 @@ export type Stmt =
   | { k: 'asmtext'; text: string; t: Token }
   | { k: 'block'; body: Stmt[]; t: Token }
   | { k: 'push' | 'pop'; regs: Expr[]; t: Token }
-  | { k: 'local'; name: string; ty: TypeRef; t: Token }
+  | { k: 'local'; name: string; ty: TypeRef; init: Expr | null; t: Token }
   | { k: 'const'; name: string; e: Expr; t: Token };
 
 export interface TypeRef {

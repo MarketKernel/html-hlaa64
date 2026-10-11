@@ -1,0 +1,89 @@
+// lib/sys.hla — the operating system, the same on macOS and Windows.
+// Only this file names C runtime functions, and only ones that exist both in libSystem (macOS)
+// and in msvcrt.dll (Windows). The rest of the compiler calls the functions below.
+extern calloc, realloc, memcpy, exit, puts, getenv, system
+extern fopen, fclose, fread, fwrite, fseek, ftell
+
+// memory ---------------------------------------------------------------------------------
+
+// size zero-filled bytes; stops the program when memory runs out
+fn mem_alloc(size: auto) {
+    let p = calloc(1, size + 1)
+    if p == 0 { sys_fail("out of memory") }
+    return p
+}
+
+// the block at p resized to size bytes (the new part is not zeroed)
+fn mem_resize(p: auto, size: auto) {
+    let q = realloc(p, size)
+    if q == 0 { sys_fail("out of memory") }
+    return q
+}
+
+fn mem_copy(dst: auto, src: auto, n: auto) {
+    memcpy(dst, src, n)
+}
+
+// console and exit -----------------------------------------------------------------------
+
+// prints the string s and a new line
+fn say(s: auto) {
+    puts(s)
+}
+
+fn sys_exit(code: auto) {
+    exit(code)
+}
+
+fn sys_fail(msg: auto) {
+    puts(msg)
+    exit(1)
+}
+
+// files ----------------------------------------------------------------------------------
+
+data sys_read_size: i64 = 0
+
+// reads the whole file; the bytes plus a zero after them, or 0 when the file cannot be read.
+// The number of bytes is left in sys_read_size.
+fn read_whole(path: auto) {
+    let f = fopen(path, "rb")
+    if f == 0 { return 0 }
+    fseek(f, 0, 2)                              // SEEK_END
+    let size = ftell(f) & 0xFFFFFFFF            // a 32-bit long on Windows
+    fseek(f, 0, 0)                              // SEEK_SET
+    let buf = mem_alloc(size + 1)
+    let got = fread(buf, 1, size, f)
+    fclose(f)
+    if got != size { return 0 }
+    u8[buf + size] = 0
+    sys_read_size = size
+    return buf
+}
+
+// creates or replaces the file with n bytes from buf; 0, or -1 on failure
+fn write_whole(path: auto, buf: auto, n: auto) {
+    let f = fopen(path, "wb")
+    if f == 0 { return -1 }
+    let put = fwrite(buf, 1, n, f)
+    let shut = fclose(f) & 0xFFFFFFFF           // C int: only the low 32 bits are the result
+    if shut != 0 { return -1 }
+    if put != n { return -1 }
+    return 0
+}
+
+// marks the file as a program the system may run (chmod 755 on macOS and Linux); nothing on
+// Windows, where SystemRoot is always set. Through the shell: chmod is not in msvcrt.dll, so
+// calling it directly would keep the program from linking on Windows.
+fn make_executable(path: auto) {
+    if getenv("SystemRoot") != 0 { return 0 }
+    let n = cstr_len(path)
+    for i in 0..n {
+        if u8[path + i] == '\'' { return -1 }
+    }
+    let cmd = mem_alloc(n + 32)
+    mem_copy(cmd, "chmod 755 '", 11)
+    mem_copy(cmd + 11, path, n)
+    u8[cmd + 11 + n] = '\''
+    return system(cmd) & 0xFFFFFFFF
+}

@@ -4,7 +4,7 @@ import { build } from 'esbuild';
 import { readFileSync, writeFileSync, mkdirSync, rmSync, copyFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 
-const common = { bundle: true, write: false, minify: true, target: 'es2022', loader: { '.hla': 'text' as const, '.c': 'text' as const }, legalComments: 'none' as const };
+const common = { bundle: true, write: false, minify: true, target: 'es2022', loader: { '.hla': 'text' as const, '.c': 'text' as const, '.s': 'text' as const }, legalComments: 'none' as const };
 
 const worker = await build({ ...common, entryPoints: ['web/worker.ts'], format: 'iife' });
 const workerSrc = worker.outputFiles![0].text;

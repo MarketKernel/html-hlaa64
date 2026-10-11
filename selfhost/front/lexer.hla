@@ -1,0 +1,404 @@
+// front/lexer.hla — source text to tokens. `include "file"` is handled here: the included
+// file's tokens are put in place of the line, each file only once.
+
+enum TK { Eof, Num, Str, Id, Op }
+
+// operators, the longer ones first (the lexer takes the first that matches); Op.* is the index
+enum Op {
+    UshrSet, Ushr, ShlSet, ShrSet, Ellipsis, RangeIncl,
+    Shl, Shr, Eq, Ne, Le, Ge, AndAnd, OrOr, Inc, Dec,
+    AddSet, SubSet, MulSet, DivSet, ModSet, AndSet, OrSet, XorSet, Range, Arrow,
+    Plus, Minus, Star, Slash, Percent, Amp, Pipe, Caret, Tilde, Bang, Lt, Gt, Assign,
+    LParen, RParen, LBrack, RBrack, LBrace, RBrace, Comma, Semi, Colon, Question, Dot
+}
+
+rodata op_text: ptr = [
+    ">>>=", ">>>", "<<=", ">>=", "...", "..=",
+    "<<", ">>", "==", "!=", "<=", ">=", "&&", "||", "++", "--",
+    "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "..", "->",
+    "+", "-", "*", "/", "%", "&", "|", "^", "~", "!", "<", ">", "=",
+    "(", ")", "[", "]", "{", "}", ",", ";", ":", "?", "."
+]
+
+struct Tok {
+    kind: i64       // TK.*
+    val: i64        // Num: the value; Id: the name id; Op: Op.*
+    sptr: ptr       // Str: the bytes (with a 0 after them)
+    slen: i64       // Str: the number of bytes
+    file: i64
+    line: i64
+    col: i64
+    nl: i64         // 1 when the token starts a line
+}
+
+const MAX_FILES = 256
+
+data toks: ptr = 0                  // Tok[tok_cap], grows as needed
+data tok_count: i64 = 0
+data tok_cap: i64 = 0
+data files: ptr[MAX_FILES]          // file paths (C strings)
+data file_count: i64 = 0
+
+fn tok_at(i) { return toks + i * Tok.size }
+
+// errors ---------------------------------------------------------------------------------
+
+data msg: Buf
+data msg2: Buf
+
+// file:line:col: error: text — and the program stops
+fn fail_pos(file: auto, line: auto, col: auto, text: auto) {
+    [msg + Buf.used] = 0
+    fmt4(msg, "%s:%d:%d: error: %s", files[file], line, col, text)
+    sys_fail(buf_cstr(msg))
+}
+
+fn fail_tok(i: auto, text: auto) {
+    let t = tok_at(i)
+    fail_pos([t + Tok.file], [t + Tok.line], [t + Tok.col], text)
+}
+
+// the same with a name: "unknown name 'foo'"
+fn fail_name(i: auto, text: auto, id: auto) {
+    [msg2 + Buf.used] = 0
+    fmt2(msg2, "%s '%s'", text, name_str(id))
+    fail_tok(i, buf_cstr(msg2))
+}
+
+// paths ----------------------------------------------------------------------------------
+
+// `rel` seen from the file `from`: the directory of `from` + rel, without `./` and `x/../`
+fn path_near(from: auto, rel: auto) {
+    [msg2 + Buf.used] = 0
+    let cut = -1
+    let i = 0
+    while u8[from + i] != 0 {
+        let c = u8[from + i]
+        if c == '/' || c == '\\' { cut = i }
+        i++
+    }
+    if cut >= 0 { buf_add(msg2, from, cut + 1) }
+    buf_str(msg2, rel)
+    let p = buf_cstr(msg2)
+    let n = [msg2 + Buf.used]
+    // copy segment by segment
+    let out = mem_alloc(n + 1)
+    let o = 0
+    i = 0
+    while i < n {
+        let j = i
+        while j < n && u8[p + j] != '/' && u8[p + j] != '\\' { j++ }
+        let seg = j - i
+        let dot = seg == 1 && u8[p + i] == '.'
+        let up = seg == 2 && u8[p + i] == '.' && u8[p + i + 1] == '.'
+        if dot {
+            // ./ is left out
+        } elif up && o > 0 && path_ends_up(out, o) == 0 {
+            // x/../ — the last segment of the output goes away
+            o--
+            while o > 0 && u8[out + o - 1] != '/' { o-- }
+        } else {
+            mem_copy(out + o, p + i, seg)
+            o = o + seg
+            if j < n {
+                u8[out + o] = '/'
+                o++
+            }
+        }
+        i = j + 1
+    }
+    u8[out + o] = 0
+    return out
+}
+
+// 1 when the path so far (o bytes, ending with '/') ends with "../", which cannot be dropped
+fn path_ends_up(out, o) {
+    if o >= 3 && u8[out + o - 3] == '.' && u8[out + o - 2] == '.' {
+        if o == 3 { return 1 }
+        if u8[out + o - 4] == '/' { return 1 }
+    }
+    return 0
+}
+
+// tokens ---------------------------------------------------------------------------------
+
+fn new_tok(kind: auto, file: auto, line: auto, col: auto, nl: auto) {
+    if tok_count >= tok_cap {
+        // the tokens move: a token's address is only kept until the next new_tok
+        tok_cap = tok_cap * 2 + 4096
+        toks = mem_resize(toks, tok_cap * Tok.size)
+    }
+    let t = tok_at(tok_count)
+    tok_count++
+    [t + Tok.kind] = kind
+    [t + Tok.file] = file
+    [t + Tok.line] = line
+    [t + Tok.col] = col
+    [t + Tok.nl] = nl
+    return t
+}
+
+fn is_ident_start(c) {
+    return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '_'
+}
+
+fn is_ident_char(c) {
+    return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '_' || c >= '0' && c <= '9'
+}
+
+// the lexer's state while a file is read
+data lx_src: ptr = 0         // the current character
+data lx_line_start: ptr = 0
+data lx_line: i64 = 0
+data lx_file: i64 = 0
+data lx_end_line: i64 = 0    // the last line of the last file that ended (the main file in the end)
+
+fn lx_col(p) { return p - lx_line_start + 1 }
+
+fn lx_fail(p: auto, text: auto) {
+    fail_pos(lx_file, lx_line, lx_col(p), text)
+}
+
+// one character of a string or character literal at lx_src; lx_src moves past it
+fn lx_escape() {
+    let p = lx_src
+    let c = u8[p]
+    if c != '\\' {
+        lx_src = p + 1
+        return c
+    }
+    let e = u8[p + 1]
+    lx_src = p + 2
+    switch e {
+        case 'n' { return 10 }
+        case 't' { return 9 }
+        case 'r' { return 13 }
+        case '0' { return 0 }
+        case '\\', '\'', '"' { return e }
+        case 'x' {
+            let hi = hex_digit(u8[p + 2])
+            let lo = hex_digit(u8[p + 3])
+            if hi < 0 || lo < 0 { lx_fail(p, "bad \\x escape") }
+            lx_src = p + 4
+            return hi * 16 + lo
+        }
+    }
+    lx_fail(p, "unknown escape")
+    return 0
+}
+
+// the number at p; lx_src moves past it
+fn lx_number(p: auto) {
+    let base = 10
+    let q = p
+    if u8[q] == '0' {
+        switch u8[q + 1] {
+            case 'x', 'X' { base = 16 }
+            case 'b', 'B' { base = 2 }
+            case 'o', 'O' { base = 8 }
+        }
+        if base != 10 { q = q + 2 }
+    }
+    let v = 0
+    let digits = 0
+    loop {
+        let c = u8[q]
+        if c == '_' {
+            q++
+            continue
+        }
+        let d = hex_digit(c)
+        if d < 0 || d >= base { break }
+        v = v * base + d
+        digits++
+        q++
+    }
+    if digits == 0 || is_ident_char(u8[q]) { lx_fail(p, "bad number") }
+    lx_src = q
+    return v
+}
+
+// the string literal at p (at its opening quote) into the token t; lx_src moves past it
+fn lx_string(p: auto, t: auto) {
+    local b: Buf
+    [b + Buf.ptr] = 0
+    [b + Buf.used] = 0
+    [b + Buf.cap] = 0
+    lx_src = p + 1
+    loop {
+        let c = u8[lx_src]
+        if c == '"' { break }
+        if c == 0 || c == '\n' { lx_fail(p, "unterminated string") }
+        let e = lx_escape()
+        buf_char(b, e)
+    }
+    lx_src++
+    [t + Tok.sptr] = buf_cstr(b)
+    [t + Tok.slen] = [b + Buf.used]
+}
+
+// the operator at p, or -1
+fn lx_operator(p) {
+    for k in 0..Op.count {
+        let s = op_text[k]
+        let i = 0
+        while u8[s + i] != 0 && u8[s + i] == u8[p + i] { i++ }
+        if u8[s + i] == 0 { return k }
+    }
+    return -1
+}
+
+// the number of a file among those already read, or -1
+fn file_index(path: auto) {
+    for i in 0..file_count {
+        if cstr_same(files[i], path) { return i }
+    }
+    return -1
+}
+
+// reads a file and adds its tokens (and those of the files it includes);
+// inc_file/inc_line/inc_col: where it is included (inc_file = -1 for the main file)
+fn lex_file(path: auto, inc_file: auto, inc_line: auto, inc_col: auto) {
+    if file_count >= MAX_FILES { sys_fail("too many files") }
+    let fid = file_count
+    files[fid] = path
+    file_count++
+    let src = read_whole(path)
+    if src == 0 {
+        [msg2 + Buf.used] = 0
+        fmt1(msg2, "cannot read '%s'", path)
+        if inc_file < 0 { sys_fail(buf_cstr(msg2)) }
+        fail_pos(inc_file, inc_line, inc_col, buf_cstr(msg2))
+    }
+    // the state of the including file waits here while this one is read
+    let saved_src = lx_src
+    let saved_start = lx_line_start
+    let saved_line = lx_line
+    let saved_file = lx_file
+    lx_src = src
+    lx_line_start = src
+    lx_line = 1
+    lx_file = fid
+    lex_text(path)
+    lx_src = saved_src
+    lx_line_start = saved_start
+    lx_line = saved_line
+    lx_file = saved_file
+}
+
+// the tokens of the text at lx_src up to its final 0
+fn lex_text(path: auto) {
+    let nl = 1
+    loop {
+        let p = lx_src
+        let c = u8[p]
+        if c == 0 { break }
+        if c == '\n' {
+            lx_line++
+            lx_src = p + 1
+            lx_line_start = lx_src
+            nl = 1
+            continue
+        }
+        if c == ' ' || c == '\t' || c == '\r' {
+            lx_src = p + 1
+            continue
+        }
+        if c == '/' && u8[p + 1] == '/' {
+            while u8[lx_src] != 0 && u8[lx_src] != '\n' { lx_src++ }
+            continue
+        }
+        if c == '/' && u8[p + 1] == '*' {
+            lx_comment(p)
+            continue
+        }
+        if is_ident_start(c) {
+            let id = lx_name(p)
+            if id == Kw.Include && nl != 0 {
+                lx_include(path, p)
+                nl = 1
+                continue
+            }
+            let t = new_tok(TK.Id, lx_file, lx_line, lx_col(p), nl)
+            [t + Tok.val] = id
+        } else {
+            lx_token(p, nl)
+        }
+        nl = 0
+    }
+    lx_end_line = lx_line
+}
+
+// /* ... */ at p
+fn lx_comment(p: auto) {
+    lx_src = p + 2
+    loop {
+        let d = u8[lx_src]
+        if d == 0 { lx_fail(p, "unterminated comment") }
+        if d == '*' && u8[lx_src + 1] == '/' { break }
+        if d == '\n' {
+            lx_line++
+            lx_line_start = lx_src + 1
+        }
+        lx_src++
+    }
+    lx_src = lx_src + 2
+}
+
+// the name id of the name at p; a dot joins names: Point.x, Color.Red
+fn lx_name(p: auto) {
+    let q = p + 1
+    loop {
+        let c = u8[q]
+        if is_ident_char(c) {
+            q++
+            continue
+        }
+        let after = u8[q + 1]
+        if c == '.' && is_ident_start(after) {
+            q = q + 2
+            continue
+        }
+        break
+    }
+    lx_src = q
+    return intern(p, q - p)
+}
+
+// include "path" (the word include is at p): the tokens of that file come here, once
+fn lx_include(path: auto, p: auto) {
+    let col = lx_col(p)
+    while u8[lx_src] == ' ' || u8[lx_src] == '\t' { lx_src++ }
+    if u8[lx_src] != '"' { lx_fail(lx_src, "expected a file name after include") }
+    let t = new_tok(TK.Str, lx_file, lx_line, col, 1)
+    lx_string(lx_src, t)
+    tok_count--                      // the path is not a token of the program
+    let full = path_near(path, [t + Tok.sptr])
+    if file_index(full) < 0 { lex_file(full, lx_file, lx_line, col) }
+}
+
+// a number, a character, a string or an operator at p
+fn lx_token(p: auto, nl: auto) {
+    let c = u8[p]
+    let col = lx_col(p)
+    if c >= '0' && c <= '9' {
+        let t = new_tok(TK.Num, lx_file, lx_line, col, nl)
+        let v = lx_number(p)
+        [t + Tok.val] = v
+    } elif c == '\'' {
+        let t = new_tok(TK.Num, lx_file, lx_line, col, nl)
+        lx_src = p + 1
+        [t + Tok.val] = lx_escape()
+        if u8[lx_src] != '\'' { lx_fail(p, "bad character literal") }
+        lx_src++
+    } elif c == '"' {
+        let t = new_tok(TK.Str, lx_file, lx_line, col, nl)
+        lx_string(p, t)
+    } else {
+        let k = lx_operator(p)
+        if k < 0 { lx_fail(p, "unexpected character") }
+        let t = new_tok(TK.Op, lx_file, lx_line, col, nl)
+        [t + Tok.val] = k
+        lx_src = p + cstr_len(op_text[k])
+    }
+}

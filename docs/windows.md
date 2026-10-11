@@ -73,6 +73,9 @@ fn main() {
   (работает и на macOS). Программы из уроков с `%ld` верны, пока числа влезают в 32 бита.
 - Нет `syscall(...)`: системные вызовы Windows не документированы, вместо них — функции WinAPI
   (`extern GetStdHandle, WriteFile`), см. [tests/x64/cases/showcase.hla](../tests/x64/cases/showcase.hla).
+  Для файлов проще `include "std/file.hla"`: `read_file`, `write_file`, `file_open` … называются и
+  работают одинаково на Windows и macOS (поверх C runtime, в двоичном режиме — `\n` остаётся `\n`),
+  см. [справочник](language.md#файлы-stdfilehla).
 - Нет `rbit()` (нет такой инструкции); `clz()` использует `lzcnt` (Haswell и новее).
 - 8 регистров для `let` вместо 10: в больших функциях лишние переменные вытесняются в кадр
   (`// x -> frame` в ассемблере) и читаются операндами из памяти (`add r10, qword ptr [rsp + …]`).

@@ -8,8 +8,9 @@ import { assembleAndLinkX, assembleX, writeCoffObject, buildWindowsLibrary, link
 import { runMachO } from '../src/emu/macho-loader.ts';
 import { runPE } from '../src/emu/x64/pe-loader.ts';
 import { zipFiles, type ZipEntry } from './zip.ts';
-import { memoryFiles, writtenText } from '../src/emu/files.ts';
+import { memoryFiles, writtenFiles } from '../src/emu/files.ts';
 import { combineSources, errorOrigin, normalizePath, type Combined } from '../src/lang/include.ts';
+import { TRANSLATOR, ASSEMBLER } from './selfhost.ts';
 import { listProjects, getProject, saveProject, deleteProject, newId, freeName, persistent, type Project, type Mode, type Platform } from './projects.ts';
 
 import exMandelbrot from '../examples/mandelbrot.hla';
@@ -30,12 +31,27 @@ import wxMathlib from '../tests/x64/lib/mathlib.hla';
 declare const __WORKER_SRC__: string;
 declare const __ARTIFACT__: boolean;
 
-interface Example { id: string; title: string; src: string; mode?: Mode; cMain?: string }
+interface Example {
+  id: string; title: string; src: string; mode?: Mode; cMain?: string;
+  // a project of several files: `src` is the main file among `files`; `open` is shown first, `args` per main file
+  files?: Record<string, string>; main?: string; open?: string; args?: Record<string, string>;
+}
+// the toolchain written in HLA64 (selfhost/): the translator and the assembler, each a project of its own
+const hlc = (main: string): Example => ({
+  id: 'hlc', title: 'Translator in HLA64 (hla → s)', src: TRANSLATOR.files[main],
+  files: TRANSLATOR.files, main, open: 'hello.hla', args: TRANSLATOR.args,
+});
+const hlas = (main: string, open: string): Example => ({
+  id: 'hlas', title: 'Assembler in HLA64 (s → executable)', src: ASSEMBLER.files[main],
+  files: ASSEMBLER.files, main, open, args: ASSEMBLER.args,
+});
 
 const MAC_EXAMPLES: Example[] = [
   { id: 'mandelbrot', title: 'Mandelbrot set (floating point)', src: exMandelbrot },
   { id: 'mathlib', title: 'Library for C: mathlib (lesson 14)', src: exMathlib, mode: 'static', cMain: exMathlibMain },
   { id: 'showcase', title: 'Language tour (everything)', src: exShowcase },
+  hlc('hlc-arm.hla'),
+  hlas('hlas-arm.hla', 'hello.s'),
   { id: 'hello', title: 'Hello, world', src: exHello },
   { id: 'fizzbuzz', title: 'FizzBuzz', src: exFizz },
   { id: 'bare-metal', title: 'Bare metal: syscalls + inline asm', src: exBare },
@@ -47,6 +63,8 @@ const WIN_EXAMPLES: Example[] = [
   { id: 'mandelbrot', title: 'Mandelbrot set (floating point)', src: wxMandelbrot },
   { id: 'mathlib', title: 'Library for C: mathlib (lesson 14)', src: wxMathlib, mode: 'static', cMain: exMathlibMain },
   { id: 'showcase', title: 'Language tour (everything)', src: wxShowcase },
+  hlc('hlc-x64.hla'),
+  hlas('hlas-x64.hla', 'hello-x64.s'),
   { id: 'hello', title: 'Hello, world', src: exHello },
   { id: 'fizzbuzz', title: 'FizzBuzz', src: exFizz },
   { id: 'arith', title: 'Self-test: arithmetic', src: wxArith },
@@ -76,7 +94,7 @@ const store = {
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const KW = new Set(['fn', 'function', 'export', 'naked', 'extern', 'const', 'data', 'rodata', 'struct', 'enum', 'alias', 'let',
   'var', 'if', 'else', 'elif', 'while', 'do', 'loop', 'for', 'in', 'step', 'break', 'continue', 'return', 'goto', 'asm',
-  'push', 'pop', 'local', 'unsigned', 'auto', 'set', 'call', 'include']);
+  'push', 'pop', 'local', 'unsigned', 'auto', 'set', 'call', 'include', 'switch', 'case', 'default']);
 const TYPES = new Set(['i8', 'u8', 'i16', 'u16', 'i32', 'u32', 'i64', 'u64', 'ptr', 'f32', 'f64', 'string']);
 const REG_ARM = /^(?:[xw](?:[12]?\d|30)|[dsqhb](?:[12]?\d|3[01])|sp|wsp|xzr|wzr|fp|lr)$/i;
 const REG_X64 = /^(?:[re]?(?:ax|bx|cx|dx|si|di|sp|bp)|[abcd][lh]|(?:si|di|sp|bp)l|r(?:[89]|1[0-5])[dwb]?|xmm(?:\d|1[0-5])|rip)$/i;
@@ -130,7 +148,7 @@ let errLine = 0;
 
 function renderEditor(): void {
   const text = src.value;
-  let html = /\.[ch]$/i.test(project.open) ? hlC(text) : hlHla(text);
+  let html = /\.[ch]$/i.test(project.open) ? hlC(text) : /\.s$/i.test(project.open) ? text.split('\n').map(hlAsmLine).join('\n') : hlHla(text);
   const lines = text.split('\n').length;
   if (errLine > 0 && errLine <= lines) {
     const parts = html.split('\n');
@@ -313,7 +331,9 @@ const outName = (b: Build): string => {
   return b.mode === 'exe' ? progName() : b.mode === 'static' ? `lib${n}.a` : `lib${n}.dylib`;
 };
 /** program name: the example's id or the project's name */
-const progName = () => (project.example ?? project.name).replace(/[^\w-]/g, '_') || 'program';
+// an example of several programs (the self-hosted toolchain) is named after the one being built
+const progName = () => (project.example && project.main !== `${project.example}.hla` ? stem(project.main) : project.example ?? project.name)
+  .replace(/[^\w-]/g, '_') || 'program';
 
 const fmtN = (n: number) => n.toLocaleString('en-US');
 const fmtB = (n: number) => (n >= 10240 ? `${(n / 1024).toFixed(1)} KB` : `${fmtN(n)} B`);
@@ -645,6 +665,7 @@ function showTab(name: string): void {
   for (const t of document.querySelectorAll<HTMLElement>('.tab')) t.setAttribute('aria-selected', String(t.dataset.tab === name));
   for (const id of ['asm', 'bin', 'macho', 'header', 'run']) $(`tab-${id}`).hidden = id !== name;
   $('runStatus').hidden = name !== 'run';
+  $('argsBar').hidden = name !== 'run';
   store.set('tab', name);
 }
 for (const t of document.querySelectorAll<HTMLElement>('.tab, .stage')) t.addEventListener('click', () => showTab(t.dataset.tab!));
@@ -671,14 +692,65 @@ let workerUrl: string | null = null;
 
 function runStatus(html: string): void { $('runStatus').innerHTML = html; }
 
-function run(): void {
-  if (mode !== 'exe') { showTab('header'); return; }
+type Format = 'macho' | 'pe';
+/** an executable a program wrote, run as it is (with no arguments) */
+interface Given { bytes: Uint8Array; format: Format; name: string }
+
+/** the command line after the program name: words and "quoted words" */
+const splitArgs = (t: string): string[] => [...t.matchAll(/"([^"]*)"|(\S+)/g)].map((m) => m[1] ?? m[2]);
+const argsText = () => project.args?.[project.main] ?? '';
+function renderArgs(): void {
+  $<HTMLInputElement>('args').value = argsText();
+  $('argv0').textContent = stem(project.main) + (platform === 'win' ? '.exe' : '');
+}
+$('args').addEventListener('input', () => {
+  project.args = { ...project.args, [project.main]: $<HTMLInputElement>('args').value };
+  persist();
+});
+$('args').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); run(); } });
+
+const imageFormat = (d: Uint8Array): Format | null =>
+  d[0] === 0xcf && d[1] === 0xfa && d[2] === 0xed && d[3] === 0xfe ? 'macho' : d[0] === 0x4d && d[1] === 0x5a ? 'pe' : null;
+
+/** a file the program wrote that is not text (an executable...): download it, run it when it is one */
+function binaryRow(name: string, data: Uint8Array): HTMLElement {
+  const box = document.createElement('span');
+  box.className = 'out';
+  const format = imageFormat(data);
+  const label = document.createElement('span');
+  label.textContent = `${name} · ${format === 'macho' ? 'Mach-O executable' : format === 'pe' ? 'PE executable' : 'binary file'} · ${fmtN(data.length)} bytes`;
+  box.appendChild(label);
+  const button = (text: string, title: string, f: () => void) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'btn';
+    b.textContent = text;
+    b.title = title;
+    b.addEventListener('click', f);
+    box.appendChild(b);
+  };
+  if (format) button('Run', `run ${name} in the ${format === 'pe' ? 'x64' : 'ARM64'} emulator`, () => run({ bytes: data, format, name }));
+  button('Download', format === 'macho' ? `save ${name}; then in Terminal: chmod +x ${name}` : `save ${name}`, () => save(name, data));
+  return box;
+}
+
+function run(given?: Given): void {
+  if (!given && mode !== 'exe') { showTab('header'); return; }
   const image = (b: Build | null) => (b?.platform === 'win' ? b.pe : b?.link)?.bytes ?? null;
-  if (!image(current)) { rebuild(); if (!image(current)) return; }
-  const bytes = image(current)!;
-  const format = current!.platform === 'win' ? 'pe' : 'macho';
+  if (!given && !image(current)) { rebuild(); if (!image(current)) return; }
+  const bytes = given?.bytes ?? image(current)!;
+  const format: Format = given?.format ?? (current!.platform === 'win' ? 'pe' : 'macho');
+  const args = given ? [] : splitArgs(argsText());
   const out = $('console');
   out.textContent = '';
+  // the command line, when there is more to it than the program
+  if (given || args.length) {
+    const cmd = document.createElement('span');
+    cmd.className = 'cmd';
+    cmd.textContent = `$ ${[given ? given.name : $('argv0').textContent, ...args].join(' ')}\n`;
+    out.appendChild(cmd);
+  }
+  const body = out.appendChild(document.createTextNode(''));   // what the program prints
   showTab('run');
   setStage('run', 'busy', 'running…', '');
   runStatus('<span class="pill busy">running</span> <button class="btn" id="stop" type="button">Stop</button>');
@@ -691,9 +763,9 @@ function run(): void {
   const append = (t: string) => {
     text += t;
     if (text.length > 400_000) text = text.slice(-300_000);
-    out.textContent = text;
+    body.data = text;
   };
-  const finish = (r: { exitCode: number | null; steps: number; error: string | null; ms: number; written?: Record<string, string> }) => {
+  const finish = (r: { exitCode: number | null; steps: number; error: string | null; ms: number; written?: Record<string, string>; binary?: Record<string, Uint8Array> }) => {
     if (worker) { worker.terminate(); worker = null; }
     if (r.written && Object.keys(r.written).length) addWritten(target, r.written);
     if (r.error) {
@@ -701,6 +773,16 @@ function run(): void {
       e.className = 'e';
       e.textContent = (text && !text.endsWith('\n') ? '\n' : '') + '⚠ ' + r.error + '\n';
       out.appendChild(e);
+    }
+    const binaries = Object.entries(r.binary ?? {});
+    for (const [name, data] of binaries) {
+      if (out.textContent && !out.textContent.endsWith('\n')) out.appendChild(document.createTextNode('\n'));
+      out.appendChild(binaryRow(name, data));
+      out.appendChild(document.createTextNode('\n'));
+    }
+    if (binaries.length && target === project) {
+      runNote = `the program wrote ${binaries.map(([n]) => n).join(', ')}: see the console`;
+      savedNote();
     }
     const ok = r.exitCode === 0 && !r.error;
     const pill = r.error ? `<span class="pill err">${r.error === 'stopped by user' ? 'stopped' : 'crashed'}</span>`
@@ -722,20 +804,21 @@ function run(): void {
     };
     worker.onerror = (ev) => { ev.preventDefault(); worker = null; runInPage(); };
     const copy = bytes.slice();
-    worker.postMessage({ bytes: copy.buffer, limit: LIMIT, format, files: snapshot }, [copy.buffer]);
+    worker.postMessage({ bytes: copy.buffer, limit: LIMIT, format, files: snapshot, args }, [copy.buffer]);
   } else runInPage();
 
   function runInPage() {
     // no worker available (some file:// setups): run synchronously with a smaller budget
     const t0 = performance.now();
     const files = memoryFiles(snapshot);
-    const opts = { limit: 50_000_000, files, onOutput: (t: string) => { text += t; } };
+    const opts = { limit: 50_000_000, files, args, onOutput: (t: string) => { text += t; } };
     const r = format === 'pe' ? runPE(bytes, opts) : runMachO(bytes, opts);
-    out.textContent = text;
-    finish({ exitCode: r.exitCode, steps: r.steps, error: r.error, ms: performance.now() - t0, written: writtenText(files) });
+    body.data = text;
+    const w = writtenFiles(files);
+    finish({ exitCode: r.exitCode, steps: r.steps, error: r.error, ms: performance.now() - t0, written: w.text, binary: w.binary });
   }
 }
-$('run').addEventListener('click', run);
+$('run').addEventListener('click', () => run());
 
 /** files a program wrote become files of its project (text; a changed source rebuilds) */
 function addWritten(p: Project, written: Record<string, string>): void {
@@ -991,10 +1074,12 @@ let userProjects: Project[] = [];            // this platform's projects (not ex
 let editedExamples = new Set<string>();      // examples with a stored, changed copy
 
 function exampleProject(ex: Example, p: Platform = platform): Project {
-  const main = `${ex.id}.hla`;
-  const files = [{ name: main, text: ex.src }];
+  const main = ex.main ?? `${ex.id}.hla`;
+  const files = ex.files ? Object.entries(ex.files).map(([name, text]) => ({ name, text })) : [{ name: main, text: ex.src }];
   if (ex.cMain) files.push({ name: 'main.c', text: ex.cMain });
-  return { id: `ex-${p}-${ex.id}`, name: ex.title, platform: p, mode: ex.mode ?? 'exe', main, files, open: main, example: ex.id, updated: 0 };
+  const proj: Project = { id: `ex-${p}-${ex.id}`, name: ex.title, platform: p, mode: ex.mode ?? 'exe', main, files, open: ex.open ?? main, example: ex.id, updated: 0 };
+  if (ex.args) proj.args = { ...ex.args };
+  return proj;
 }
 
 /** an example project that equals its template is not stored */
@@ -1002,8 +1087,9 @@ function sameAsTemplate(p: Project): boolean {
   const ex = PLATFORMS[p.platform].examples.find((e) => e.id === p.example);
   if (!ex) return false;
   const t = exampleProject(ex, p.platform);
+  const args = (q: Project) => JSON.stringify(Object.entries(q.args ?? {}).filter(([, v]) => v).sort());
   return t.mode === p.mode && t.main === p.main && t.files.length === p.files.length
-    && t.files.every((f, i) => p.files[i].name === f.name && p.files[i].text === f.text);
+    && t.files.every((f, i) => p.files[i].name === f.name && p.files[i].text === f.text) && args(t) === args(p);
 }
 
 let saveTimer = 0;
@@ -1174,7 +1260,8 @@ function renameFile(from: string, to: string): string | null {
     f.text = f.text.replace(/^(\s*include\s+")([^"]*)(")/gm, (m, a, p, b) => (normalizePath(dir + p) === from ? a + rel(to) + b : m));
     if (f.name === project.open) src.value = f.text;
   }
-  if (project.main === from) project.main = to;
+  if (project.args?.[from] !== undefined) { project.args[to] = project.args[from]; delete project.args[from]; }
+  if (project.main === from) { project.main = to; renderArgs(); }
   if (project.open === from) { project.open = to; $('filename').textContent = to; }
   persist();
   rebuild();
@@ -1183,7 +1270,7 @@ function renameFile(from: string, to: string): string | null {
 
 function deleteFile(name: string): void {
   project.files = project.files.filter((x) => x.name !== name);
-  if (project.main === name) project.main = project.files.find((x) => isHla(x.name))?.name ?? project.files[0].name;
+  if (project.main === name) { project.main = project.files.find((x) => isHla(x.name))?.name ?? project.files[0].name; renderArgs(); }
   if (project.open === name) openFile(project.main);
   persist();
   rebuild();
@@ -1191,6 +1278,7 @@ function deleteFile(name: string): void {
 
 function setMain(name: string): void {
   project.main = name;
+  renderArgs();
   persist();
   rebuild();
 }
@@ -1340,6 +1428,7 @@ function openProject(p: Project, remember = true): void {
   setStage('run', '', '—', '');
   $('console').textContent = '';
   runStatus(`<span>Press Run to execute the program in the built-in ${PLATFORMS[platform].emulator}.</span>`);
+  renderArgs();
   rebuild();
   renderProjects();
   renderExamples();

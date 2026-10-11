@@ -1,0 +1,168 @@
+// lib/text.hla — strings and a growing byte buffer with a small formatter.
+// Strings are C strings (bytes ending with 0); a buffer keeps any bytes.
+
+// strings --------------------------------------------------------------------------------
+
+fn cstr_len(s) {
+    let n = 0
+    while u8[s + n] != 0 { n++ }
+    return n
+}
+
+// 1 when the n bytes at a and at b are the same
+fn mem_same(a, b, n) {
+    let i = 0
+    while i < n {
+        if u8[a + i] != u8[b + i] { return 0 }
+        i++
+    }
+    return 1
+}
+
+fn cstr_same(a, b) {
+    let i = 0
+    loop {
+        let c = u8[a + i]
+        if c != u8[b + i] { return 0 }
+        if c == 0 { return 1 }
+        i++
+    }
+}
+
+// <0, 0 or >0 as the C string a sorts before, with or after b (byte by byte)
+fn cstr_cmp(a, b) {
+    let i = 0
+    loop {
+        let x = u8[a + i]
+        let y = u8[b + i]
+        if x != y { return x - y }
+        if x == 0 { return 0 }
+        i++
+    }
+}
+
+// a new C string with the n bytes at p
+fn cstr_from(p: auto, n: auto) {
+    let s = mem_alloc(n + 1)
+    mem_copy(s, p, n)
+    return s
+}
+
+// the value of a hex digit, or -1
+fn hex_digit(c) {
+    switch c {
+        case '0'..='9' { return c - '0' }
+        case 'a'..='f' { return c - 'a' + 10 }
+        case 'A'..='F' { return c - 'A' + 10 }
+    }
+    return -1
+}
+
+// buffer ---------------------------------------------------------------------------------
+
+struct Buf { ptr: ptr, used: i64, cap: i64 }
+
+// room for extra more bytes
+fn buf_reserve(b: auto, extra: auto) {
+    let need = [b + Buf.used] + extra + 1
+    if need <= [b + Buf.cap] { return 0 }
+    let cap = [b + Buf.cap] * 2
+    if cap < need { cap = need + 4096 }
+    [b + Buf.ptr] = mem_resize([b + Buf.ptr], cap)
+    [b + Buf.cap] = cap
+    return 0
+}
+
+fn buf_add(b: auto, p: auto, n: auto) {
+    buf_reserve(b, n)
+    mem_copy([b + Buf.ptr] + [b + Buf.used], p, n)
+    [b + Buf.used] = [b + Buf.used] + n
+}
+
+fn buf_str(b: auto, s: auto) {
+    buf_add(b, s, cstr_len(s))
+}
+
+fn buf_char(b: auto, c: auto) {
+    buf_reserve(b, 1)
+    u8[[b + Buf.ptr] + [b + Buf.used]] = c
+    [b + Buf.used] = [b + Buf.used] + 1
+}
+
+// v in decimal
+fn buf_int(b: auto, v: auto) {
+    local digits: u8[24]
+    let n = 0
+    let neg = v < 0
+    let u = v
+    if neg { u = 0 - v }
+    loop {
+        digits[n] = '0' + u % 10
+        n++
+        u = u / 10
+        if u == 0 { break }
+    }
+    if neg { buf_char(b, '-') }
+    while n > 0 {
+        n--
+        buf_char(b, digits[n])
+    }
+}
+
+// the buffer's bytes as a C string (a 0 is kept after the last byte, not counted in used)
+fn buf_cstr(b: auto) {
+    buf_reserve(b, 1)
+    u8[[b + Buf.ptr] + [b + Buf.used]] = 0
+    return [b + Buf.ptr]
+}
+
+// formatting -----------------------------------------------------------------------------
+// %d — an integer, %s — a C string, %c — a byte, %% — a percent sign
+
+data fmt_args: i64[8]
+
+fn buf_format(b: auto, f: auto) {
+    let i = 0
+    let arg = 0
+    loop {
+        let c = u8[f + i]
+        if c == 0 { break }
+        i++
+        if c != '%' {
+            buf_char(b, c)
+            continue
+        }
+        let k = u8[f + i]
+        i++
+        switch k {
+            case 'd' { buf_int(b, fmt_args[arg]); arg++ }
+            case 's' { buf_str(b, fmt_args[arg]); arg++ }
+            case 'c' { buf_char(b, fmt_args[arg]); arg++ }
+            default { buf_char(b, k) }
+        }
+    }
+}
+
+fn fmt0(b: auto, f: auto) { buf_format(b, f) }
+fn fmt1(b: auto, f: auto, a1: auto) {
+    fmt_args[0] = a1
+    buf_format(b, f)
+}
+fn fmt2(b: auto, f: auto, a1: auto, a2: auto) {
+    fmt_args[0] = a1
+    fmt_args[1] = a2
+    buf_format(b, f)
+}
+fn fmt3(b: auto, f: auto, a1: auto, a2: auto, a3: auto) {
+    fmt_args[0] = a1
+    fmt_args[1] = a2
+    fmt_args[2] = a3
+    buf_format(b, f)
+}
+fn fmt4(b: auto, f: auto, a1: auto, a2: auto, a3: auto, a4: auto) {
+    fmt_args[0] = a1
+    fmt_args[1] = a2
+    fmt_args[2] = a3
+    fmt_args[3] = a4
+    buf_format(b, f)
+}

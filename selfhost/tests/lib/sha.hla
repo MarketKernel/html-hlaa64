@@ -1,0 +1,25 @@
+// SHA-256 of a few messages (lib/sha256.hla)
+include "../../lib/sys.hla"
+include "../../lib/text.hla"
+include "../../lib/sha256.hla"
+extern printf(fmt, ...)
+
+data digest: u8[32]
+data big: u8[1000]
+
+fn show(p: auto, n: auto) {
+    sha256(p, n, digest)
+    for i in 0..32 { printf("%02x", digest[i]) }
+    printf("  (%lld bytes)\n", n)
+}
+
+fn main() {
+    show("", 0)
+    show("abc", 3)
+    show("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq", 56)
+    for i in 0..1000 { big[i] = i * 7 + 3 }
+    show(big, 55)
+    show(big, 64)
+    show(big, 119)
+    show(big, 1000)
+}

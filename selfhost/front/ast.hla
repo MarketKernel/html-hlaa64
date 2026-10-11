@@ -1,0 +1,76 @@
+// front/ast.hla — the syntax tree. Every node has the same shape; what the fields mean
+// depends on the kind. Lists (statements, arguments, parameters) are chained through `next`.
+
+enum NK {
+    // expressions
+    Num,        // val: the value
+    Str,        // a: the bytes, val: their number
+    Name,       // val: name id
+    Unary,      // op: Op.Minus / Op.Tilde / Op.Bang, a
+    Binary,     // op: Op.*, a, b
+    Cond,       // a ? b : c
+    Call,       // val: function name id, a: arguments, op: their number
+    Index,      // val: array name id, a: index
+    Mem,        // op: Ty.* of the access, a: address          [a]  u8[a]
+    Addr,       // a: Name or Index                             &a
+    SizeOf,     // val: name id
+    LenOf,      // val: name id
+
+    // statements
+    Let,        // val: name id, a: initial value (or 0)
+    Local,      // val: name id, c: type name id, b: element count (or 0)
+    Assign,     // op: Op.Assign or the operator of `+=` ..., a: target, b: value
+    ExprStmt,   // a: the call
+    If,         // a: condition, b: body, c: the else part (an If or a Block, or 0)
+    While,      // a: condition, b: body
+    DoWhile,    // a: condition, b: body
+    Loop,       // b: body
+    For,        // val: variable, a: from, b: to, op: 1 for ..=, d: step (or 0), c: body
+    Break,
+    Continue,
+    Return,     // a: value (or 0)
+    Block,      // a: statements
+    Switch,     // a: subject, b: cases
+    Case,       // a: values (0 for default), b: body
+    Range,      // a .. b (op: 1 for ..=)
+
+    // top level
+    Fn,         // val: name id, a: parameters, b: body, op: 1 when exported
+    Param,      // val: name id, op: Ty.* given with `name: i32` (Ty.None otherwise)
+    Data        // val: name id, c: type name id (-1: none), b: element count (or 0),
+                // d: 0 no initial value / 1 one value in a / 2 a list in a; op: 1 for rodata
+}
+
+struct Node {
+    kind: i64
+    op: i64
+    val: i64
+    a: ptr
+    b: ptr
+    c: ptr
+    d: ptr
+    next: ptr
+    tok: i64        // the token it came from (for error messages)
+}
+
+fn node(kind: auto, tok: auto) {
+    let n = mem_alloc(Node.size)
+    [n + Node.kind] = kind
+    [n + Node.tok] = tok
+    return n
+}
+
+fn num_node(v: auto, tok: auto) {
+    let n = node(NK.Num, tok)
+    [n + Node.val] = v
+    return n
+}
+
+// the top-level functions and data in the order of the source
+data items_head: ptr = 0
+data items_tail: ptr = 0
+
+fn add_item(n) {
+    if items_head == 0 { items_head = n } else { [items_tail + Node.next] = n }
+    items_tail = n
+}

@@ -1,0 +1,481 @@
+// x64/pe.hla — the sections linked into a Windows x64 executable (PE32+), byte for byte the
+// layout of the TypeScript linker (src/asm/coff/pe.ts). Imported functions are found by name in
+// msvcrt.dll, kernel32.dll and user32.dll (x64/winapi.hla); a direct call goes through a stub
+// `jmp [IAT]`. Absolute addresses get base relocations (ASLR); .pdata becomes the exception
+// directory.
+
+const FILE_ALIGN = 0x200
+const SECT_ALIGN = 0x1000
+const IMAGE_BASE = 0x140000000
+
+// the DLL of every exported name: per name id, the DLL index + 1 (0: no system DLL has it)
+data dll_of: ptr = 0
+data prev_name: u8[1024]
+
+fn load_dll_exports() {
+    dll_of = mem_alloc(MAX_NAMES * 8)
+    for d in 0..3 {
+        let s = dll_packed[d]
+        let i = 0
+        while u8[s + i] != 0 {
+            let c = u8[s + i]
+            let keep = 0
+            if c >= '0' && c <= '9' { keep = c - '0' }
+            elif c >= 'a' && c <= 'z' { keep = c - 'a' + 10 }
+            else { keep = c - 'A' + 36 }
+            i++
+            let n = keep
+            while u8[s + i] != ',' && u8[s + i] != 0 {
+                prev_name[n] = u8[s + i]
+                n++
+                i++
+            }
+            if u8[s + i] == ',' { i++ }
+            if n > 0 {
+                let id = intern(prev_name, n)
+                if [dll_of + id * 8] == 0 { [dll_of + id * 8] = d + 1 }
+            }
+        }
+    }
+}
+
+// output sections ------------------------------------------------------------------------
+
+struct Out {
+    oname: ptr      // ".text"
+    flags: i64
+    bytes: Buf
+    vsize: i64
+    rva: i64
+    fileoff: i64
+    filesize: i64
+}
+
+enum OS { Text, Rdata, Data, Bss, Pdata, Idata, Reloc }
+data outs: Out[7]
+rodata out_names: ptr = [".text", ".rdata", ".data", ".bss", ".pdata", ".idata", ".reloc"]
+rodata out_flags: u32[7] = [0x60000020, 0x40000040, 0xC0000040, 0xC0000080, 0x40000040, 0xC0000040, 0x42000040]
+
+fn out_at(k) { return outs + k * Out.size }
+fn out_data(k) { return outs + k * Out.size + Out.bytes }
+fn out_rva(k) { return [outs + k * Out.size + Out.rva] }
+fn out_vsize(k) { return [outs + k * Out.size + Out.vsize] }
+fn out_fsize(k) { return [outs + k * Out.size + Out.filesize] }
+fn out_len(k) { return [outs + k * Out.size + Out.bytes + Buf.used] }
+
+// where each input section went: output index and offset in it
+data part_out: i64[MAX_SECTS]
+data part_off: i64[MAX_SECTS]
+
+fn place_part(k: auto, si: auto) {
+    let s = sect_at(si)
+    let b = out_data(k)
+    let a = [s + Sect.align]
+    if a < 1 { a = 1 }
+    while [b + Buf.used] % a != 0 {
+        if k == OS.Text { buf_char(b, 0xCC) } else { buf_char(b, 0) }
+    }
+    part_out[si] = k
+    part_off[si] = [b + Buf.used]
+    if [s + Sect.zerofill] { emit_to(b, 0, [s + Sect.length]) }
+    else { buf_add(b, [s + Sect.bytes + Buf.ptr], [s + Sect.length]) }
+}
+
+fn sect_rva(si) { return [outs + part_out[si] * Out.size + Out.rva] + part_off[si] }
+
+// imports --------------------------------------------------------------------------------
+
+const MAX_IMPORTS = 2048
+data imp_names: i64[MAX_IMPORTS]        // functions to import, in the order of first use
+data imp_count: i64 = 0
+data stub_names: i64[MAX_IMPORTS]       // the ones called directly (they get a stub)
+data stub_count: i64 = 0
+data stub_off: i64[MAX_IMPORTS]
+data dll_order: i64[3]                  // the DLLs used, sorted by name
+data dll_used: i64 = 0
+data ilt_off: i64[3]
+data iat_off: i64[3]
+data name_off: i64[3]
+data hint_off: i64[MAX_IMPORTS]         // per import (same order as imp_names)
+
+fn list_index(list: auto, count: auto, id: auto) {
+    for i in 0..count {
+        if [list + i * 8] == id { return i }
+    }
+    return -1
+}
+
+// the IAT slot of an imported function (offset in .idata)
+fn iat_slot(id: auto) {
+    let d = [dll_of + id * 8] - 1
+    let k = 0
+    for i in 0..imp_count {
+        let n = imp_names[i]
+        if n == id { break }
+        if [dll_of + n * 8] - 1 == d { k++ }
+    }
+    for j in 0..dll_used {
+        if dll_order[j] == d { return iat_off[j] + k * 8 }
+    }
+    return 0
+}
+
+data imp_prefix: i64 = 0                // name id of "__imp_" (only its text is used)
+
+// the function behind a symbol: __imp_puts -> puts (id), puts -> puts
+fn import_target(id: auto) {
+    let s = name_str(id)
+    if mem_same(s, "__imp_", 6) && name_len(id) > 6 { return intern(s + 6, name_len(id) - 6) }
+    return id
+}
+
+// the RVA of a symbol: defined here, an IAT slot (__imp_x) or a stub
+fn sym_rva(id: auto, line: auto) {
+    let a = asym_at(id)
+    if [a + ASym.sect] != 0 { return sect_rva([a + ASym.sect] - 1) + [a + ASym.off] }
+    let t = import_target(id)
+    if t != id {
+        let slot = iat_slot(t)
+        return out_rva(OS.Idata) + slot
+    }
+    let k = list_index(stub_names, stub_count, id)
+    if k >= 0 { return out_rva(OS.Text) + stub_off[k] }
+    line_no = line
+    asm_fail_name("undefined symbol", id)
+    return 0
+}
+
+fn layout_outs(reloc_size: auto) {
+    let rva = SECT_ALIGN
+    let file = SIZEOF_HEADERS
+    for k in 0..7 {
+        let o = out_at(k)
+        let size = out_len(k)
+        if k == OS.Reloc { size = reloc_size }
+        [o + Out.vsize] = size
+        if size == 0 {
+            [o + Out.rva] = 0
+            continue
+        }
+        [o + Out.rva] = rva
+        rva = align_to(rva + size, SECT_ALIGN)
+        if k == OS.Bss {
+            [o + Out.fileoff] = 0
+            [o + Out.filesize] = 0
+            continue
+        }
+        [o + Out.fileoff] = file
+        [o + Out.filesize] = align_to(size, FILE_ALIGN)
+        file = file + [o + Out.filesize]
+    }
+    size_of_image = rva
+    file_size = file
+}
+
+data size_of_image: i64 = 0
+data file_size: i64 = 0
+const SIZEOF_HEADERS = 0x400            // align(0x40 + 4 + 20 + 240 + 40 * 7, FILE_ALIGN)
+
+fn put_at(b: auto, at: auto, size: auto, v: auto) {
+    let p = [b + Buf.ptr] + at
+    for i in 0..size { u8[p + i] = v >>> (i * 8) }
+}
+
+// the executable -------------------------------------------------------------------------
+
+struct Patch { k: i64, at: i64, len: i64, v: i64 }
+
+fn link_pe(out: auto) {
+    load_dll_exports()
+    let user_count = sect_count
+
+    // imports: every symbol not defined here
+    for fi in 0..sfix_count {
+        let f = sfixes + fi * SFix.size
+        let sym = [f + SFix.sym]
+        if sym_defined(sym) { continue }
+        let si = sect_index([f + SFix.sect])
+        let s = sect_at(si)
+        if [s + Sect.length] == 0 && !cstr_same([s + Sect.sname], ".text") { continue }
+        let n = import_target(sym)
+        line_no = [f + SFix.line]
+        if n == sym && [f + SFix.kind] == XF.Rva { asm_fail_name("undefined symbol", sym) }
+        if [dll_of + n * 8] == 0 { asm_fail_name("undefined symbol (not defined here and not exported by msvcrt.dll, kernel32.dll, user32.dll):", n) }
+        line_no = 0
+        if list_index(imp_names, imp_count, n) < 0 {
+            if imp_count >= MAX_IMPORTS { asm_fail("too many imported functions") }
+            imp_names[imp_count] = n
+            imp_count++
+        }
+        if n == sym && list_index(stub_names, stub_count, n) < 0 {
+            stub_names[stub_count] = n
+            stub_count++
+        }
+    }
+
+    // input sections into output sections (in assembly order; empty ones except .text are left out)
+    for si in 0..user_count {
+        let s = sect_at(si)
+        if [s + Sect.length] == 0 && !cstr_same([s + Sect.sname], ".text") { continue }
+        let flags = [s + Sect.flags]
+        if flags & SCN_EXEC { place_part(OS.Text, si) }
+        elif cstr_same([s + Sect.sname], ".pdata") { place_part(OS.Pdata, si) }
+        elif [s + Sect.zerofill] { place_part(OS.Bss, si) }
+        elif flags & SCN_WRITE { place_part(OS.Data, si) }
+        else { place_part(OS.Rdata, si) }
+    }
+    // stubs for direct calls: jmp qword ptr [rip + IAT]
+    let text = out_data(OS.Text)
+    for i in 0..stub_count {
+        while [text + Buf.used] % 8 != 0 { buf_char(text, 0xCC) }
+        stub_off[i] = [text + Buf.used]
+        buf_char(text, 0xFF)
+        buf_char(text, 0x25)
+        emit_to(text, 0, 4)
+        buf_char(text, 0xCC)
+        buf_char(text, 0xCC)
+    }
+
+    // the import directory: descriptors | ILTs | IATs | hint/name entries | DLL names
+    for d in 0..3 {
+        let used = 0
+        for i in 0..imp_count {
+            if [dll_of + imp_names[i] * 8] - 1 == d { used = 1 }
+        }
+        if used {
+            dll_order[dll_used] = d
+            dll_used++
+        }
+    }
+    // sorted by name (an insertion sort of at most three)
+    for i in 1..dll_used {
+        let j = i
+        while j > 0 && cstr_cmp(dll_names[dll_order[j - 1]], dll_names[dll_order[j]]) > 0 {
+            let t = dll_order[j]
+            dll_order[j] = dll_order[j - 1]
+            dll_order[j - 1] = t
+            j--
+        }
+    }
+    let desc_size = (dll_used + 1) * 20
+    let p = desc_size
+    for j in 0..dll_used {
+        ilt_off[j] = p
+        p = p + (dll_count(dll_order[j]) + 1) * 8
+    }
+    let iat_start = p
+    for j in 0..dll_used {
+        iat_off[j] = p
+        p = p + (dll_count(dll_order[j]) + 1) * 8
+    }
+    let iat_end = p
+    for j in 0..dll_used {
+        for i in 0..imp_count {
+            let n = imp_names[i]
+            if [dll_of + n * 8] - 1 != dll_order[j] { continue }
+            hint_off[i] = p
+            p = p + align_to(2 + name_len(n) + 1, 2)
+        }
+    }
+    for j in 0..dll_used {
+        name_off[j] = p
+        p = p + cstr_len(dll_names[dll_order[j]]) + 1
+    }
+    let idata = out_data(OS.Idata)
+    if dll_used > 0 { emit_to(idata, 0, align_to(p, 8)) }
+
+    // first layout without .reloc (its size depends on the number of relocations)
+    layout_outs(0)
+
+    // fixups
+    let patches = mem_alloc((sfix_count + stub_count + 1) * Patch.size)
+    let patch_count = 0
+    let dir64 = mem_alloc((sfix_count + 1) * 8)
+    let dir_count = 0
+    for k in 0..7 {
+        for fi in 0..sfix_count {
+            let f = sfixes + fi * SFix.size
+            let si = sect_index([f + SFix.sect])
+            let s = sect_at(si)
+            if [s + Sect.length] == 0 && !cstr_same([s + Sect.sname], ".text") { continue }
+            if part_out[si] != k { continue }
+            let o = out_at(k)
+            let at = part_off[si] + [f + SFix.off]
+            let target = sym_rva([f + SFix.sym], [f + SFix.line]) + [f + SFix.add]
+            let v = target
+            let kind = [f + SFix.kind]
+            line_no = [f + SFix.line]
+            if kind == XF.Rel {
+                v = target - ([o + Out.rva] + part_off[si] + [f + SFix.end])
+                let lim = 2147483648
+                if [f + SFix.len] == 1 { lim = 128 }
+                if v < 0 - lim || v >= lim { asm_fail_name("out of range:", [f + SFix.sym]) }
+            } elif kind == XF.Abs {
+                if [f + SFix.len] != 8 { asm_fail_name("a 32-bit absolute address is not allowed in a relocatable image:", [f + SFix.sym]) }
+                v = IMAGE_BASE + target
+                [dir64 + dir_count * 8] = [o + Out.rva] + at
+                dir_count++
+            }
+            line_no = 0
+            let pt = patches + patch_count * Patch.size
+            patch_count++
+            [pt + Patch.k] = k
+            [pt + Patch.at] = at
+            [pt + Patch.len] = [f + SFix.len]
+            [pt + Patch.v] = v
+        }
+    }
+    for i in 0..stub_count {
+        let slot = iat_slot(stub_names[i])
+        let iat = out_rva(OS.Idata) + slot
+        let next = out_rva(OS.Text) + stub_off[i] + 6
+        let disp = iat - next
+        let pt = patches + patch_count * Patch.size
+        patch_count++
+        [pt + Patch.k] = OS.Text
+        [pt + Patch.at] = stub_off[i] + 2
+        [pt + Patch.len] = 4
+        [pt + Patch.v] = disp
+    }
+    // .reloc: blocks of one 4 KB page each, the addresses sorted
+    for i in 1..dir_count {
+        let v = [dir64 + i * 8]
+        let j = i - 1
+        while j >= 0 && [dir64 + j * 8] > v {
+            [dir64 + (j + 1) * 8] = [dir64 + j * 8]
+            j--
+        }
+        [dir64 + (j + 1) * 8] = v
+    }
+    let rel = out_data(OS.Reloc)
+    let i = 0
+    while i < dir_count {
+        let page = [dir64 + i * 8] & (0xFFF ^ -1)
+        let first = i
+        while i < dir_count && ([dir64 + i * 8] & (0xFFF ^ -1)) == page { i++ }
+        let count = i - first
+        let padded = count + count % 2
+        put32(rel, page)
+        put32(rel, 8 + padded * 2)
+        for k in first..i { put16(rel, 10 << 12 | [dir64 + k * 8] & 0xFFF) }
+        if count % 2 { put16(rel, 0) }
+    }
+    layout_outs([rel + Buf.used])
+    for k in 0..patch_count {
+        let pt = patches + k * Patch.size
+        put_at(out_data([pt + Patch.k]), [pt + Patch.at], [pt + Patch.len], [pt + Patch.v])
+    }
+
+    // fill the import directory
+    let irva = out_rva(OS.Idata)
+    for j in 0..dll_used {
+        let d = dll_order[j]
+        put_at(idata, j * 20, 4, irva + ilt_off[j])
+        put_at(idata, j * 20 + 12, 4, irva + name_off[j])
+        put_at(idata, j * 20 + 16, 4, irva + iat_off[j])
+        let kk = 0
+        for ii in 0..imp_count {
+            let n = imp_names[ii]
+            if [dll_of + n * 8] - 1 != d { continue }
+            let hn = irva + hint_off[ii]
+            put_at(idata, ilt_off[j] + kk * 8, 8, hn)
+            put_at(idata, iat_off[j] + kk * 8, 8, hn)
+            mem_copy([idata + Buf.ptr] + hint_off[ii] + 2, name_str(n), name_len(n))
+            kk++
+        }
+        let dn = dll_names[d]
+        mem_copy([idata + Buf.ptr] + name_off[j], dn, cstr_len(dn))
+    }
+
+    // the entry point
+    let entry = intern_cstr("hla_start")
+    if !sym_defined(entry) { entry = intern_cstr("mainCRTStartup") }
+    if !sym_defined(entry) { entry = intern_cstr("main") }
+    if !sym_defined(entry) { asm_fail("entry point not found (looked for hla_start, mainCRTStartup, main)") }
+    let entry_rva = sym_rva(entry, 0)
+
+    // headers
+    buf_reserve(out, file_size)
+    let f = [out + Buf.ptr]
+    for k in 0..file_size { u8[f + k] = 0 }
+    [out + Buf.used] = file_size
+    u8[f] = 'M'
+    u8[f + 1] = 'Z'
+    put_at(out, 0x3C, 4, 0x40)                        // e_lfanew
+    let pe = 0x40
+    put_at(out, pe, 4, 0x4550)                        // PE\0\0
+    let used = 0
+    for k in 0..7 {
+        if out_vsize(k) > 0 { used++ }
+    }
+    put_at(out, pe + 4, 2, 0x8664)
+    put_at(out, pe + 6, 2, used)
+    put_at(out, pe + 20, 2, 240)
+    put_at(out, pe + 22, 2, 0x22)                     // EXECUTABLE_IMAGE | LARGE_ADDRESS_AWARE
+    let op = pe + 24
+    put_at(out, op, 2, 0x20B)
+    u8[f + op + 2] = 14                               // linker version
+    let tv = out_vsize(OS.Text)
+    if tv > 0 { put_at(out, op + 4, 4, align_to(tv, FILE_ALIGN)) }
+    let init = 0
+    for k in OS.Rdata..=OS.Reloc {
+        if k != OS.Bss { init = init + out_fsize(k) }
+    }
+    put_at(out, op + 8, 4, init)
+    put_at(out, op + 12, 4, out_vsize(OS.Bss))
+    put_at(out, op + 16, 4, entry_rva)
+    put_at(out, op + 20, 4, out_rva(OS.Text))
+    put_at(out, op + 24, 8, IMAGE_BASE)
+    put_at(out, op + 32, 4, SECT_ALIGN)
+    put_at(out, op + 36, 4, FILE_ALIGN)
+    put_at(out, op + 40, 2, 6)                        // OS version 6.0
+    put_at(out, op + 48, 2, 6)                        // subsystem version 6.0
+    put_at(out, op + 56, 4, size_of_image)
+    put_at(out, op + 60, 4, SIZEOF_HEADERS)
+    put_at(out, op + 68, 2, 3)                        // console
+    put_at(out, op + 70, 2, 0x8160)                   // HIGH_ENTROPY_VA | DYNAMIC_BASE | NX_COMPAT | TERMINAL_SERVER_AWARE
+    put_at(out, op + 72, 8, 0x100000)                 // stack reserve
+    put_at(out, op + 80, 8, 0x1000)                   // stack commit
+    put_at(out, op + 88, 8, 0x100000)                 // heap reserve
+    put_at(out, op + 96, 8, 0x1000)                   // heap commit
+    put_at(out, op + 108, 4, 16)                      // number of data directories
+    if dll_used > 0 {
+        put_at(out, op + 112 + 8, 4, irva)            // import directory
+        put_at(out, op + 116 + 8, 4, desc_size)
+        put_at(out, op + 112 + 96, 4, irva + iat_start)   // IAT
+        put_at(out, op + 116 + 96, 4, iat_end - iat_start)
+    }
+    let pd = out_at(OS.Pdata)
+    if [pd + Out.vsize] > 0 {
+        put_at(out, op + 112 + 24, 4, [pd + Out.rva])   // exception directory
+        put_at(out, op + 116 + 24, 4, [pd + Out.vsize])
+    }
+    let rl = out_at(OS.Reloc)
+    if [rl + Out.vsize] > 0 {
+        put_at(out, op + 112 + 40, 4, [rl + Out.rva])   // base relocations
+        put_at(out, op + 116 + 40, 4, [rl + Out.vsize])
+    }
+    let sh = op + 240
+    for k in 0..7 {
+        let o = out_at(k)
+        if [o + Out.vsize] == 0 { continue }
+        let nm = out_names[k]
+        mem_copy(f + sh, nm, cstr_len(nm))
+        put_at(out, sh + 8, 4, [o + Out.vsize])
+        put_at(out, sh + 12, 4, [o + Out.rva])
+        put_at(out, sh + 16, 4, [o + Out.filesize])
+        put_at(out, sh + 20, 4, [o + Out.fileoff])
+        put_at(out, sh + 36, 4, out_flags[k])
+        if [o + Out.filesize] > 0 { mem_copy(f + [o + Out.fileoff], [o + Out.bytes + Buf.ptr], [o + Out.bytes + Buf.used]) }
+        sh = sh + 40
+    }
+}
+
+// the number of imported functions from DLL d
+fn dll_count(d: auto) {
+    let n = 0
+    for i in 0..imp_count {
+        if [dll_of + imp_names[i] * 8] - 1 == d { n++ }
+    }
+    return n
+}

@@ -1,0 +1,1 @@
+tests/errors/missing-brace.hla:3:1: error: missing '}'

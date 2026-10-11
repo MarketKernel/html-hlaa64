@@ -66,6 +66,20 @@ export interface FnState {
   isMain: boolean;
 }
 
+/** statements that may change the variable `name`: assignments, a loop over it, inline assembly */
+function changes(body: Stmt[], name: string): boolean {
+  const walk = (x: unknown): boolean => {
+    if (!x || typeof x !== 'object') return false;
+    if (Array.isArray(x)) return x.some(walk);
+    const n = x as { k?: string; target?: Expr; v?: string };
+    if ((n.k === 'assign' || n.k === 'incdec') && n.target?.k === 'name' && n.target.name === name) return true;
+    if (n.k === 'forin' && n.v === name) return true;
+    if (n.k === 'asm' || n.k === 'asmtext' || n.k === 'pop') return true;
+    return Object.values(x).some(walk);
+  };
+  return walk(body);
+}
+
 export abstract class CodeGenBase {
   src: string;
   prog: Program;
@@ -85,6 +99,9 @@ export abstract class CodeGenBase {
   fn: FnState | null = null;
   temps = new Set<number>();
   ftemps = new Set<number>();
+  /** at most this many callee-saved registers for `let` in the current function (see genFunctionFitting) */
+  letRegs = Infinity;
+  peakLetRegs = 0;
 
   constructor(src: string, prog: Program, consts: Record<string, number> = {}) {
     this.src = src;
@@ -118,8 +135,16 @@ export abstract class CodeGenBase {
   abstract genFExpr(e: Expr, T: string): void;
   abstract genBinary(op: BinOp, l: Expr, r: Expr, T: string, t: Token): void;
   abstract genBranch(e: Expr, label: string, ifTrue: boolean): void;
+
+  /** The condition of a statement (if, elif, a loop): it starts with no scratch registers in use,
+   *  like a statement, even when it comes right after a body (elif, a loop condition at the end). */
+  genCondition(e: Expr, label: string, ifTrue: boolean): void {
+    this.resetTemps();
+    this.genBranch(e, label, ifTrue);
+  }
   abstract genAssign(target: Expr, op: string, value: Expr, t: Token): void;
   abstract genCall(e: Extract<Expr, { k: 'call' }>): void;
+  abstract isFloat(e: Expr): boolean;
   abstract genPushPop(s: Extract<Stmt, { k: 'push' | 'pop' }>): void;
   /** assemble the final text from text/data lists */
   abstract finish(): string;
@@ -132,7 +157,7 @@ export abstract class CodeGenBase {
       if (it.k === 'data') this.genData(it);
     }
     for (const it of this.prog.items) {
-      if (it.k === 'fn') this.genFunction(it);
+      if (it.k === 'fn') this.genFunctionFitting(it);
       else if (it.k === 'asm') {
         this.text.push(...it.lines.map((l) => this.rawText(l, it.t)));
       }
@@ -142,6 +167,34 @@ export abstract class CodeGenBase {
 
   err(msg: string, t: Token): never {
     throw new CompileError(msg, t.line, t.col);
+  }
+
+  /** genFunction; when an expression runs out of scratch registers (the callee-saved ones all hold
+   *  `let` variables), the function is generated again with one register fewer for `let`: that variable
+   *  lives in the frame, and its register serves the expressions. Functions that fit are not touched. */
+  genFunctionFitting(it: Extract<Item, { k: 'fn' }>): void {
+    const lists = [this.text, this.cstrings, this.dataLines, this.rodataLines, this.constPtrLines, this.literal8, this.bss, this.warnings];
+    const lengths = lists.map((l) => l.length);
+    const cstringMap = new Map(this.cstringMap), fpLits = new Map(this.fpLits);
+    this.letRegs = Infinity;
+    for (;;) {
+      this.peakLetRegs = 0;
+      try {
+        this.genFunction(it);
+        return;
+      } catch (e) {
+        // nothing left to give up (parameters keep their registers): the error stands
+        if (!(e instanceof CompileError) || !e.message.includes('out of scratch registers') || this.peakLetRegs - 1 >= this.letRegs || this.peakLetRegs === 0) throw e;
+        this.letRegs = this.peakLetRegs - 1;
+        lists.forEach((l, i) => (l.length = lengths[i]));
+        this.cstringMap = new Map(cstringMap);
+        this.fpLits = new Map(fpLits);
+        this.fn = null;
+        this.scopes = [];
+        this.temps.clear();
+        this.ftemps.clear();
+      }
+    }
   }
 
   declare(it: Item): void {
@@ -543,14 +596,17 @@ export abstract class CodeGenBase {
   }
 
   allocAuto(t: Token, bits: 32 | 64 = 64): { reg: string; n: number } {
-    return this.tryAllocAuto(bits) ?? this.err(`no free callee-saved registers left (${this.autoPool().map((n) => this.autoRegName(n, 64)).join(', ')}); reuse a variable, use local, or name a register`, t);
+    return this.tryAllocAuto(bits, false) ?? this.err(`no free callee-saved registers left (${this.autoPool().map((n) => this.autoRegName(n, 64)).join(', ')}); reuse a variable, use local, or name a register`, t);
   }
 
-  tryAllocAuto(bits: 32 | 64 = 64): { reg: string; n: number } | null {
+  /** a free callee-saved register; `limited`: a variable that can live in the frame instead (letRegs) */
+  tryAllocAuto(bits: 32 | 64 = 64, limited = true): { reg: string; n: number } | null {
     const f = this.fn!;
+    if (limited && f.autoInUse.size >= this.letRegs) return null;
     for (const n of this.autoPool()) {
       if (f.autoInUse.has(n) || f.autoAvoid.has(n)) continue;
       f.autoInUse.add(n);
+      this.peakLetRegs = Math.max(this.peakLetRegs, f.autoInUse.size);
       return { reg: this.autoRegName(n, bits), n };
     }
     return null;
@@ -558,9 +614,119 @@ export abstract class CodeGenBase {
 
   /** `let` without a register when every callee-saved register is taken: a 64-bit slot in the frame */
   spillVar(name: string, unsigned: boolean, t: Token): void {
-    this.declareLocal({ k: 'local', name, ty: { name: unsigned ? 'u64' : 'i64', count: null, t }, t });
+    this.declareLocal({ k: 'local', name, ty: { name: unsigned ? 'u64' : 'i64', count: null, t }, init: null, t });
     const s = this.scopes[this.scopes.length - 1].get(name) as Extract<Sym, { k: 'local' }>;
     s.spilled = true;
+  }
+
+  // ---------------------------------------------------------------- calls anywhere in an expression
+  // A statement is generated as it is first. When a call stands where its result or the values around
+  // it would not survive in registers (`f(a) + g(b)`, `[p] = f(x)`, a caller-saved value read after a
+  // call), the statement is generated again with the calls lowered: each call, and each value computed
+  // before a later call, goes to a hidden frame slot first, left to right. Statements that compile as
+  // they are do not change.
+  hoistN = 0;
+
+  withCallsLowered(direct: () => void, lowered: () => void): void {
+    const f = this.fn!;
+    const lines = f.lines.length, warnings = this.warnings.length;
+    const prims = Object.fromEntries(Object.entries(f).filter(([, v]) => typeof v !== 'object'));
+    const autoInUse = new Set(f.autoInUse), temps = new Set(this.temps), ftemps = new Set(this.ftemps);
+    const scopes = this.scopes.map((m) => new Map(m));
+    try {
+      direct();
+    } catch (e) {
+      if (!(e instanceof CompileError) || !/left-most operand|assign the call result|cannot be nested|after a nested call|clobbered by the nested call/.test(e.message)) throw e;
+      f.lines.length = lines;
+      this.warnings.length = warnings;
+      Object.assign(f, prims);
+      f.autoInUse = autoInUse;
+      this.temps = temps;
+      this.ftemps = ftemps;
+      this.scopes = scopes;
+      this.lowering = e;
+      try { lowered(); } finally { this.lowering = null; }
+    }
+  }
+  private lowering: CompileError | null = null;
+
+  /** e with its calls moved to hidden frame slots; `root`: e itself may stay a call */
+  lowerCalls(e: Expr, root: boolean): Expr {
+    if (!this.hasCall(e)) return e;
+    if (this.isFloat(e)) throw this.lowering!;     // the slots hold integers
+    switch (e.k) {
+      case 'call': {
+        const args: Expr[] = [];
+        e.args.forEach((a, i) => {
+          let v = this.lowerCalls(a, false);
+          if (e.args.slice(i + 1).some((b) => this.hasCall(b)) && !this.callSafe(v)) v = this.hoist(v);
+          args.push(v);
+        });
+        const c = { ...e, args };
+        return root ? c : this.hoist(c);
+      }
+      case 'bin': {
+        if (e.op === '&&' || e.op === '||') return e;       // the right side is not always computed
+        let l = this.lowerCalls(e.l, false);
+        if (this.hasCall(e.r) && !this.callSafe(l)) l = this.hoist(l);
+        return { ...e, l, r: this.lowerCalls(e.r, false) };
+      }
+      case 'un': return { ...e, e: this.lowerCalls(e.e, false) };
+      case 'tern': return { ...e, c: this.lowerCalls(e.c, false) };   // only one branch is computed
+      case 'mem': return { ...e, addr: this.lowerCalls(e.addr, false) };
+      case 'index': return { ...e, index: this.lowerCalls(e.index, false) };
+      case 'addr': return { ...e, e: this.lowerCalls(e.e, false) };
+    }
+    return e;
+  }
+
+  /** the target of an assignment: its address is computed before a call on the right (left to right) */
+  lowerTarget(target: Expr, valueHasCall: boolean): Expr {
+    const keep = (x: Expr) => (valueHasCall && !this.callSafe(x) ? this.hoist(x) : x);
+    if (target.k === 'mem' && !target.post) return { ...target, addr: keep(this.lowerCalls(target.addr, false)) };
+    if (target.k === 'index') return { ...target, index: keep(this.lowerCalls(target.index, false)) };
+    return target;
+  }
+
+  /** a value that a call cannot change: a constant, a hidden slot, a variable in a callee-saved register */
+  callSafe(e: Expr): boolean {
+    if (this.constEval(e) !== null) return true;
+    if (e.k !== 'name') return false;
+    if (e.name.startsWith('$h')) return true;
+    const s = this.lookup(e.name);
+    return s?.k === 'alias' && (s as { auto?: number }).auto !== undefined;
+  }
+
+  /** a hidden frame slot = e; the slot as an expression */
+  hoist(e: Expr): Expr {
+    const name = `$h${++this.hoistN}`;
+    this.spillVar(name, this.isUnsigned(e), e.t);
+    this.genAssign({ k: 'name', name, t: e.t }, '=', e, e.t);
+    this.resetTemps();
+    return { k: 'name', name, t: e.t };
+  }
+
+  /** `local x: T = init`: the initial value is computed before the name is visible (like `let`) */
+  genLocal(s: Extract<Stmt, { k: 'local' }>): void {
+    if (!s.init) { this.declareLocal(s); return; }
+    const scope = this.scopes[this.scopes.length - 1];
+    const outer = scope.get(s.name);
+    this.declareLocal(s);
+    const sym = scope.get(s.name)!;
+    // until the value is stored, the name means what it meant before; the slot goes by a hidden name
+    const hidden = `$init.${s.name}`;
+    if (outer) scope.set(s.name, outer); else scope.delete(s.name);
+    scope.set(hidden, sym);
+    if (!this.scalarLocal(hidden)) this.err('only a single value can have an initial value (not an array or a struct)', s.t);
+    this.genAssign({ k: 'name', name: hidden, t: s.t }, '=', s.init, s.t);
+    scope.delete(hidden);
+    scope.set(s.name, sym);
+  }
+
+  /** a single value in the frame (`local x: i64`, a spilled `let`), not an array or a struct */
+  scalarLocal(name: string): boolean {
+    const s = this.lookup(name);
+    return s?.k === 'local' && s.ty.count === null && !!s.ty.elem && !s.ty.struct;
   }
 
   /** a register variable, or false when it was spilled to the frame (no free register) */
@@ -636,7 +802,7 @@ export abstract class CodeGenBase {
     this.resetTemps();
     switch (s.k) {
       case 'let':
-        for (const d of s.decls) this.genLet(d);
+        for (const d of s.decls) this.withCallsLowered(() => this.genLet(d), () => this.genLet({ ...d, init: d.init && this.lowerCalls(d.init, true) }));
         break;
       case 'const': {
         const v = this.constEval(s.e);
@@ -644,13 +810,18 @@ export abstract class CodeGenBase {
         this.scopes[this.scopes.length - 1].set(s.name, { k: 'const', v });
         break;
       }
-      case 'local': this.declareLocal(s); break;
-      case 'assign': this.genAssign(s.target, s.op, s.value, s.t); break;
+      case 'local': this.genLocal(s); break;
+      case 'assign':
+        this.withCallsLowered(() => this.genAssign(s.target, s.op, s.value, s.t), () => {
+          const target = this.lowerTarget(s.target, this.hasCall(s.value));
+          this.genAssign(target, s.op, this.lowerCalls(s.value, target.k === 'name'), s.t);
+        });
+        break;
       case 'incdec': this.genAssign(s.target, s.op === '++' ? '+=' : '-=', { k: 'num', v: 1n, t: s.t }, s.t); break;
       case 'expr': {
         const e = s.e;
         if (e.k !== 'call') this.err('expression statement must be a call', s.t);
-        this.genCall(e);
+        this.withCallsLowered(() => this.genCall(e), () => this.genCall(this.lowerCalls(e, true) as typeof e));
         break;
       }
       case 'block': this.genBlock(s.body); break;
@@ -662,7 +833,7 @@ export abstract class CodeGenBase {
         this.label(body);
         this.withLoop(l, () => this.genBlock(s.body));
         this.label(l.cont);
-        this.genBranch(s.cond, body, true);
+        this.genCondition(s.cond, body, true);
         this.label(l.brk);
         break;
       }
@@ -672,7 +843,7 @@ export abstract class CodeGenBase {
         this.label(body);
         this.withLoop(l, () => this.genBlock(s.body));
         this.label(l.cont);
-        this.genBranch(s.cond, body, true);
+        this.genCondition(s.cond, body, true);
         this.label(l.brk);
         break;
       }
@@ -695,7 +866,9 @@ export abstract class CodeGenBase {
         this.jump(s.k === 'break' ? target.brk : target.cont);
         break;
       }
-      case 'return': this.genReturn(s); break;
+      case 'return':
+        this.withCallsLowered(() => this.genReturn(s), () => this.genReturn({ ...s, e: s.e && this.lowerCalls(s.e, true) }));
+        break;
       case 'goto': {
         const l = this.fn!.labels.get(s.label);
         if (!l) this.err(`unknown label '${s.label}'`, s.t);
@@ -775,7 +948,7 @@ export abstract class CodeGenBase {
     s.arms.forEach((arm, i) => {
       const last = i === s.arms.length - 1 && !s.els;
       const next = last ? end : this.newLabel('else');
-      this.genBranch(arm.cond, next, false);
+      this.genCondition(arm.cond, next, false);
       this.genBlock(arm.body);
       if (!last) {
         if (!endsWithJump(arm.body)) this.jump(end);
@@ -798,7 +971,7 @@ export abstract class CodeGenBase {
     this.label(l.cont);
     for (const st of s.step) this.genStmt(st);
     this.label(cond);
-    if (s.cond) this.genBranch(s.cond, body, true);
+    if (s.cond) this.genCondition(s.cond, body, true);
     else this.jump(body);
     this.label(l.brk);
     this.popScope();
@@ -807,7 +980,8 @@ export abstract class CodeGenBase {
   genForIn(s: Extract<Stmt, { k: 'forin' }>): void {
     this.pushScope();
     let sym = this.lookup(s.v);
-    const reuse = !s.reg && sym && (sym.k === 'alias' || (sym.k === 'local' && sym.spilled));
+    // an existing variable is the loop variable: a register one or a single value in the frame
+    const reuse = !s.reg && sym && (sym.k === 'alias' || this.scalarLocal(s.v));
     if (!reuse) {
       const free = s.reg ? null : this.tryAllocAuto();
       if (free) this.fn!.autoInUse.delete(free.n);
@@ -824,9 +998,17 @@ export abstract class CodeGenBase {
       if (st === null || st === 0n) this.err('step must be a non-zero constant', s.t);
       step = st;
     }
-    // upper bound: constant, register, or computed once into a hidden register (or frame slot)
+    // left to right: the start value first, then the bound
+    if (iv && this.hasCall(s.to) && !this.callSafe(v)) this.err(`the call in the bound would clobber ${s.v} (${iv}); make it a let or a local`, s.t);
+    this.resetTemps();
+    if (iv) this.genExpr(s.from, iv);
+    else this.genAssign(v, '=', s.from, s.t);
+    this.resetTemps();
+    // the bound is computed once: a constant, a register the body does not change, or a copy in a hidden
+    // register (or frame slot)
     let bound: Expr = s.to;
-    if (this.constEval(s.to) === null && this.operand(s.to) === null) {
+    const toOp = this.operand(s.to);
+    if (this.constEval(s.to) === null && (toOp === null || (s.to.k === 'name' && changes(s.body, s.to.name)))) {
       const hidden = this.tryAllocAuto();
       const name = '$bound';   // the loop has its own scope
       if (hidden) {
@@ -838,9 +1020,6 @@ export abstract class CodeGenBase {
       }
       bound = { k: 'name', name, t: s.t };
     }
-    this.resetTemps();
-    if (iv) this.genExpr(s.from, iv);
-    else this.genAssign(v, '=', s.from, s.t);
     const l = this.loopLabels(s.label);
     const cond = this.newLabel('cond');
     const body = this.newLabel('body');
@@ -854,7 +1033,7 @@ export abstract class CodeGenBase {
     this.label(cond);
     const op: BinOp = step > 0n ? (s.inclusive ? '<=' : '<') : (s.inclusive ? '>=' : '>');
     this.resetTemps();
-    this.genBranch({ k: 'bin', op, l: { k: 'name', name: s.v, t: s.t }, r: bound, t: s.t }, body, true);
+    this.genCondition({ k: 'bin', op, l: { k: 'name', name: s.v, t: s.t }, r: bound, t: s.t }, body, true);
     this.label(l.brk);
     this.popScope();
   }
@@ -925,6 +1104,31 @@ export abstract class CodeGenBase {
       case 'bin': return this.isUnsigned(e.l) || this.isUnsigned(e.r);
       case 'un': return this.isUnsigned(e.e);
       case 'call': return ['umin', 'umax', 'zext8', 'zext16', 'zext32'].includes(e.name);
+    }
+    return false;
+  }
+
+  /**
+   * True when the low 32 bits of e depend only on the low 32 bits of what it reads, so a value
+   * stored into 8/16/32-bit memory may be computed in 32-bit registers. Right shifts, division,
+   * remainder, shifts by an amount that may be 32 or more, and builtins (min, abs ...) need all
+   * 64 bits: `u8[p] = n >>> 40` must shift the 64-bit n.
+   */
+  lowBitsOnly(e: Expr): boolean {
+    switch (e.k) {
+      case 'num': case 'str': case 'name': case 'mem': case 'index': case 'addr': return true;
+      case 'call': return !this.builtins.has(e.name) || this.isUserFn(e.name);
+      case 'un': return e.op === '!' || this.lowBitsOnly(e.e);
+      case 'tern': return this.lowBitsOnly(e.a) && this.lowBitsOnly(e.b);
+      case 'bin': {
+        // comparisons give 0 or 1; they compare the operands at their own width
+        if (['==', '!=', '<', '<=', '>', '>=', '&&', '||'].includes(e.op)) return true;
+        if (e.op === '<<') {
+          const n = this.constEval(e.r);
+          return n !== null && n >= 0n && n < 32n && this.lowBitsOnly(e.l);
+        }
+        return ['+', '-', '*', '&', '|', '^'].includes(e.op) && this.lowBitsOnly(e.l) && this.lowBitsOnly(e.r);
+      }
     }
     return false;
   }

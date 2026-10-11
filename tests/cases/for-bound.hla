@@ -1,0 +1,25 @@
+// the bound of `for i in a..b` is computed once, before the loop
+extern printf(fmt, ...)
+
+data limit: i64 = 3
+
+fn main() {
+    let n = 3
+    for i in 0..n {
+        n++                     // the loop still runs 3 times
+        printf("i %d n %d\n", i, n)
+    }
+    local m = 2
+    for i in 0..m * 2 {
+        m = 100
+        printf("j %d\n", i)
+    }
+    for i in 0..limit {
+        limit = 0
+        printf("k %d\n", i)
+    }
+    let count = 0
+    for i in 0..5 { count++ }
+    printf("count %d\n", count)
+    return 0
+}

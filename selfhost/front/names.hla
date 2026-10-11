@@ -1,0 +1,74 @@
+// front/names.hla — every identifier is stored once and known by its number (name id).
+// Keywords and type names are added first, so their ids are the members of Kw.
+// A name also carries what it means at the top level of the program (Sym.*).
+
+// the words before In are reserved; from In on they are special only in their place
+// (`for i in`, `step`, `case`, `sizeof(`, `u8[` ...) and can be names elsewhere
+enum Kw {
+    Fn, Export, Extern, Const, Data, Rodata, Struct, Enum, Let, Var, Local,
+    If, Else, Elif, While, Do, Loop, For, Break, Continue, Return, Switch, Auto,
+    In, Step, Case, Default, Sizeof, Len, Include,
+    I8, U8, I16, U16, I32, U32, I64, U64, Ptr, Void
+}
+
+rodata kw_text: ptr = [
+    "fn", "export", "extern", "const", "data", "rodata", "struct", "enum", "let", "var", "local",
+    "if", "else", "elif", "while", "do", "loop", "for", "break", "continue", "return", "switch", "auto",
+    "in", "step", "case", "default", "sizeof", "len", "include",
+    "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "ptr", "void"
+]
+
+// memory types: the element of data, locals and `u8[...]`-style accesses
+enum Ty { None, I8, U8, I16, U16, I32, U32, I64, U64, Ptr, Struct }
+
+// what a name means at the top level
+enum Sym { None, Const, Data, Fn, Extern, Struct }
+
+// what a top-level name means; Name records are indexed by name id (lib/intern.hla)
+struct Name {
+    kind: i64       // Sym.*
+    ty: i64         // Ty.* of data (of its elements for an array)
+    sid: i64        // the struct's name id when ty is Ty.Struct
+    elems: i64      // elements of an array; -1 for a single value
+    bytes: i64      // size in bytes (data, struct)
+    val: i64        // const: the value; extern: fixed arguments before `...` (-1: not variadic); struct: alignment
+    node: ptr       // const: the expression; data: the declaration; fn: the function
+    state: i64      // const: 0 not computed yet, 1 being computed, 2 done; data: 1 when it is a string
+    tok: i64        // the token that declared it
+}
+
+data names: ptr = 0                   // Name[MAX_NAMES]
+
+fn name_at(id) { return names + id * Name.size }
+
+fn names_init() {
+    intern_init()
+    names = mem_alloc(MAX_NAMES * Name.size)
+    for k in 0..Kw.count { intern_cstr(kw_text[k]) }
+}
+
+// the id of "Outer.inner" (struct fields, enum members)
+data dotted: Buf
+
+fn intern_dotted(outer: auto, inner: auto) {
+    [dotted + Buf.used] = 0
+    buf_str(dotted, name_str(outer))
+    buf_char(dotted, '.')
+    buf_str(dotted, inner)
+    return intern([dotted + Buf.ptr], [dotted + Buf.used])
+}
+
+// Ty.* for a type keyword (i8 ... ptr), Ty.None for other names
+fn ty_of_kw(id) {
+    if id >= Kw.I8 && id <= Kw.Ptr { return id - Kw.I8 + Ty.I8 }
+    return Ty.None
+}
+
+fn ty_size(t) {
+    switch t {
+        case Ty.I8, Ty.U8 { return 1 }
+        case Ty.I16, Ty.U16 { return 2 }
+        case Ty.I32, Ty.U32 { return 4 }
+    }
+    return 8
+}

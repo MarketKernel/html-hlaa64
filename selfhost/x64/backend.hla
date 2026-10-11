@@ -1,0 +1,357 @@
+// x64/backend.hla — the be_* functions for x86-64 / Windows (Intel syntax, LLVM dialect).
+// The accumulator is rax, the second operand rcx; r8, r10 and r11 are scratch registers.
+// Frame: rbp points at the saved rbp, variables are below it at [rbp - off]. A push takes
+// 8 bytes; the backend counts them so that rsp is 16-byte aligned at every call (Win64).
+
+const MAX_ARGS = 8                      // rcx, rdx, r8, r9, then the stack
+
+rodata arg_reg: ptr = ["rcx", "rdx", "r8", "r9"]
+
+data be_text: Buf                       // finished functions
+data be_body: Buf                       // the function being generated
+data be_rw: Buf                         // .data
+data be_ro: Buf                         // .rdata
+data be_zero: Buf                       // .bss
+data be_strs: Buf                       // string literals (.rdata)
+data be_out: ptr = 0                    // where the data directives go (be_rw or be_ro)
+data be_depth: i64 = 0                  // 8-byte pushes in the current function
+
+fn emit0(f: auto) { fmt0(be_body, f) }
+fn emit1(f: auto, a1: auto) { fmt1(be_body, f, a1) }
+fn emit2(f: auto, a1: auto, a2: auto) { fmt2(be_body, f, a1, a2) }
+fn emit3(f: auto, a1: auto, a2: auto, a3: auto) { fmt3(be_body, f, a1, a2, a3) }
+
+// 1 when v fits a sign-extended 32-bit immediate
+fn fits32(v) { return v >= -2147483648 && v <= 2147483647 }
+
+// the condition code of a comparison operator (jl, setl ...)
+fn x_cc(op) {
+    switch op {
+        case Op.Eq { return "e" }
+        case Op.Ne { return "ne" }
+        case Op.Lt { return "l" }
+        case Op.Le { return "le" }
+        case Op.Gt { return "g" }
+    }
+    return "ge"
+}
+
+// functions ------------------------------------------------------------------------------
+
+fn be_fn_begin(id) {
+    [be_body + Buf.used] = 0
+    be_depth = 0
+}
+
+fn be_fn_end(id: auto, global: auto, frame: auto, ret: auto) {
+    let t = be_text
+    let name = name_str(id)
+    if global { fmt1(t, "\n.globl %s\n", name) } else { fmt0(t, "\n") }
+    fmt2(t, ".p2align 4\n.seh_proc %s\n%s:\n", name, name)
+    fmt0(t, "    push rbp\n    .seh_pushreg rbp\n    mov rbp, rsp\n    .seh_setframe rbp, 0\n")
+    let size = (frame + 15) & -16
+    if size >= 4096 {
+        // touch every page of a big frame in order: Windows grows the stack one guard page at a time
+        fmt2(t, "    lea r10, [rsp - %d]\n    mov r11, rsp\n.L%d.probe:\n", size, ret)
+        fmt1(t, "    sub r11, 4096\n    test qword ptr [r11], r11\n    cmp r11, r10\n    ja .L%d.probe\n", ret)
+    }
+    if size > 0 { fmt2(t, "    sub rsp, %d\n    .seh_stackalloc %d\n", size, size) }
+    fmt0(t, "    .seh_endprologue\n")
+    buf_add(t, [be_body + Buf.ptr], [be_body + Buf.used])
+    fmt1(t, "    xor eax, eax\n.L%d:\n    mov rsp, rbp\n    pop rbp\n    ret\n.seh_endproc\n", ret)
+}
+
+// parameter i arrives in rcx, rdx, r8, r9, then on the stack above the return address and the
+// 32-byte shadow space; `n: i32` and other narrow C types are extended to 64 bits
+fn be_param(i: auto, off: auto, ty: auto) {
+    if i < 4 { emit1("    mov rax, %s\n", arg_reg[i]) }
+    else { emit1("    mov rax, qword ptr [rbp + %d]\n", 48 + (i - 4) * 8) }
+    switch ty {
+        case Ty.I8 { emit0("    movsx rax, al\n") }
+        case Ty.U8 { emit0("    movzx eax, al\n") }
+        case Ty.I16 { emit0("    movsx rax, ax\n") }
+        case Ty.U16 { emit0("    movzx eax, ax\n") }
+        case Ty.I32 { emit0("    movsxd rax, eax\n") }
+        case Ty.U32 { emit0("    mov eax, eax\n") }
+    }
+    be_store_var(off)
+}
+
+// values ---------------------------------------------------------------------------------
+
+fn be_num(v) {
+    if v == 0 { emit0("    xor eax, eax\n") }
+    elif v > 0 && v <= 4294967295 { emit1("    mov eax, %d\n", v) }
+    else { emit1("    mov rax, %d\n", v) }
+}
+
+fn be_load_var(off) { emit1("    mov rax, qword ptr [rbp - %d]\n", off) }
+fn be_store_var(off) { emit1("    mov qword ptr [rbp - %d], rax\n", off) }
+fn be_addr_var(off) { emit1("    lea rax, [rbp - %d]\n", off) }
+
+fn be_global_addr(id: auto) {
+    emit1("    lea rax, [rip + %s]\n", name_str(id))
+}
+
+fn be_str_addr(n) {
+    emit1("    lea rax, [rip + .Ls%d]\n", n)
+}
+
+// rax = the value of type ty at the address rax
+fn be_load(ty) {
+    switch ty {
+        case Ty.I8 { emit0("    movsx rax, byte ptr [rax]\n") }
+        case Ty.U8 { emit0("    movzx eax, byte ptr [rax]\n") }
+        case Ty.I16 { emit0("    movsx rax, word ptr [rax]\n") }
+        case Ty.U16 { emit0("    movzx eax, word ptr [rax]\n") }
+        case Ty.I32 { emit0("    movsxd rax, dword ptr [rax]\n") }
+        case Ty.U32 { emit0("    mov eax, dword ptr [rax]\n") }
+        default { emit0("    mov rax, qword ptr [rax]\n") }
+    }
+}
+
+// the value rax of type ty to the address rcx
+fn be_store(ty) {
+    switch ty {
+        case Ty.I8, Ty.U8 { emit0("    mov byte ptr [rcx], al\n") }
+        case Ty.I16, Ty.U16 { emit0("    mov word ptr [rcx], ax\n") }
+        case Ty.I32, Ty.U32 { emit0("    mov dword ptr [rcx], eax\n") }
+        default { emit0("    mov qword ptr [rcx], rax\n") }
+    }
+}
+
+fn be_push() {
+    emit0("    push rax\n")
+    be_depth++
+}
+
+fn be_pop() {
+    emit0("    pop rcx\n")
+    be_depth--
+}
+
+// operators ------------------------------------------------------------------------------
+
+// rax = rcx op rax
+fn be_binop(op) {
+    switch op {
+        case Op.Plus { emit0("    add rax, rcx\n") }
+        case Op.Minus { emit0("    sub rcx, rax\n    mov rax, rcx\n") }
+        case Op.Star { emit0("    imul rax, rcx\n") }
+        case Op.Slash { emit0("    mov r8, rax\n    mov rax, rcx\n    cqo\n    idiv r8\n") }
+        case Op.Percent { emit0("    mov r8, rax\n    mov rax, rcx\n    cqo\n    idiv r8\n    mov rax, rdx\n") }
+        case Op.Amp { emit0("    and rax, rcx\n") }
+        case Op.Pipe { emit0("    or rax, rcx\n") }
+        case Op.Caret { emit0("    xor rax, rcx\n") }
+        case Op.Shl { emit0("    xchg rax, rcx\n    shl rax, cl\n") }
+        case Op.Shr { emit0("    xchg rax, rcx\n    sar rax, cl\n") }
+        case Op.Ushr { emit0("    xchg rax, rcx\n    shr rax, cl\n") }
+        default { be_cmp_set(op) }
+    }
+}
+
+// rax = rax op k
+fn be_binop_const(op: auto, k: auto) {
+    switch op {
+        case Op.Plus, Op.Minus {
+            if fits32(k) {
+                if op == Op.Plus { emit1("    add rax, %d\n", k) } else { emit1("    sub rax, %d\n", k) }
+                return 0
+            }
+        }
+        case Op.Shl, Op.Shr, Op.Ushr {
+            if k >= 0 && k < 64 {
+                if op == Op.Shl { emit1("    shl rax, %d\n", k) }
+                elif op == Op.Shr { emit1("    sar rax, %d\n", k) }
+                else { emit1("    shr rax, %d\n", k) }
+                return 0
+            }
+        }
+        case Op.Star {
+            if k == 1 { return 0 }
+            let sh = 0
+            while sh < 62 && (1 << sh) < k { sh++ }
+            if (1 << sh) == k {
+                emit1("    shl rax, %d\n", sh)
+                return 0
+            }
+            if fits32(k) {
+                emit1("    imul rax, rax, %d\n", k)
+                return 0
+            }
+        }
+        case Op.Amp, Op.Pipe, Op.Caret {
+            if fits32(k) {
+                if op == Op.Amp { emit1("    and rax, %d\n", k) }
+                elif op == Op.Pipe { emit1("    or rax, %d\n", k) }
+                else { emit1("    xor rax, %d\n", k) }
+                return 0
+            }
+        }
+    }
+    emit0("    mov rcx, rax\n")
+    be_num(k)
+    be_binop(op)
+    return 0
+}
+
+fn be_unop(op) {
+    switch op {
+        case Op.Minus { emit0("    neg rax\n") }
+        case Op.Tilde { emit0("    not rax\n") }
+        default { emit0("    test rax, rax\n    sete al\n    movzx eax, al\n") }
+    }
+}
+
+// rax = (rcx op rax) ? 1 : 0
+fn be_cmp_set(op: auto) {
+    emit1("    cmp rcx, rax\n    set%s al\n    movzx eax, al\n", x_cc(op))
+}
+
+// jumps ----------------------------------------------------------------------------------
+
+fn be_label(n) { emit1(".L%d:\n", n) }
+fn be_jump(n) { emit1("    jmp .L%d\n", n) }
+fn be_jump_z(n) { emit1("    test rax, rax\n    je .L%d\n", n) }
+fn be_jump_nz(n) { emit1("    test rax, rax\n    jne .L%d\n", n) }
+
+// jump when rcx op rax
+fn be_cmp_jump(op: auto, label: auto) {
+    emit2("    cmp rcx, rax\n    j%s .L%d\n", x_cc(op), label)
+}
+
+// jump when rax op k
+fn be_cmp_const_jump(op: auto, k: auto, label: auto) {
+    if k == 0 && (op == Op.Eq || op == Op.Ne) {
+        emit0("    test rax, rax\n")
+    } elif fits32(k) {
+        emit1("    cmp rax, %d\n", k)
+    } else {
+        emit0("    mov rcx, rax\n")
+        be_num(k)
+        emit0("    cmp rcx, rax\n")
+    }
+    emit2("    j%s .L%d\n", x_cc(op), label)
+    return 0
+}
+
+// calls ----------------------------------------------------------------------------------
+// The argc arguments were pushed, the last one on top: argument i is at [rsp + 8*(argc-1-i)].
+// Win64: the first four go to rcx, rdx, r8, r9 (also for variadic functions), the others to
+// the stack after 32 bytes of shadow space; rsp must be 16-byte aligned at the call.
+// via >= 0: call the address in the variable at that offset.
+
+fn be_call(id: auto, argc: auto, fixed: auto, via: auto) {
+    let extra = 0
+    if argc > 4 { extra = argc - 4 }
+    let area = 32 + extra * 8
+    if (be_depth * 8 + area) % 16 != 0 { area = area + 8 }
+    emit1("    sub rsp, %d\n", area)
+    for i in 4..argc {
+        emit1("    mov r10, qword ptr [rsp + %d]\n", area + (argc - 1 - i) * 8)
+        emit1("    mov qword ptr [rsp + %d], r10\n", 32 + (i - 4) * 8)
+    }
+    let nreg = argc
+    if nreg > 4 { nreg = 4 }
+    for i in 0..nreg {
+        emit2("    mov %s, qword ptr [rsp + %d]\n", arg_reg[i], area + (argc - 1 - i) * 8)
+    }
+    if via >= 0 {
+        emit1("    mov r10, qword ptr [rbp - %d]\n    call r10\n", via)
+    } else {
+        emit1("    call %s\n", name_str(id))
+    }
+    emit1("    add rsp, %d\n", area + argc * 8)
+    be_depth = be_depth - argc
+    return 0
+}
+
+// data -----------------------------------------------------------------------------------
+
+fn log2_of(n) {
+    let k = 0
+    while (1 << k) < n { k++ }
+    return k
+}
+
+fn be_data_begin(id: auto, ro: auto, align: auto) {
+    be_out = be_rw
+    if ro { be_out = be_ro }
+    fmt2(be_out, ".p2align %d\n%s:\n", log2_of(align), name_str(id))
+}
+
+fn be_data_int(size: auto, v: auto) {
+    switch size {
+        case 1 { fmt1(be_out, "    .byte %d\n", v & 0xFF) }
+        case 2 { fmt1(be_out, "    .short %d\n", v & 0xFFFF) }
+        case 4 { fmt1(be_out, "    .long %d\n", v & 0xFFFFFFFF) }
+        default { fmt1(be_out, "    .quad %d\n", v) }
+    }
+}
+
+fn be_data_str_ptr(n) { fmt1(be_out, "    .quad .Ls%d\n", n) }
+fn be_data_sym_ptr(id) { fmt1(be_out, "    .quad %s\n", name_str(id)) }
+fn be_data_zero(n) { fmt1(be_out, "    .zero %d\n", n) }
+
+// "text" for the assembler: quotes, backslashes and unprintable bytes as octal escapes
+fn quote_bytes(b: auto, p: auto, n: auto) {
+    buf_char(b, '"')
+    for i in 0..n {
+        let c = u8[p + i]
+        if c == '"' || c == '\\' {
+            buf_char(b, '\\')
+            buf_char(b, c)
+        } elif c >= 32 && c < 127 {
+            buf_char(b, c)
+        } else {
+            buf_char(b, '\\')
+            buf_char(b, '0' + (c >> 6))
+            buf_char(b, '0' + (c >> 3 & 7))
+            buf_char(b, '0' + (c & 7))
+        }
+    }
+    buf_char(b, '"')
+}
+
+fn be_data_ascii(p: auto, n: auto) {
+    fmt0(be_out, "    .asciz ")
+    quote_bytes(be_out, p, n)
+    buf_char(be_out, '\n')
+}
+
+fn be_bss(id: auto, bytes: auto, align: auto) {
+    fmt3(be_zero, ".p2align %d\n%s:\n    .zero %d\n", log2_of(align), name_str(id), bytes)
+}
+
+fn be_cstring(n: auto, p: auto, len: auto) {
+    fmt1(be_strs, ".Ls%d:\n    .asciz ", n)
+    quote_bytes(be_strs, p, len)
+    buf_char(be_strs, '\n')
+}
+
+// the whole assembly file: the entry point hla_start gets argc/argv from msvcrt.dll, calls
+// main and leaves through exit() (which flushes stdio)
+fn be_finish(out: auto) {
+    fmt0(out, "// Generated by hlc (HLA64 written in HLA64) - x86-64 / Windows\n")
+    fmt0(out, ".intel_syntax noprefix\n.text\n\n")
+    fmt0(out, ".globl hla_start\n.p2align 4\n.seh_proc hla_start\nhla_start:\n")
+    fmt0(out, "    sub rsp, 72\n    .seh_stackalloc 72\n    .seh_endprologue\n")
+    fmt0(out, "    lea rcx, [rsp + 40]\n    lea rdx, [rsp + 48]\n    lea r8, [rsp + 56]\n    xor r9d, r9d\n")
+    fmt0(out, "    mov dword ptr [rsp + 64], 0\n    lea rax, [rsp + 64]\n    mov qword ptr [rsp + 32], rax\n")
+    fmt0(out, "    call __getmainargs\n    movsxd rcx, dword ptr [rsp + 40]\n    mov rdx, qword ptr [rsp + 48]\n")
+    fmt0(out, "    mov r8, qword ptr [rsp + 56]\n    call main\n    mov ecx, eax\n    call exit\n    int3\n.seh_endproc\n")
+    buf_add(out, [be_text + Buf.ptr], [be_text + Buf.used])
+    if [be_ro + Buf.used] || [be_strs + Buf.used] {
+        fmt0(out, "\n.section .rdata,\"dr\"\n")
+        buf_add(out, [be_ro + Buf.ptr], [be_ro + Buf.used])
+        buf_add(out, [be_strs + Buf.ptr], [be_strs + Buf.used])
+    }
+    if [be_rw + Buf.used] {
+        fmt0(out, "\n.data\n")
+        buf_add(out, [be_rw + Buf.ptr], [be_rw + Buf.used])
+    }
+    if [be_zero + Buf.used] {
+        fmt0(out, "\n.bss\n")
+        buf_add(out, [be_zero + Buf.ptr], [be_zero + Buf.used])
+    }
+}

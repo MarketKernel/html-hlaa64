@@ -6,7 +6,8 @@
 //   node src/cli.ts asm     prog.s   [-o prog]          assemble+link an .s file with the built-in assembler
 //   node src/cli.ts obj     prog.hla [-o prog.o]        relocatable object file (link it with clang/ld)
 //   node src/cli.ts lib     name.hla [-o dir]           C library: name.h, name.o, libname.a, libname.dylib
-//   node src/cli.ts emu     prog.hla [-- args]          run in the built-in emulator
+//   node src/cli.ts emu     prog.hla [-- args]          run in the built-in emulator (also prog.s,
+//                                                       a Mach-O executable, or prog.exe)
 // --target arm64-macos (default on macOS/Linux) or --target x64-windows (default on Windows):
 //   x64-windows builds prog.exe / prog.obj, and lib gives name.h, name.obj, name_static.lib,
 //   name.dll and its import library name.lib; run uses the x64 emulator outside Windows.
@@ -37,7 +38,8 @@ const out = oi >= 0 ? args[oi + 1] : null;
 const useClang = args.includes('--clang');
 const ti = args.indexOf('--target');
 const targetArg = ti >= 0 ? args[ti + 1] : process.platform === 'win32' ? 'x64-windows' : 'arm64-macos';
-const x64 = /^(x64|x86[-_]64|win|windows|amd64)/i.test(targetArg ?? '');
+// a Windows program (.exe) is x86-64 whatever the target says
+const x64 = /^(x64|x86[-_]64|win|windows|amd64)/i.test(targetArg ?? '') || /\.exe$/i.test(file);
 if (!x64 && !/^(arm64|aarch64|mac)/i.test(targetArg ?? '')) { console.error(`unknown target '${targetArg}' (arm64-macos or x64-windows)`); process.exit(2); }
 
 function translate(path: string, lib = false): string {
@@ -179,7 +181,11 @@ async function windows(): Promise<void> {
       const r = spawnSync(exe, progArgs, { stdio: 'inherit' });
       process.exit(r.status ?? 1);
     }
-    case 'emu': { const asm = source(); return emulate(guard(asm, () => X.assembleExecutableX(asm))); }
+    case 'emu': {
+      if (/\.exe$/i.test(file)) return emulate(new Uint8Array(readFileSync(file)));   // an executable built elsewhere
+      const asm = source();
+      return emulate(guard(asm, () => X.assembleExecutableX(asm)));
+    }
     case 'obj': {
       const asm = source();
       const obj = guard(asm, () => X.writeCoffObject(X.assembleX(asm)));
@@ -278,12 +284,14 @@ switch (cmd) {
   }
   case 'emu': {
     // run in the built-in ARM64 emulator (no macOS needed)
-    const asm = file.endsWith('.s') ? readFileSync(file, 'utf8') : translate(file);
     const { assembleExecutable, AsmError } = await import('./asm/index.ts');
     const { runMachO } = await import('./emu/macho-loader.ts');
+    const raw = readFileSync(file);
+    const machO = raw.length >= 4 && raw.readUInt32LE(0) === 0xfeedfacf;   // an executable built elsewhere
+    const asm = machO ? '' : file.endsWith('.s') ? raw.toString('utf8') : translate(file);
     let bin: Uint8Array;
     try {
-      bin = assembleExecutable(asm, { name: basename(file) });
+      bin = machO ? new Uint8Array(raw) : assembleExecutable(asm, { name: basename(file) });
     } catch (e) {
       if (!(e instanceof AsmError)) throw e;
       const l = asm.split('\n')[e.line - 1];

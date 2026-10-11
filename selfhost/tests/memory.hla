@@ -1,0 +1,98 @@
+// data, arrays of every type, structs, locals, strings, pointers
+extern printf(fmt, ...)
+
+const N = 5
+
+struct Point { x: i64, y: i32, tag: u8 }
+struct Line { from: Point, upto: Point, name: ptr }
+
+data counter: i64 = 7
+data small: i8 = -3
+data bytes: u8[8] = [1, 2, 250, 255]
+data shorts: i16[4] = [-1, 300, -30000]
+data ushorts: u16[2] = [65535, 7]
+data ints: i32[N] = [42, -7, 19, 3]
+data uints: u32[2] = [4000000000, 1]
+data longs: i64[3] = [-1, 0x7FFFFFFFFFFFFFFF]
+data greeting = "Hello"
+rodata names: ptr = ["zero", "one", "two"]
+data points: Point[3]
+data lines: Line[2]
+data buffer: u8[256]
+
+fn sum_ints() {
+    let s = 0
+    for i in 0..len(ints) { s += ints[i] }
+    return s
+}
+
+fn fill(p: auto, n: auto, v: auto) {
+    for i in 0..n { u8[p + i] = v + i }
+}
+
+fn main() {
+    printf("counter %lld small %lld\n", counter, small)
+    counter += 5
+    counter++
+    printf("counter %lld\n", counter)
+    printf("bytes %lld %lld %lld %lld %lld\n", bytes[0], bytes[1], bytes[2], bytes[3], bytes[7])
+    printf("shorts %lld %lld %lld\n", shorts[0], shorts[1], shorts[2])
+    printf("ushorts %lld %lld\n", ushorts[0], ushorts[1])
+    printf("ints sum %lld, sizeof %lld, len %lld\n", sum_ints(), sizeof(ints), len(ints))
+    printf("uints %lld %lld\n", uints[0], uints[1])
+    printf("longs %lld %lld %lld\n", longs[0], longs[1], longs[2])
+    printf("%s has %lld letters, sizeof %lld\n", greeting, len(greeting), sizeof(greeting))
+    for i in 0..len(names) { printf("%s ", names[i]) }
+    printf("\n")
+
+    // stores of every width, and what they leave in memory
+    ints[2] = -123456
+    let k = 3
+    ints[k] = ints[k] * 2
+    shorts[3] = 40000
+    bytes[k + 1] = 511
+    printf("%lld %lld %lld %lld\n", ints[2], ints[3], shorts[3], bytes[4])
+    let p = &longs[1]
+    [p + 8] = 77
+    printf("longs[2] = %lld\n", longs[2])
+    u32[&uints] = 0xFFFFFFFF
+    printf("u32 %lld i32 %lld\n", u32[&uints], i32[&uints])
+    printf("i8 %lld u8 %lld i16 %lld u16 %lld\n", i8[&bytes + 2], u8[&bytes + 2], i16[&shorts], u16[&shorts])
+
+    // structs
+    printf("Point.size %lld, Line.size %lld, Line.upto %lld\n", Point.size, Line.size, Line.upto)
+    for i in 0..3 {
+        let q = &points[i]
+        [q + Point.x] = i * 10
+        i32[q + Point.y] = -i
+        u8[q + Point.tag] = 'a' + i
+    }
+    let q = &points[2]
+    printf("points[2] = %lld %lld %c\n", [q + Point.x], i32[q + Point.y], u8[q + Point.tag])
+    let l = &lines[1]
+    [l + Line.upto + Point.x] = 99
+    [l + Line.name] = "line one"
+    printf("%s %lld\n", [l + Line.name], [&lines + Line.size + Line.upto + Point.x])
+
+    // locals
+    local tmp: i64
+    local word: u8[16]
+    local pts: Point[2]
+    tmp = 1234
+    tmp += 1
+    fill(word, 5, 'A')
+    word[5] = 0
+    [&pts[1] + Point.x] = 555
+    printf("tmp %lld word %s pts %lld sizeof %lld %lld\n", tmp, word, [&pts[1] + Point.x], sizeof(word), sizeof(pts))
+
+    // a buffer and pointer walking
+    fill(buffer, 10, '0')
+    buffer[10] = 0
+    let s = buffer
+    let count = 0
+    while u8[s] != 0 {
+        count++
+        s++
+    }
+    printf("%s %lld\n", buffer, count)
+}

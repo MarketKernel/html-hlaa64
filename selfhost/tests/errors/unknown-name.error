@@ -1,0 +1,1 @@
+tests/errors/unknown-name.hla:3:16: error: unknown name 'nothing'

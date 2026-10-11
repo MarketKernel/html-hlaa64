@@ -1,0 +1,14 @@
+// hlc-x64.hla — the HLA64 translator written in HLA64: HLA64 source -> x86-64 assembly (Windows).
+//   hlc-x64 input.hla output.s
+// The same front end as hlc-arm.hla, with the x86-64 backend.
+include "lib/sys.hla"
+include "lib/text.hla"
+include "lib/intern.hla"
+include "front/names.hla"
+include "front/lexer.hla"
+include "front/ast.hla"
+include "front/parser.hla"
+include "front/consts.hla"
+include "front/codegen.hla"
+include "front/driver.hla"
+include "x64/backend.hla"

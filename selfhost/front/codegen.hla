@@ -1,0 +1,778 @@
+// front/codegen.hla — the syntax tree to code, through the be_* functions of a backend
+// (arm/backend.hla, ...). The model is a stack machine with an accumulator:
+//   be_num, be_load ... put a value in the accumulator;
+//   be_push saves it on the stack, be_pop takes the saved value back as the second operand;
+//   be_binop(op) computes  second op accumulator  into the accumulator.
+// Every variable (`let`, parameters) lives in an 8-byte slot of the stack frame, so values
+// survive calls without any register allocation; `local` reserves typed memory in the frame.
+
+// local names ----------------------------------------------------------------------------
+
+enum LK { Var, Mem }     // Var: an 8-byte value slot; Mem: `local name: type` memory
+
+struct Local {
+    id: i64         // name id (-1: hidden)
+    off: i64        // the slot is at frame - off
+    kind: i64       // LK.*
+    ty: i64         // Mem: Ty.* of the elements
+    sid: i64        // Mem: struct name id
+    elems: i64      // Mem: elements of an array, -1 for one value
+    bytes: i64      // Mem: size
+}
+
+const MAX_LOCALS = 4096
+data locals: ptr = 0                // Local[MAX_LOCALS]
+data local_count: i64 = 0
+data frame_size: i64 = 0            // bytes of the frame used by the current function
+
+const MAX_LOOPS = 256
+data loop_break: i64[MAX_LOOPS]     // the labels of the enclosing loops
+data loop_next: i64[MAX_LOOPS]
+data loop_depth: i64 = 0
+
+data ret_label: i64 = 0
+data label_count: i64 = 0
+data string_count: i64 = 0
+
+fn new_label() {
+    label_count++
+    return label_count
+}
+
+// the innermost local with this name id, or 0
+fn find_local(id) {
+    let i = local_count - 1
+    while i >= 0 {
+        let loc = locals + i * Local.size
+        if [loc + Local.id] == id { return loc }
+        i--
+    }
+    return 0
+}
+
+fn add_local(id: auto, kind: auto) {
+    if local_count >= MAX_LOCALS { sys_fail("too many local names") }
+    let loc = locals + local_count * Local.size
+    local_count++
+    [loc + Local.id] = id
+    [loc + Local.kind] = kind
+    [loc + Local.elems] = -1
+    return loc
+}
+
+// a new 8-byte variable; its frame offset
+fn add_var(id: auto) {
+    frame_size = frame_size + 8
+    let loc = add_local(id, LK.Var)
+    [loc + Local.off] = frame_size
+    return frame_size
+}
+
+// a string literal: the backend keeps its bytes, the code refers to it by number
+fn string_label(e: auto) {
+    let n = string_count
+    string_count++
+    be_cstring(n, [e + Node.a], [e + Node.val])
+    return n
+}
+
+// statements -----------------------------------------------------------------------------
+
+fn gen_list(s: auto) {
+    while s != 0 {
+        gen_stmt(s)
+        s = [s + Node.next]
+    }
+}
+
+// statements in their own scope: the names declared inside are gone after it
+fn gen_body(s: auto) {
+    let saved = local_count
+    gen_list(s)
+    local_count = saved
+}
+
+fn gen_stmt(s: auto) {
+    switch [s + Node.kind] {
+        case NK.Let {
+            let init = [s + Node.a]
+            if init != 0 { gen_expr(init) }           // before the name is visible: let x = x + 1
+            let off = add_var([s + Node.val])
+            if init != 0 { be_store_var(off) }
+        }
+        case NK.Local { gen_local(s) }
+        case NK.Assign { gen_assign(s) }
+        case NK.ExprStmt { gen_expr([s + Node.a]) }
+        case NK.If { gen_if(s) }
+        case NK.While {
+            let top = new_label()
+            let done = new_label()
+            loop_enter(done, top, s)
+            be_label(top)
+            cond_jump([s + Node.a], done, 0)
+            gen_body([s + Node.b])
+            be_jump(top)
+            be_label(done)
+            loop_depth--
+        }
+        case NK.DoWhile {
+            let top = new_label()
+            let again = new_label()
+            let done = new_label()
+            loop_enter(done, again, s)
+            be_label(top)
+            gen_body([s + Node.b])
+            be_label(again)
+            cond_jump([s + Node.a], top, 1)
+            be_label(done)
+            loop_depth--
+        }
+        case NK.Loop {
+            let top = new_label()
+            let done = new_label()
+            loop_enter(done, top, s)
+            be_label(top)
+            gen_body([s + Node.b])
+            be_jump(top)
+            be_label(done)
+            loop_depth--
+        }
+        case NK.For { gen_for(s) }
+        case NK.Break, NK.Continue {
+            if loop_depth == 0 { fail_tok([s + Node.tok], "break/continue outside of a loop") }
+            if [s + Node.kind] == NK.Break { be_jump(loop_break[loop_depth - 1]) }
+            else { be_jump(loop_next[loop_depth - 1]) }
+        }
+        case NK.Return {
+            if [s + Node.a] != 0 { gen_expr([s + Node.a]) }
+            be_jump(ret_label)
+        }
+        case NK.Block { gen_body([s + Node.a]) }
+        case NK.Switch { gen_switch(s) }
+        default { fail_tok([s + Node.tok], "unknown statement") }
+    }
+}
+
+fn loop_enter(done: auto, again: auto, s: auto) {
+    if loop_depth >= MAX_LOOPS { fail_tok([s + Node.tok], "loops are nested too deep") }
+    loop_break[loop_depth] = done
+    loop_next[loop_depth] = again
+    loop_depth++
+}
+
+// local name: type[count]
+fn gen_local(s: auto) {
+    let tok = [s + Node.tok]
+    resolve_type([s + Node.c], tok)
+    let elems = -1
+    if [s + Node.b] != 0 {
+        elems = const_eval([s + Node.b])
+        if elems <= 0 { fail_tok(tok, "an array needs at least one element") }
+    }
+    let bytes = type_size
+    if elems > 0 { bytes = type_size * elems }
+    let align = type_align
+    if align < 8 { align = 8 }
+    frame_size = align_up(frame_size + bytes, align)
+    let loc = add_local([s + Node.val], LK.Mem)
+    [loc + Local.off] = frame_size
+    [loc + Local.ty] = type_ty
+    [loc + Local.sid] = type_sid
+    [loc + Local.elems] = elems
+    [loc + Local.bytes] = bytes
+    let init = [s + Node.a]
+    if init != 0 {
+        // computed before the name is visible: local x = x * 2 reads the outer x
+        if !scalar_local(loc) { fail_tok(tok, "only a single value can have an initial value (not an array or a struct)") }
+        [loc + Local.id] = -1
+        local_set(loc, init)
+        [loc + Local.id] = [s + Node.val]
+    }
+}
+
+// a single value: a variable or `local x: T`, not an array or a struct
+fn scalar_local(loc) {
+    if [loc + Local.kind] == LK.Var { return 1 }
+    return [loc + Local.elems] < 0 && [loc + Local.ty] != Ty.Struct
+}
+
+// the value of a single-value local into the accumulator
+fn local_get(loc: auto) {
+    if [loc + Local.kind] == LK.Var {
+        be_load_var([loc + Local.off])
+    } else {
+        be_addr_var([loc + Local.off])
+        be_load([loc + Local.ty])
+    }
+}
+
+// local = value
+fn local_set(loc: auto, value: auto) {
+    if [loc + Local.kind] == LK.Var {
+        gen_expr(value)
+        be_store_var([loc + Local.off])
+    } else {
+        be_addr_var([loc + Local.off])
+        be_push()
+        gen_expr(value)
+        be_pop()
+        be_store([loc + Local.ty])
+    }
+}
+
+// local += k
+fn local_add(loc: auto, k: auto) {
+    if [loc + Local.kind] == LK.Var {
+        be_load_var([loc + Local.off])
+        be_binop_const(Op.Plus, k)
+        be_store_var([loc + Local.off])
+    } else {
+        be_addr_var([loc + Local.off])
+        be_push()
+        be_load([loc + Local.ty])
+        be_binop_const(Op.Plus, k)
+        be_pop()
+        be_store([loc + Local.ty])
+    }
+}
+
+fn gen_if(s: auto) {
+    let other = new_label()
+    let done = new_label()
+    let rest = [s + Node.c]
+    cond_jump([s + Node.a], other, 0)
+    gen_body([s + Node.b])
+    if rest != 0 { be_jump(done) }
+    be_label(other)
+    if rest != 0 {
+        gen_stmt(rest)
+        be_label(done)
+    }
+}
+
+// for i in a..b step k — a, then b, are computed once, before the loop. A variable i that exists
+// already (a single value) is the loop variable; otherwise the loop has its own.
+fn gen_for(s: auto) {
+    let saved = local_count
+    let tok = [s + Node.tok]
+    let loc = find_local([s + Node.val])
+    if loc != 0 && !scalar_local(loc) { loc = 0 }
+    if loc == 0 {
+        gen_expr([s + Node.a])
+        be_store_var(add_var([s + Node.val]))
+        loc = find_local([s + Node.val])
+    } else {
+        local_set(loc, [s + Node.a])
+    }
+    let upto = [s + Node.b]
+    let bound = -1
+    if !is_const(upto) {
+        gen_expr(upto)
+        bound = add_var(-1)
+        be_store_var(bound)
+    }
+    let step = 1
+    if [s + Node.d] != 0 { step = const_eval([s + Node.d]) }
+    if step == 0 { fail_tok(tok, "the step cannot be 0") }
+    // leave the loop when i >= b (i > b for ..=); with a negative step when i <= b (i < b)
+    let stop = Op.Ge
+    if [s + Node.op] { stop = Op.Gt }
+    if step < 0 {
+        stop = Op.Le
+        if [s + Node.op] { stop = Op.Lt }
+    }
+    let top = new_label()
+    let again = new_label()
+    let done = new_label()
+    loop_enter(done, again, s)
+    be_label(top)
+    local_get(loc)
+    if bound < 0 {
+        be_cmp_const_jump(stop, const_eval(upto), done)
+    } else {
+        be_push()
+        be_load_var(bound)
+        be_pop()
+        be_cmp_jump(stop, done)
+    }
+    gen_body([s + Node.c])
+    be_label(again)
+    local_add(loc, step)
+    be_jump(top)
+    be_label(done)
+    loop_depth--
+    local_count = saved
+}
+
+// switch: the subject is compared case by case; a subject that is not a name or a number is
+// computed once into a hidden variable
+data sw_subject: ptr = 0
+data sw_off: i64 = 0
+
+fn gen_switch(s: auto) {
+    let saved = local_count
+    let subject = [s + Node.a]
+    let kind = [subject + Node.kind]
+    let off = -1
+    if kind != NK.Name && kind != NK.Num {
+        gen_expr(subject)
+        off = add_var(-1)
+        be_store_var(off)
+    }
+    let done = new_label()
+    let c = [s + Node.b]
+    while c != 0 {
+        let next = new_label()
+        let v = [c + Node.a]
+        if v != 0 {
+            let body = new_label()
+            while v != 0 {
+                if [v + Node.kind] == NK.Range {
+                    // lo <= subject < hi (<= hi for ..=)
+                    let skip = new_label()
+                    switch_value(subject, off)
+                    compare_jump(Op.Lt, [v + Node.a], skip)
+                    switch_value(subject, off)
+                    if [v + Node.op] { compare_jump(Op.Le, [v + Node.b], body) }
+                    else { compare_jump(Op.Lt, [v + Node.b], body) }
+                    be_label(skip)
+                } else {
+                    switch_value(subject, off)
+                    compare_jump(Op.Eq, v, body)
+                }
+                v = [v + Node.next]
+            }
+            be_jump(next)
+            be_label(body)
+        }
+        gen_body([c + Node.b])
+        be_jump(done)
+        be_label(next)
+        c = [c + Node.next]
+    }
+    be_label(done)
+    local_count = saved
+}
+
+fn switch_value(subject: auto, off: auto) {
+    if off >= 0 { be_load_var(off) } else { gen_expr(subject) }
+}
+
+// the accumulator (the left side) compared with the expression right: jump when `left op right`
+fn compare_jump(op: auto, right: auto, label: auto) {
+    if is_const(right) {
+        be_cmp_const_jump(op, const_eval(right), label)
+        return 0
+    }
+    be_push()
+    gen_expr(right)
+    be_pop()
+    be_cmp_jump(op, label)
+    return 0
+}
+
+// the opposite comparison: < becomes >= ...
+fn negate_cmp(op) {
+    switch op {
+        case Op.Eq { return Op.Ne }
+        case Op.Ne { return Op.Eq }
+        case Op.Lt { return Op.Ge }
+        case Op.Ge { return Op.Lt }
+        case Op.Gt { return Op.Le }
+        case Op.Le { return Op.Gt }
+    }
+    return -1
+}
+
+fn is_cmp(op) { return op >= 0 && negate_cmp(op) >= 0 }
+
+// jumps to label when the condition e is true (when = 1) or false (when = 0)
+fn cond_jump(e: auto, label: auto, when: auto) {
+    let kind = [e + Node.kind]
+    let op = [e + Node.op]
+    if kind == NK.Unary && op == Op.Bang {
+        cond_jump([e + Node.a], label, !when)
+        return 0
+    }
+    if kind == NK.Binary && (op == Op.AndAnd || op == Op.OrOr) {
+        // && jumps away as soon as one side is false, || as soon as one is true
+        let sense = op == Op.OrOr
+        if when == sense {
+            cond_jump([e + Node.a], label, when)
+            cond_jump([e + Node.b], label, when)
+        } else {
+            let skip = new_label()
+            cond_jump([e + Node.a], skip, sense)
+            cond_jump([e + Node.b], label, when)
+            be_label(skip)
+        }
+        return 0
+    }
+    if kind == NK.Binary && is_cmp(op) {
+        gen_expr([e + Node.a])
+        if when { compare_jump(op, [e + Node.b], label) }
+        else { compare_jump(negate_cmp(op), [e + Node.b], label) }
+        return 0
+    }
+    if is_const(e) {
+        let v = const_eval(e)
+        if (v != 0) == (when != 0) { be_jump(label) }
+        return 0
+    }
+    gen_expr(e)
+    if when { be_jump_nz(label) } else { be_jump_z(label) }
+    return 0
+}
+
+// assignments ----------------------------------------------------------------------------
+
+// the Local of a `let` variable or parameter named by e, or 0
+fn var_of(e: auto) {
+    if [e + Node.kind] != NK.Name { return 0 }
+    let loc = find_local([e + Node.val])
+    if loc == 0 { return 0 }
+    if [loc + Local.kind] != LK.Var { return 0 }
+    return loc
+}
+
+// target = value, target op= value
+fn gen_assign(s: auto) {
+    let target = [s + Node.a]
+    let value = [s + Node.b]
+    let op = [s + Node.op]
+    let loc = var_of(target)
+    if loc != 0 {
+        let off = [loc + Local.off]
+        if op == Op.Assign {
+            gen_expr(value)
+        } else {
+            be_load_var(off)
+            gen_operator(op, value)
+        }
+        be_store_var(off)
+        return 0
+    }
+    let ty = gen_addr(target)
+    if ty == Ty.Struct { fail_tok([s + Node.tok], "a struct cannot be assigned") }
+    be_push()
+    if op == Op.Assign {
+        gen_expr(value)
+    } else {
+        be_load(ty)
+        gen_operator(op, value)
+    }
+    be_pop()
+    be_store(ty)
+    return 0
+}
+
+// accumulator = accumulator op right
+fn gen_operator(op: auto, right: auto) {
+    if is_const(right) {
+        be_binop_const(op, const_eval(right))
+        return 0
+    }
+    be_push()
+    gen_expr(right)
+    be_pop()
+    be_binop(op)
+    return 0
+}
+
+// expressions ----------------------------------------------------------------------------
+
+fn gen_expr(e: auto) {
+    let kind = [e + Node.kind]
+    if kind == NK.Unary || kind == NK.Binary || kind == NK.Cond || kind == NK.SizeOf || kind == NK.LenOf {
+        if is_const(e) {
+            be_num(const_eval(e))
+            return 0
+        }
+    }
+    switch kind {
+        case NK.Num { be_num([e + Node.val]) }
+        case NK.Str { be_str_addr(string_label(e)) }
+        case NK.Name { gen_name(e) }
+        case NK.Unary {
+            gen_expr([e + Node.a])
+            be_unop([e + Node.op])
+        }
+        case NK.Binary {
+            let op = [e + Node.op]
+            if op == Op.AndAnd || op == Op.OrOr {
+                let no = new_label()
+                let done = new_label()
+                cond_jump(e, no, 0)
+                be_num(1)
+                be_jump(done)
+                be_label(no)
+                be_num(0)
+                be_label(done)
+            } elif is_cmp(op) {
+                gen_expr([e + Node.a])
+                be_push()
+                gen_expr([e + Node.b])
+                be_pop()
+                be_cmp_set(op)
+            } else {
+                gen_expr([e + Node.a])
+                gen_operator(op, [e + Node.b])
+            }
+        }
+        case NK.Cond {
+            let no = new_label()
+            let done = new_label()
+            cond_jump([e + Node.a], no, 0)
+            gen_expr([e + Node.b])
+            be_jump(done)
+            be_label(no)
+            gen_expr([e + Node.c])
+            be_label(done)
+        }
+        case NK.Call { gen_call(e) }
+        case NK.Index {
+            let ty = gen_addr(e)
+            if ty != Ty.Struct { be_load(ty) }
+        }
+        case NK.Mem {
+            gen_expr([e + Node.a])
+            be_load([e + Node.op])
+        }
+        case NK.Addr { gen_addr([e + Node.a]) }
+        default { fail_tok([e + Node.tok], "unknown expression") }
+    }
+    return 0
+}
+
+// a name as a value: a variable's value, a constant, the value of scalar data, the address of
+// an array, a string, a struct or a function
+fn gen_name(e: auto) {
+    let id = [e + Node.val]
+    let loc = find_local(id)
+    if loc != 0 {
+        if [loc + Local.kind] == LK.Var {
+            be_load_var([loc + Local.off])
+        } else {
+            be_addr_var([loc + Local.off])
+            if [loc + Local.elems] < 0 && [loc + Local.ty] != Ty.Struct { be_load([loc + Local.ty]) }
+        }
+        return 0
+    }
+    let rec = name_at(id)
+    switch [rec + Name.kind] {
+        case Sym.Const { be_num(const_of_name(id, [e + Node.tok])) }
+        case Sym.Data {
+            layout_data(id)
+            be_global_addr(id)
+            if [rec + Name.elems] < 0 && [rec + Name.ty] != Ty.Struct { be_load([rec + Name.ty]) }
+        }
+        case Sym.Fn { be_global_addr(id) }
+        case Sym.Extern { fail_name([e + Node.tok], "the address of an extern function is not supported:", id) }
+        default { fail_name([e + Node.tok], "unknown name", id) }
+    }
+    return 0
+}
+
+// the address of e into the accumulator; the Ty.* of what is there
+fn gen_addr(e: auto) {
+    let tok = [e + Node.tok]
+    switch [e + Node.kind] {
+        case NK.Mem {
+            gen_expr([e + Node.a])
+            return [e + Node.op]
+        }
+        case NK.Name {
+            let id = [e + Node.val]
+            let loc = find_local(id)
+            if loc != 0 {
+                be_addr_var([loc + Local.off])
+                if [loc + Local.kind] == LK.Var { return Ty.I64 }
+                return [loc + Local.ty]
+            }
+            let rec = name_at(id)
+            let kind = [rec + Name.kind]
+            if kind == Sym.Data {
+                layout_data(id)
+                be_global_addr(id)
+                return [rec + Name.ty]
+            }
+            if kind == Sym.Fn {
+                be_global_addr(id)
+                return Ty.I64
+            }
+            fail_name(tok, "no address:", id)
+        }
+        case NK.Index { return gen_index_addr(e) }
+    }
+    fail_tok(tok, "this has no address")
+    return 0
+}
+
+// the address of array[index]: data or a local array
+fn gen_index_addr(e: auto) {
+    let id = [e + Node.val]
+    let tok = [e + Node.tok]
+    let index = [e + Node.a]
+    let ty = 0
+    let size = 0
+    let off = -1
+    let loc = find_local(id)
+    if loc != 0 {
+        if [loc + Local.kind] != LK.Mem { fail_name(tok, "only data and local arrays can be indexed:", id) }
+        ty = [loc + Local.ty]
+        size = elem_size(ty, [loc + Local.sid])
+        off = [loc + Local.off]
+    } else {
+        let rec = name_at(id)
+        if [rec + Name.kind] != Sym.Data { fail_name(tok, "only data and local arrays can be indexed:", id) }
+        layout_data(id)
+        ty = [rec + Name.ty]
+        size = elem_size(ty, [rec + Name.sid])
+    }
+    if is_const(index) {
+        let k = const_eval(index) * size
+        index_base(id, off)
+        if k != 0 { be_binop_const(Op.Plus, k) }
+        return ty
+    }
+    gen_expr(index)
+    if size != 1 { be_binop_const(Op.Star, size) }
+    be_push()
+    index_base(id, off)
+    be_pop()
+    be_binop(Op.Plus)
+    return ty
+}
+
+fn index_base(id: auto, off: auto) {
+    if off >= 0 { be_addr_var(off) } else { be_global_addr(id) }
+}
+
+fn elem_size(ty: auto, sid: auto) {
+    if ty == Ty.Struct {
+        let rec = name_at(sid)
+        return [rec + Name.bytes]
+    }
+    return ty_size(ty)
+}
+
+// f(a, b): the arguments are computed left to right onto the stack, the backend puts them
+// where the calling convention wants them
+fn gen_call(e: auto) {
+    let id = [e + Node.val]
+    let tok = [e + Node.tok]
+    let argc = [e + Node.op]
+    let fixed = -1
+    let via = -1
+    let loc = find_local(id)
+    if loc != 0 {
+        // a variable holding the address of a function
+        if [loc + Local.kind] != LK.Var { fail_name(tok, "not a function:", id) }
+        via = [loc + Local.off]
+    } else {
+        let rec = name_at(id)
+        let kind = [rec + Name.kind]
+        if kind == Sym.Extern {
+            fixed = [rec + Name.val]
+            if fixed > argc { fail_name(tok, "too few arguments for", id) }
+        } elif kind != Sym.Fn {
+            fail_name(tok, "unknown function", id)
+        }
+    }
+    // the named arguments go to registers; variadic ones (after `fixed`) to the stack
+    let named = argc
+    if fixed >= 0 { named = fixed }
+    if named > MAX_ARGS { fail_tok(tok, "too many arguments") }
+    let arg = [e + Node.a]
+    while arg != 0 {
+        gen_expr(arg)
+        be_push()
+        arg = [arg + Node.next]
+    }
+    be_call(id, argc, fixed, via)
+    return 0
+}
+
+// top level ------------------------------------------------------------------------------
+
+fn gen_fn(f: auto) {
+    let id = [f + Node.val]
+    local_count = 0
+    frame_size = 0
+    loop_depth = 0
+    ret_label = new_label()
+    be_fn_begin(id)
+    let i = 0
+    let p = [f + Node.a]
+    while p != 0 {
+        if i >= MAX_ARGS { fail_tok([p + Node.tok], "too many parameters") }
+        be_param(i, add_var([p + Node.val]), [p + Node.op])
+        i++
+        p = [p + Node.next]
+    }
+    gen_list([f + Node.b])
+    let global = [f + Node.op]
+    if cstr_same(name_str(id), "main") { global = 1 }
+    be_fn_end(id, global, frame_size, ret_label)
+    return 0
+}
+
+fn gen_data(n: auto) {
+    let id = [n + Node.val]
+    let rec = name_at(id)
+    layout_data(id)
+    let init = [n + Node.d]
+    let align = [rec + Name.val]
+    let bytes = [rec + Name.bytes]
+    if init == 0 {
+        be_bss(id, bytes, align)
+        return 0
+    }
+    be_data_begin(id, [n + Node.op], align)
+    let first = [n + Node.a]
+    if [rec + Name.state] == 1 {
+        be_data_ascii([first + Node.a], [first + Node.val])
+        return 0
+    }
+    let size = ty_size([rec + Name.ty])
+    let count = 0
+    let e = first
+    while e != 0 {
+        data_value(e, size)
+        count++
+        if init == 1 { break }
+        e = [e + Node.next]
+    }
+    let rest = bytes - count * size
+    if rest > 0 { be_data_zero(rest) }
+    return 0
+}
+
+// one element of initialized data: a number, the address of a string, a function or data
+fn data_value(e: auto, size: auto) {
+    let kind = [e + Node.kind]
+    if kind == NK.Str || kind == NK.Name && !is_const(e) {
+        if size != 8 { fail_tok([e + Node.tok], "an address needs 64-bit elements (ptr)") }
+        if kind == NK.Str {
+            be_data_str_ptr(string_label(e))
+            return 0
+        }
+        let id = [e + Node.val]
+        let rec = name_at(id)
+        let what = [rec + Name.kind]
+        if what != Sym.Fn && what != Sym.Data { fail_name([e + Node.tok], "not a constant or an address:", id) }
+        be_data_sym_ptr(id)
+        return 0
+    }
+    be_data_int(size, const_eval(e))
+    return 0
+}
+
+fn gen_program() {
+    locals = mem_alloc(MAX_LOCALS * Local.size)
+    let n = items_head
+    while n != 0 {
+        if [n + Node.kind] == NK.Fn { gen_fn(n) } else { gen_data(n) }
+        n = [n + Node.next]
+    }
+}

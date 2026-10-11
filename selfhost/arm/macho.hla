@@ -1,0 +1,691 @@
+// arm/macho.hla — the sections linked into an arm64 macOS executable (Mach-O), byte for byte
+// the layout of the TypeScript linker (src/asm/macho.ts):
+//   __PAGEZERO | __TEXT (__text, __stubs, other text) | __DATA (__got, __const, data, bss) | __LINKEDIT
+// Functions of libSystem are called through stubs that jump through __got; dyld fills __got
+// (bind opcodes) and moves the pointers in data by the load address (rebase opcodes). The file
+// ends with an ad-hoc code signature: Apple Silicon runs nothing unsigned.
+
+const PAGE = 0x4000
+const BASE = 0x100000000
+const MAX_IMPORTS = 1024
+
+data imports: i64[MAX_IMPORTS]          // name ids, in the order they are first used
+data import_count: i64 = 0
+data stub_syms: i64[MAX_IMPORTS]        // the functions with a stub, in stub order
+data stub_count: i64 = 0
+data got_syms: i64[MAX_IMPORTS]
+data got_count: i64 = 0
+data stub_sect: ptr = 0
+data got_sect: ptr = 0
+
+// the sections in file order (text, then data) and their number
+data order: ptr[MAX_SECTS]
+data order_count: i64 = 0
+data text_count: i64 = 0
+
+fn index_in(list: auto, count: auto, id: auto) {
+    for i in 0..count {
+        if [list + i * 8] == id { return i }
+    }
+    return -1
+}
+
+fn add_import(id: auto) {
+    if index_in(imports, import_count, id) >= 0 { return 0 }
+    if import_count >= MAX_IMPORTS { asm_fail("too many imported functions") }
+    imports[import_count] = id
+    import_count++
+    return 0
+}
+
+fn put_order(s) {
+    order[order_count] = s
+    order_count++
+}
+
+// the number of section s in the file (1-based, as the symbol table counts)
+fn order_index(s: auto) {
+    for i in 0..order_count {
+        if order[i] == s { return i + 1 }
+    }
+    return 0
+}
+
+fn is_seg(s: auto, seg: auto) { return cstr_same([s + Sect.seg], seg) }
+
+// a section the user wrote: kept when it has bytes, __text always
+fn kept(s: auto) {
+    if [s + Sect.length] > 0 { return 1 }
+    return cstr_same([s + Sect.sname], "__text")
+}
+
+// fixups ---------------------------------------------------------------------------------
+
+// patches the instruction at off in section s so that it reaches target
+fn patch(s: auto, off: auto, kind: auto, target: auto, scale: auto, line: auto) {
+    let pc = [s + Sect.addr] + off
+    let w = sect_u32(s, off)
+    let delta = target - pc
+    line_no = line
+    switch kind {
+        case FK.Branch26, FK.Branch19 {
+            if delta % 4 != 0 { asm_fail("the branch target is not 4-byte aligned") }
+            let bits = 26
+            if kind == FK.Branch19 { bits = 19 }
+            let lim = (1 << (bits - 1)) * 4
+            if delta < 0 - lim || delta >= lim { asm_fail("the branch target is out of range") }
+            let v = delta / 4 & ((1 << bits) - 1)
+            if kind == FK.Branch26 { w = w | v } else { w = w | v << 5 }
+        }
+        case FK.Page21 {
+            let pages = (target >> 12) - (pc >> 12)
+            if pages < -1048576 || pages >= 1048576 { asm_fail("adrp target out of range") }
+            let v = pages & 0x1FFFFF
+            w = w | (v & 3) << 29 | (v >> 2) << 5
+        }
+        case FK.PageOff12 {
+            let lo = target & 0xFFF
+            if lo % (1 << scale) != 0 { asm_fail("the @PAGEOFF target is not aligned to the access size") }
+            w = w | (lo >> scale) << 10
+        }
+    }
+    sect_put32(s, off, w)
+    line_no = 0
+}
+
+// rebase and bind places: section, offset, symbol, addend
+struct Place { sect: ptr, off: i64, sym: i64, add: i64 }
+const MAX_PLACES = 65536
+data rebases: ptr = 0
+data rebase_count: i64 = 0
+data binds: ptr = 0
+data bind_count: i64 = 0
+
+fn add_place(list: auto, count: auto, s: auto, off: auto, sym: auto, add: auto) {
+    if count >= MAX_PLACES { asm_fail("too many pointers in data") }
+    let p = list + count * Place.size
+    [p + Place.sect] = s
+    [p + Place.off] = off
+    [p + Place.sym] = sym
+    [p + Place.add] = add
+}
+
+fn place_seg_off(p, data_addr) { return [[p + Place.sect] + Sect.addr] + [p + Place.off] - data_addr }
+
+// symbol table ---------------------------------------------------------------------------
+
+struct NL { id: i64, ntype: i64, sect: i64, desc: i64, value: i64, strx: i64 }
+data nls: ptr = 0
+data nl_count: i64 = 0
+data nlocal: i64 = 0
+data nextdef: i64 = 0
+data nundef: i64 = 0
+
+fn add_nl(id: auto, ntype: auto, sect: auto, desc: auto, value: auto) {
+    let n = nls + nl_count * NL.size
+    nl_count++
+    [n + NL.id] = id
+    [n + NL.ntype] = ntype
+    [n + NL.sect] = sect
+    [n + NL.desc] = desc
+    [n + NL.value] = value
+}
+
+
+// sorts the entries from..upto of the symbol table, by value (by_name = 0) or by name; stable
+fn sort_nls(from: auto, upto: auto, by_name: auto) {
+    local tmp: NL
+    let i = from + 1
+    while i < upto {
+        mem_copy(tmp, nls + i * NL.size, NL.size)
+        let j = i - 1
+        loop {
+            if j < from { break }
+            let other = nls + j * NL.size
+            let before = 0
+            if by_name {
+                before = cstr_cmp(name_str([tmp + NL.id]), name_str([other + NL.id])) < 0
+            } else {
+                before = [tmp + NL.value] < [other + NL.value]
+            }
+            if !before { break }
+            mem_copy(other + NL.size, other, NL.size)
+            j--
+        }
+        mem_copy(nls + (j + 1) * NL.size, tmp, NL.size)
+        i++
+    }
+}
+
+// the index of an imported name in the symbol table
+fn undef_index(id: auto) {
+    for i in nlocal + nextdef..nl_count {
+        if [nls + i * NL.size + NL.id] == id { return i }
+    }
+    return 0
+}
+
+// the 16-byte UUID: the SHA-256 of all section bytes
+data uuid: u8[32]
+
+fn make_uuid() {
+    let all = new_buf()
+    for i in 0..order_count {
+        let s = order[i]
+        if [s + Sect.zerofill] == 0 { buf_add(all, [s + Sect.bytes + Buf.ptr], [s + Sect.length]) }
+    }
+    sha256([all + Buf.ptr], [all + Buf.used], uuid)
+    uuid[6] = uuid[6] & 0x0F | 0x40
+    uuid[8] = uuid[8] & 0x3F | 0x80
+}
+
+// the executable -------------------------------------------------------------------------
+
+data id_main: i64 = 0
+data mh_header_id: i64 = 0
+
+// ident: the name in the code signature; the file goes to out
+fn link_macho(out: auto, ident: auto) {
+    id_main = intern_cstr("_main")
+    mh_header_id = intern_cstr("__mh_execute_header")
+    rebases = mem_alloc(MAX_PLACES * Place.size)
+    binds = mem_alloc(MAX_PLACES * Place.size)
+    nls = mem_alloc(MAX_NAMES * NL.size)
+    let user_count = sect_count
+
+    // imports: calls of functions defined elsewhere go through a stub; .quad of one is bound
+    for si in 0..user_count {
+        let s = sect_at(si)
+        if !is_seg(s, "__TEXT") && !is_seg(s, "__DATA") { asm_fail("only the __TEXT and __DATA segments are supported") }
+        for fi in 0..fix_count {
+            let f = fix_at(fi)
+            if [f + Fix.sect] != s { continue }
+            let sym = [f + Fix.sym]
+            if sym_defined(sym) { continue }
+            line_no = [f + Fix.line]
+            if [f + Fix.kind] == FK.Abs64 {
+                add_import(sym)
+            } elif [f + Fix.kind] == FK.Branch26 {
+                add_import(sym)
+                if index_in(stub_syms, stub_count, sym) < 0 {
+                    stub_syms[stub_count] = sym
+                    stub_count++
+                    got_syms[got_count] = sym
+                    got_count++
+                }
+            } else {
+                asm_fail_name("undefined symbol", sym)
+            }
+            line_no = 0
+        }
+    }
+    if !sym_defined(id_main) { asm_fail("the entry point _main is not defined") }
+
+    // the stubs and the GOT are sections of their own
+    if stub_count > 0 {
+        stub_sect = get_section("__TEXT", "__stubs", 0x80000408)
+        [stub_sect + Sect.align] = 2
+        [stub_sect + Sect.code] = 1
+        cur_sect = stub_sect
+        for i in 0..stub_count * 12 { emit_byte(0) }
+    }
+    if got_count > 0 {
+        got_sect = get_section("__DATA", "__got", 6)
+        [got_sect + Sect.align] = 3
+        cur_sect = got_sect
+        for i in 0..got_count * 8 { emit_byte(0) }
+    }
+
+    // file order
+    for si in 0..user_count {
+        let s = sect_at(si)
+        if is_seg(s, "__TEXT") && cstr_same([s + Sect.sname], "__text") && kept(s) { put_order(s) }
+    }
+    if stub_count > 0 { put_order(stub_sect) }
+    for si in 0..user_count {
+        let s = sect_at(si)
+        if is_seg(s, "__TEXT") && !cstr_same([s + Sect.sname], "__text") && kept(s) { put_order(s) }
+    }
+    text_count = order_count
+    if got_count > 0 { put_order(got_sect) }
+    for si in 0..user_count {
+        let s = sect_at(si)
+        if is_seg(s, "__DATA") && [s + Sect.zerofill] == 0 && cstr_same([s + Sect.sname], "__const") && kept(s) { put_order(s) }
+    }
+    for si in 0..user_count {
+        let s = sect_at(si)
+        if is_seg(s, "__DATA") && [s + Sect.zerofill] == 0 && !cstr_same([s + Sect.sname], "__const") && kept(s) { put_order(s) }
+    }
+    for si in 0..user_count {
+        let s = sect_at(si)
+        if is_seg(s, "__DATA") && [s + Sect.zerofill] != 0 && kept(s) { put_order(s) }
+    }
+    let data_count = order_count - text_count
+    let has_data = data_count > 0
+
+    // load commands: their sizes decide where the sections start
+    let dylinker = "/usr/lib/dyld"
+    let dylib = "/usr/lib/libSystem.B.dylib"
+    let dylinker_size = align_to(12 + cstr_len(dylinker) + 1, 8)
+    let dylib_size = align_to(24 + cstr_len(dylib) + 1, 8)
+    let sizeofcmds = 72 + (72 + 80 * text_count) + 72 + 48 + 24 + 80 + dylinker_size + 24 + 24 + 24 + dylib_size + 16
+    let ncmds = 12
+    if has_data {
+        sizeofcmds = sizeofcmds + 72 + 80 * data_count
+        ncmds = 13
+    }
+
+    // layout
+    let off = align_to(32 + sizeofcmds, 16)
+    for i in 0..text_count {
+        let s = order[i]
+        off = align_to(off, 1 << [s + Sect.align])
+        [s + Sect.fileoff] = off
+        [s + Sect.addr] = BASE + off
+        off = off + [s + Sect.length]
+    }
+    let text_size = align_to(off, PAGE)
+    let data_addr = BASE + text_size
+    let data_file_size = 0
+    let data_vm_size = 0
+    if has_data {
+        let doff = 0
+        for i in text_count..order_count {
+            let s = order[i]
+            if [s + Sect.zerofill] { continue }
+            doff = align_to(doff, 1 << [s + Sect.align])
+            [s + Sect.fileoff] = text_size + doff
+            [s + Sect.addr] = data_addr + doff
+            doff = doff + [s + Sect.length]
+        }
+        let file_end = doff
+        for i in text_count..order_count {
+            let s = order[i]
+            if [s + Sect.zerofill] == 0 { continue }
+            doff = align_to(doff, 1 << [s + Sect.align])
+            [s + Sect.fileoff] = 0
+            [s + Sect.addr] = data_addr + doff
+            doff = doff + [s + Sect.length]
+        }
+        data_file_size = align_to(file_end, PAGE)
+        let vm = doff
+        if vm < 1 { vm = 1 }
+        data_vm_size = align_to(vm, PAGE)
+    }
+    let linkedit_off = text_size + data_file_size
+    let linkedit_addr = data_addr + data_vm_size
+
+    // fixups
+    for si in 0..user_count {
+        let s = sect_at(si)
+        for fi in 0..fix_count {
+            let f = fix_at(fi)
+            if [f + Fix.sect] != s { continue }
+            let sym = [f + Fix.sym]
+            let fo = [f + Fix.off]
+            let kind = [f + Fix.kind]
+            if kind == FK.Abs64 {
+                line_no = [f + Fix.line]
+                if !is_seg(s, "__DATA") { asm_fail("a pointer in read-only data (put pointer tables into __DATA,__const)") }
+                line_no = 0
+                if sym_defined(sym) {
+                    let a = sym_addr(sym)
+                    sect_put64(s, fo, a + [f + Fix.add])
+                    add_place(rebases, rebase_count, s, fo, sym, 0)
+                    rebase_count++
+                } else {
+                    add_place(binds, bind_count, s, fo, sym, [f + Fix.add])
+                    bind_count++
+                }
+                continue
+            }
+            let target = 0
+            if sym_defined(sym) {
+                let a = sym_addr(sym)
+                target = a + [f + Fix.add]
+            } else {
+                // a call of an imported function: to its stub
+                let k = index_in(stub_syms, stub_count, sym)
+                target = [stub_sect + Sect.addr] + k * 12
+            }
+            patch(s, fo, kind, target, [f + Fix.scale], [f + Fix.line])
+        }
+    }
+    // stubs: adrp x16, got@PAGE; ldr x16, [x16, got@PAGEOFF]; br x16
+    for i in 0..stub_count {
+        let o = i * 12
+        let g = [got_sect + Sect.addr] + index_in(got_syms, got_count, stub_syms[i]) * 8
+        sect_put32(stub_sect, o, 0x90000010)
+        sect_put32(stub_sect, o + 4, 0xF9400210)
+        sect_put32(stub_sect, o + 8, 0xD61F0200)
+        patch(stub_sect, o, FK.Page21, g, 0, 0)
+        patch(stub_sect, o + 4, FK.PageOff12, g, 3, 0)
+    }
+    for i in 0..got_count {
+        add_place(binds, bind_count, got_sect, i * 8, got_syms[i], 0)
+        bind_count++
+    }
+
+    // dyld info: rebase (sorted by offset in the data segment), bind, the export trie
+    let rebase = new_buf()
+    if rebase_count > 0 {
+        // insertion sort, stable
+        local tmp: Place
+        for i in 1..rebase_count {
+            mem_copy(tmp, rebases + i * Place.size, Place.size)
+            let key = place_seg_off(tmp, data_addr)
+            let j = i - 1
+            while j >= 0 && place_seg_off(rebases + j * Place.size, data_addr) > key {
+                mem_copy(rebases + (j + 1) * Place.size, rebases + j * Place.size, Place.size)
+                j--
+            }
+            mem_copy(rebases + (j + 1) * Place.size, tmp, Place.size)
+        }
+        put8(rebase, 0x11)                              // REBASE_OPCODE_SET_TYPE_IMM: pointer
+        for i in 0..rebase_count {
+            put8(rebase, 0x22)                          // SET_SEGMENT_AND_OFFSET_ULEB: segment 2
+            put_uleb(rebase, place_seg_off(rebases + i * Place.size, data_addr))
+            put8(rebase, 0x51)                          // DO_REBASE_IMM_TIMES 1
+        }
+        put8(rebase, 0)
+        pad_to(rebase, 8)
+    }
+    let bind = new_buf()
+    if bind_count > 0 {
+        for i in 0..bind_count {
+            let b = binds + i * Place.size
+            put8(bind, 0x11)                            // SET_DYLIB_ORDINAL_IMM 1
+            put8(bind, 0x40)                            // SET_SYMBOL_TRAILING_FLAGS_IMM
+            buf_str(bind, name_str([b + Place.sym]))
+            put8(bind, 0)
+            put8(bind, 0x51)                            // SET_TYPE_IMM: pointer
+            if [b + Place.add] != 0 {
+                put8(bind, 0x60)                        // SET_ADDEND_SLEB
+                put_sleb(bind, [b + Place.add])
+            }
+            put8(bind, 0x72)                            // SET_SEGMENT_AND_OFFSET_ULEB: segment 2
+            put_uleb(bind, place_seg_off(b, data_addr))
+            put8(bind, 0x90)                            // DO_BIND
+        }
+        put8(bind, 0)
+        pad_to(bind, 8)
+    }
+    // the export trie of an executable: only __mh_execute_header at offset 0
+    let exp = new_buf()
+    put8(exp, 0)
+    put8(exp, 1)
+    buf_str(exp, "__mh_execute_header")
+    put8(exp, 0)
+    put8(exp, 23)
+    put8(exp, 2)
+    put8(exp, 0)
+    put8(exp, 0)
+    put8(exp, 0)
+    pad_to(exp, 8)
+
+    // symbol table: locals by address, then exported names, then imports, both by name
+    // the symbols in the order of their definition
+    let by_order = mem_alloc((def_count + 1) * 8)
+    for id in 0..name_count {
+        let a = asym_at(id)
+        if [a + ASym.order] != 0 { [by_order + [a + ASym.order] * 8] = id }
+    }
+    for pass in 0..2 {
+        for d in 1..def_count + 1 {
+            let id = [by_order + d * 8]
+            let a = asym_at(id)
+            let text = name_str(id)
+            let first = u8[text]
+            if first == 'L' || first == 'l' { continue }
+            if [a + ASym.global] != pass { continue }
+            let s = sect_at([a + ASym.sect] - 1)
+            add_nl(id, 0x0E | pass, order_index(s), 0, [s + Sect.addr] + [a + ASym.off])
+        }
+        if pass == 0 {
+            nlocal = nl_count
+            sort_nls(0, nlocal, 0)
+        }
+    }
+    add_nl(mh_header_id, 0x0F, 1, 0x10, BASE)
+    nextdef = nl_count - nlocal
+    sort_nls(nlocal, nl_count, 1)
+    for i in 0..import_count { add_nl(imports[i], 1, 0, 0x100, 0) }
+    nundef = import_count
+    sort_nls(nlocal + nextdef, nl_count, 1)
+    let strtab = new_buf()
+    put8(strtab, 0x20)
+    put8(strtab, 0)
+    for i in 0..nl_count {
+        let n = nls + i * NL.size
+        [n + NL.strx] = [strtab + Buf.used]
+        buf_str(strtab, name_str([n + NL.id]))
+        put8(strtab, 0)
+    }
+    pad_to(strtab, 8)
+    let symtab = new_buf()
+    for i in 0..nl_count {
+        let n = nls + i * NL.size
+        put32(symtab, [n + NL.strx])
+        put8(symtab, [n + NL.ntype])
+        put8(symtab, [n + NL.sect])
+        put16(symtab, [n + NL.desc])
+        put64(symtab, [n + NL.value])
+    }
+    let indirect = new_buf()
+    for i in 0..stub_count { put32(indirect, undef_index(stub_syms[i])) }
+    for i in 0..got_count { put32(indirect, undef_index(got_syms[i])) }
+    let n_indirect = stub_count + got_count
+
+    // __LINKEDIT
+    let lo = linkedit_off
+    let rebase_off = lo
+    lo = lo + [rebase + Buf.used]
+    let bind_off = lo
+    lo = lo + [bind + Buf.used]
+    let export_off = lo
+    lo = lo + [exp + Buf.used]
+    let sym_off = lo
+    lo = lo + [symtab + Buf.used]
+    let indirect_off = lo
+    lo = lo + align_to([indirect + Buf.used], 8)
+    let str_off = lo
+    lo = lo + [strtab + Buf.used]
+    let sig_off = align_to(lo, 16)
+    let ident_len = cstr_len(ident)
+    let pages = (sig_off + 4095) / 4096
+    let cd_size = 88 + ident_len + 1 + pages * 32
+    let sig_size = align_to(12 + 8 + cd_size, 16)
+    let file_size = sig_off + sig_size
+    let linkedit_size = file_size - linkedit_off
+
+    // header and load commands
+    let h = new_buf()
+    put32(h, 0xFEEDFACF)
+    put32(h, 0x0100000C)                              // CPU_TYPE_ARM64
+    put32(h, 0)
+    put32(h, 2)                                       // MH_EXECUTE
+    put32(h, ncmds)
+    put32(h, sizeofcmds)
+    put32(h, 0x00200085)                              // NOUNDEFS | DYLDLINK | TWOLEVEL | PIE
+    put32(h, 0)
+    seg_sects(0, 0)
+    segment_cmd(h, "__PAGEZERO", 0, BASE, 0, 0, 0)
+    seg_sects(0, text_count)
+    segment_cmd(h, "__TEXT", BASE, text_size, 0, text_size, 5)
+    if has_data {
+        seg_sects(text_count, order_count)
+        segment_cmd(h, "__DATA", data_addr, data_vm_size, text_size, data_file_size, 3)
+    }
+    seg_sects(0, 0)
+    segment_cmd(h, "__LINKEDIT", linkedit_addr, align_to(linkedit_size, PAGE), linkedit_off, linkedit_size, 1)
+
+    put32(h, 0x80000022)                              // LC_DYLD_INFO_ONLY
+    put32(h, 48)
+    if [rebase + Buf.used] > 0 { put32(h, rebase_off) } else { put32(h, 0) }
+    put32(h, [rebase + Buf.used])
+    if [bind + Buf.used] > 0 { put32(h, bind_off) } else { put32(h, 0) }
+    put32(h, [bind + Buf.used])
+    for i in 0..4 { put32(h, 0) }                     // weak and lazy binding
+    put32(h, export_off)
+    put32(h, [exp + Buf.used])
+
+    put32(h, 2)                                       // LC_SYMTAB
+    put32(h, 24)
+    put32(h, sym_off)
+    put32(h, nl_count)
+    put32(h, str_off)
+    put32(h, [strtab + Buf.used])
+
+    put32(h, 0xB)                                     // LC_DYSYMTAB
+    put32(h, 80)
+    put32(h, 0)
+    put32(h, nlocal)
+    put32(h, nlocal)
+    put32(h, nextdef)
+    put32(h, nlocal + nextdef)
+    put32(h, nundef)
+    for i in 0..6 { put32(h, 0) }
+    if n_indirect > 0 { put32(h, indirect_off) } else { put32(h, 0) }
+    put32(h, n_indirect)
+    for i in 0..4 { put32(h, 0) }
+
+    put32(h, 0xE)                                     // LC_LOAD_DYLINKER
+    put32(h, dylinker_size)
+    put32(h, 12)
+    put_name(h, dylinker, dylinker_size - 12)
+
+    make_uuid()
+    put32(h, 0x1B)                                    // LC_UUID
+    put32(h, 24)
+    for i in 0..16 { put8(h, uuid[i]) }
+
+    put32(h, 0x32)                                    // LC_BUILD_VERSION
+    put32(h, 24)
+    put32(h, 1)                                       // macOS
+    put32(h, 0x000B0000)                              // minimum 11.0
+    put32(h, 0x000F0000)                              // SDK 15.0
+    put32(h, 0)
+
+    put32(h, 0x80000028)                              // LC_MAIN
+    put32(h, 24)
+    put64(h, sym_addr(id_main) - BASE)
+    put64(h, 0)
+
+    put32(h, 0xC)                                     // LC_LOAD_DYLIB
+    put32(h, dylib_size)
+    put32(h, 24)
+    put32(h, 2)
+    put32(h, 0x05276403)
+    put32(h, 0x00010000)
+    put_name(h, dylib, dylib_size - 24)
+
+    put32(h, 0x1D)                                    // LC_CODE_SIGNATURE
+    put32(h, 16)
+    put32(h, sig_off)
+    put32(h, sig_size)
+    if [h + Buf.used] != 32 + sizeofcmds { asm_fail("internal error: the load commands have the wrong size") }
+
+    // the file
+    buf_reserve(out, file_size)
+    let image = [out + Buf.ptr]
+    for i in 0..file_size { u8[image + i] = 0 }
+    [out + Buf.used] = file_size
+    mem_copy(image, [h + Buf.ptr], [h + Buf.used])
+    for i in 0..order_count {
+        let s = order[i]
+        if [s + Sect.zerofill] == 0 { mem_copy(image + [s + Sect.fileoff], [s + Sect.bytes + Buf.ptr], [s + Sect.length]) }
+    }
+    mem_copy(image + rebase_off, [rebase + Buf.ptr], [rebase + Buf.used])
+    mem_copy(image + bind_off, [bind + Buf.ptr], [bind + Buf.used])
+    mem_copy(image + export_off, [exp + Buf.ptr], [exp + Buf.used])
+    mem_copy(image + sym_off, [symtab + Buf.ptr], [symtab + Buf.used])
+    mem_copy(image + indirect_off, [indirect + Buf.ptr], [indirect + Buf.used])
+    mem_copy(image + str_off, [strtab + Buf.ptr], [strtab + Buf.used])
+
+    // ad-hoc code signature: a SuperBlob with one CodeDirectory that hashes every 4 KB page
+    let sig = new_buf()
+    put_be32(sig, 0xFADE0CC0)
+    put_be32(sig, 12 + 8 + cd_size)
+    put_be32(sig, 1)
+    put_be32(sig, 0)                                  // CodeDirectory slot
+    put_be32(sig, 20)
+    put_be32(sig, 0xFADE0C02)
+    put_be32(sig, cd_size)
+    put_be32(sig, 0x20400)                            // version
+    put_be32(sig, 0x20002)                            // adhoc | linker-signed
+    put_be32(sig, 88 + ident_len + 1)                 // hashOffset
+    put_be32(sig, 88)                                 // identOffset
+    put_be32(sig, 0)                                  // nSpecialSlots
+    put_be32(sig, pages)                              // nCodeSlots
+    put_be32(sig, sig_off)                            // codeLimit
+    put8(sig, 32)                                     // hashSize
+    put8(sig, 2)                                      // SHA-256
+    put8(sig, 0)
+    put8(sig, 12)                                     // 4 KB pages
+    for i in 0..4 { put_be32(sig, 0) }
+    put_be64(sig, 0)                                  // codeLimit64
+    put_be64(sig, 0)                                  // execSegBase
+    put_be64(sig, text_size)                          // execSegLimit
+    put_be64(sig, 1)                                  // execSegFlags: main binary
+    buf_str(sig, ident)
+    put8(sig, 0)
+    local hash: u8[32]
+    for p in 0..pages {
+        let start = p * 4096
+        let n = 4096
+        if start + n > sig_off { n = sig_off - start }
+        sha256(image + start, n, hash)
+        buf_add(sig, hash, 32)
+    }
+    mem_copy(image + sig_off, [sig + Buf.ptr], [sig + Buf.used])
+}
+
+// the sections of the next segment_cmd: order[seg_from..seg_upto]
+data seg_from: i64 = 0
+data seg_upto: i64 = 0
+
+fn seg_sects(from, upto) {
+    seg_from = from
+    seg_upto = upto
+}
+
+// LC_SEGMENT_64 with the sections set by seg_sects
+fn segment_cmd(h: auto, name: auto, vmaddr: auto, vmsize: auto, fileoff: auto, filesize: auto, prot: auto) {
+    let from = seg_from
+    let upto = seg_upto
+    let n = upto - from
+    put32(h, 0x19)
+    put32(h, 72 + 80 * n)
+    put_name(h, name, 16)
+    put64(h, vmaddr)
+    put64(h, vmsize)
+    put64(h, fileoff)
+    put64(h, filesize)
+    put32(h, prot)
+    put32(h, prot)
+    put32(h, n)
+    put32(h, 0)
+    for i in from..upto {
+        let s = order[i]
+        put_name(h, [s + Sect.sname], 16)
+        put_name(h, [s + Sect.seg], 16)
+        put64(h, [s + Sect.addr])
+        put64(h, [s + Sect.length])
+        if [s + Sect.zerofill] { put32(h, 0) } else { put32(h, [s + Sect.fileoff]) }
+        put32(h, [s + Sect.align])
+        put32(h, 0)
+        put32(h, 0)
+        put32(h, [s + Sect.flags])
+        if s == stub_sect {
+            put32(h, 0)
+            put32(h, 12)
+        } elif s == got_sect {
+            put32(h, stub_count)
+            put32(h, 0)
+        } else {
+            put32(h, 0)
+            put32(h, 0)
+        }
+        put32(h, 0)
+    }
+}

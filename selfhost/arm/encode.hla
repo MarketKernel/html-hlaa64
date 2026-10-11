@@ -1,0 +1,674 @@
+// arm/encode.hla — AArch64 assembly lines (Apple dialect) to machine words.
+// Every instruction is 4 bytes; addresses of symbols are patched later through fixups.
+
+const ALIGN_NOP = 0xD503201F
+
+enum Mn {
+    Add, Adds, Sub, Subs, Cmp, Cmn, Mov, Movz, Movk, Movn, Neg, Mvn,
+    And, Ands, Orr, Eor, Tst, Mul, Madd, Msub, Sdiv, Udiv, Lsl, Lsr, Asr,
+    Sxtb, Sxth, Sxtw, Uxtb, Uxth, Cset, Csel,
+    B, Bl, Br, Blr, Ret, Cbz, Cbnz, Adrp,
+    Ldr, Str, Ldrb, Strb, Ldrh, Strh, Ldrsb, Ldrsh, Ldrsw, Ldur, Stur, Ldp, Stp, Nop
+}
+
+rodata mn_text: ptr = [
+    "add", "adds", "sub", "subs", "cmp", "cmn", "mov", "movz", "movk", "movn", "neg", "mvn",
+    "and", "ands", "orr", "eor", "tst", "mul", "madd", "msub", "sdiv", "udiv", "lsl", "lsr", "asr",
+    "sxtb", "sxth", "sxtw", "uxtb", "uxth", "cset", "csel",
+    "b", "bl", "br", "blr", "ret", "cbz", "cbnz", "adrp",
+    "ldr", "str", "ldrb", "strb", "ldrh", "strh", "ldrsb", "ldrsh", "ldrsw", "ldur", "stur", "ldp", "stp", "nop"
+]
+
+rodata cond_text: ptr = ["eq", "ne", "hs", "lo", "mi", "pl", "vs", "vc", "hi", "ls", "ge", "lt", "gt", "le", "al"]
+
+// the mnemonics get the first name ids, so a name id below Mn.count is a mnemonic
+fn arm_init() {
+    for k in 0..Mn.count { intern_cstr(mn_text[k]) }
+}
+
+// registers ------------------------------------------------------------------------------
+
+data rx: i64 = 0                    // the register just read is 64-bit (x, sp, xzr)
+data was_sp: i64 = 0                   // ... and it is sp/wsp (31 means sp, not zr)
+
+// the register named by id: its number, or -1 when it is not a register name
+fn reg_of(id: auto) {
+    let s = name_str(id)
+    let n = name_len(id)
+    was_sp = 0
+    rx = 1
+    if cstr_same(s, "sp") { was_sp = 1; return 31 }
+    if cstr_same(s, "wsp") { was_sp = 1; rx = 0; return 31 }
+    if cstr_same(s, "xzr") { return 31 }
+    if cstr_same(s, "wzr") { rx = 0; return 31 }
+    if cstr_same(s, "fp") { return 29 }
+    if cstr_same(s, "lr") { return 30 }
+    let c = u8[s]
+    if (c != 'x' && c != 'w') || n < 2 || n > 3 { return -1 }
+    rx = c == 'x'
+    let v = 0
+    for i in 1..n {
+        let d = u8[s + i]
+        if d < '0' || d > '9' { return -1 }
+        v = v * 10 + d - '0'
+    }
+    if v > 30 { return -1 }
+    return v
+}
+
+fn p_reg() {
+    let id = read_ident()
+    if id < 0 { asm_fail("expected a register") }
+    let r = reg_of(id)
+    if r < 0 { asm_fail_name("not a register:", id) }
+    return r
+}
+
+// 1 when the next operand is a register (nothing is read)
+fn at_reg() {
+    let save = ap
+    let id = read_ident()
+    ap = save
+    if id < 0 { return 0 }
+    return reg_of(id) >= 0
+}
+
+fn comma() { expect_char(',') }
+
+// #imm (the # may be left out)
+fn p_imm() {
+    accept_char('#')
+    return read_number()
+}
+
+fn at_imm() {
+    skip_sp()
+    return u8[ap] == '#' || at_number()
+}
+
+// a symbol with an optional @PAGE / @PAGEOFF: the name id; sym_reloc tells which (0, 1 or 2)
+data sym_reloc: i64 = 0
+data sym_add: i64 = 0
+
+fn p_sym() {
+    let id = expect_ident()
+    sym_reloc = 0
+    sym_add = 0
+    if accept_char('+') { sym_add = read_number() }
+    if accept_char('@') {
+        let r = expect_ident()
+        let rs = name_str(r)
+        if cstr_same(rs, "PAGE") { sym_reloc = 1 }
+        elif cstr_same(rs, "PAGEOFF") { sym_reloc = 2 }
+        else { asm_fail_name("unsupported relocation", r) }
+    }
+    return id
+}
+
+// a condition name: eq, ne, ... (cs = hs, cc = lo)
+fn cond_of(p: auto) {
+    if cstr_same(p, "cs") { return 2 }
+    if cstr_same(p, "cc") { return 3 }
+    for k in 0..15 {
+        if cstr_same(p, cond_text[k]) { return k }
+    }
+    asm_fail("unknown condition")
+    return 0
+}
+
+// an optional ", lsl #n" / ", lsr #n" / ", asr #n" after a register: shift_kind 0/1/2, shift_amount
+data shift_kind: i64 = 0
+data shift_amount: i64 = 0
+
+fn p_shift() {
+    shift_kind = 0
+    shift_amount = 0
+    if !accept_char(',') { return 0 }
+    let id = expect_ident()
+    let s = name_str(id)
+    if cstr_same(s, "lsl") { shift_kind = 0 }
+    elif cstr_same(s, "lsr") { shift_kind = 1 }
+    elif cstr_same(s, "asr") { shift_kind = 2 }
+    else { asm_fail("expected lsl, lsr or asr") }
+    shift_amount = p_imm()
+    return 1
+}
+
+fn put_insn(w: auto) {
+    if [cur_sect + Sect.code] == 0 { asm_fail("instruction outside of a code section") }
+    emit_le(w, 4)
+}
+
+// instructions ---------------------------------------------------------------------------
+
+// the second operand of add/sub/cmp: #imm, symbol@PAGEOFF or a register
+fn addsub_rest(sub: auto, s: auto, sf: auto, rd: auto, rn: auto, uses_sp: auto) {
+    let op = sub << 30 | s << 29 | sf << 31
+    if at_imm() {
+        let imm = p_imm()
+        let sh = 0
+        if p_shift() {
+            if shift_kind != 0 || shift_amount != 12 { asm_fail("the immediate shift must be lsl #12") }
+            sh = 1
+        }
+        if imm < 0 || imm > 4095 { asm_fail("immediate out of range (0..4095)") }
+        put_insn(0x11000000 | op | sh << 22 | imm << 10 | rn << 5 | rd)
+        return 0
+    }
+    if !at_reg() {
+        let id = p_sym()
+        if sym_reloc != 2 { asm_fail("expected an immediate, a register or symbol@PAGEOFF") }
+        add_fix(FK.PageOff12, id, sym_add, 0)
+        put_insn(0x11000000 | op | rn << 5 | rd)
+        return 0
+    }
+    let rm = p_reg()
+    if uses_sp {
+        // with sp only the extended-register form exists: uxtx (uxtw for w registers)
+        let option = 2
+        if sf { option = 3 }
+        put_insn(0x0B200000 | op | rm << 16 | option << 13 | rn << 5 | rd)
+        return 0
+    }
+    p_shift()
+    put_insn(0x0B000000 | op | shift_kind << 22 | rm << 16 | shift_amount << 10 | rn << 5 | rd)
+    return 0
+}
+
+// mov reg, #imm: movz or movn with one 16-bit part
+fn mov_imm(rd: auto, v: auto, sf: auto) {
+    let bits = 32
+    if sf { bits = 64 }
+    let mask = -1
+    if bits == 32 { mask = 0xFFFFFFFF }
+    let val = v & mask
+    let inv = (v ^ -1) & mask
+    for hw in 0..bits / 16 {
+        let part = 0xFFFF << (hw * 16)
+        if val & (part ^ -1) == 0 {
+            put_insn(0x52800000 | sf << 31 | hw << 21 | (val >>> (hw * 16) & 0xFFFF) << 5 | rd)
+            return 0
+        }
+    }
+    for hw in 0..bits / 16 {
+        let part = 0xFFFF << (hw * 16)
+        if inv & (part ^ -1) == 0 {
+            put_insn(0x12800000 | sf << 31 | hw << 21 | (inv >>> (hw * 16) & 0xFFFF) << 5 | rd)
+            return 0
+        }
+    }
+    asm_fail("this immediate needs movz + movk")
+    return 0
+}
+
+// ldr/str and their byte, half and signed forms
+fn load_store(mn: auto) {
+    let rt = p_reg()
+    let tx = rx
+    let size = 2
+    if tx { size = 3 }
+    let opc = 1
+    switch mn {
+        case Mn.Str, Mn.Stur { opc = 0 }
+        case Mn.Ldrb { size = 0 }
+        case Mn.Strb { size = 0; opc = 0 }
+        case Mn.Ldrh { size = 1 }
+        case Mn.Strh { size = 1; opc = 0 }
+        case Mn.Ldrsb, Mn.Ldrsh {
+            size = 0
+            if mn == Mn.Ldrsh { size = 1 }
+            opc = 3
+            if tx { opc = 2 }
+        }
+        case Mn.Ldrsw { size = 2; opc = 2 }
+    }
+    let unscaled = mn == Mn.Ldur || mn == Mn.Stur
+    let head = size << 30 | opc << 22
+    comma()
+    expect_char('[')
+    let rn = p_reg()
+    if accept_char(']') {
+        if accept_char(',') {
+            // [rn], #imm: post-index
+            let imm = p_imm()
+            if imm < -256 || imm > 255 { asm_fail("post-index offset out of range") }
+            put_insn(0x38000400 | head | (imm & 0x1FF) << 12 | rn << 5 | rt)
+            return 0
+        }
+        put_insn(0x39000000 | head | rn << 5 | rt)
+        return 0
+    }
+    comma()
+    if at_imm() {
+        let imm = p_imm()
+        expect_char(']')
+        if accept_char('!') {
+            if imm < -256 || imm > 255 { asm_fail("pre-index offset out of range") }
+            put_insn(0x38000C00 | head | (imm & 0x1FF) << 12 | rn << 5 | rt)
+            return 0
+        }
+        let scale = 1 << size
+        if !unscaled && imm >= 0 && imm % scale == 0 && imm / scale < 4096 {
+            put_insn(0x39000000 | head | imm / scale << 10 | rn << 5 | rt)
+            return 0
+        }
+        if imm < -256 || imm > 255 { asm_fail("offset out of range") }
+        put_insn(0x38000000 | head | (imm & 0x1FF) << 12 | rn << 5 | rt)
+        return 0
+    }
+    if at_reg() {
+        // [rn, rm{, lsl #size}]
+        let rm = p_reg()
+        let s = 0
+        if p_shift() {
+            if shift_kind != 0 || shift_amount != size && shift_amount != 0 { asm_fail("the index shift must be the access size") }
+            if shift_amount == size { s = 1 }
+        }
+        expect_char(']')
+        put_insn(0x38200800 | head | rm << 16 | 3 << 13 | s << 12 | rn << 5 | rt)
+        return 0
+    }
+    let id = p_sym()
+    if sym_reloc != 2 { asm_fail("expected an offset, a register or symbol@PAGEOFF") }
+    expect_char(']')
+    add_fix(FK.PageOff12, id, sym_add, size)
+    put_insn(0x39000000 | head | rn << 5 | rt)
+    return 0
+}
+
+// ldp/stp rt, rt2, [rn{, #imm}]{!} or [rn], #imm
+fn load_store_pair(load: auto) {
+    let rt = p_reg()
+    let tx = rx
+    comma()
+    let rt2 = p_reg()
+    comma()
+    expect_char('[')
+    let rn = p_reg()
+    let opc = 0
+    let scale = 4
+    if tx {
+        opc = 2
+        scale = 8
+    }
+    let mode = 0x29000000                       // signed offset
+    let imm = 0
+    if accept_char(']') {
+        if accept_char(',') {
+            imm = p_imm()
+            mode = 0x28800000                   // post-index
+        }
+    } else {
+        comma()
+        imm = p_imm()
+        expect_char(']')
+        if accept_char('!') { mode = 0x29800000 }   // pre-index
+    }
+    if imm % scale != 0 || imm / scale < -64 || imm / scale > 63 { asm_fail("pair offset out of range") }
+    put_insn(mode | opc << 30 | load << 22 | (imm / scale & 0x7F) << 15 | rt2 << 10 | rn << 5 | rt)
+    return 0
+}
+
+// the instruction at ap (its mnemonic is the name id mn)
+fn arm_insn(mn: auto) {
+    let text = name_str(mn)
+    if u8[text] == 'b' && u8[text + 1] == '.' {
+        // b.cond label
+        let cc = cond_of(text + 2)
+        let id = p_sym()
+        add_fix(FK.Branch19, id, sym_add, 0)
+        put_insn(0x54000000 | cc)
+        return 0
+    }
+    if mn >= Mn.count { asm_fail_name("unknown instruction", mn) }
+    switch mn {
+        case Mn.Add, Mn.Adds, Mn.Sub, Mn.Subs {
+            let rd = p_reg()
+            let sf = rx
+            let dsp = was_sp
+            comma()
+            let rn = p_reg()
+            let nsp = was_sp
+            comma()
+            let sub = mn == Mn.Sub || mn == Mn.Subs
+            let s = mn == Mn.Adds || mn == Mn.Subs
+            addsub_rest(sub, s, sf, rd, rn, dsp || nsp)
+        }
+        case Mn.Cmp, Mn.Cmn {
+            let rn = p_reg()
+            let sf = rx
+            let nsp = was_sp
+            comma()
+            addsub_rest(mn == Mn.Cmp, 1, sf, 31, rn, nsp)
+        }
+        case Mn.Mov {
+            let rd = p_reg()
+            let sf = rx
+            let dsp = was_sp
+            comma()
+            if at_imm() {
+                mov_imm(rd, p_imm(), sf)
+            } else {
+                let rm = p_reg()
+                if dsp || was_sp { put_insn(0x11000000 | sf << 31 | rm << 5 | rd) }      // add rd, rm, #0
+                else { put_insn(0x2A0003E0 | sf << 31 | rm << 16 | rd) }               // orr rd, zr, rm
+            }
+        }
+        case Mn.Movz, Mn.Movk, Mn.Movn {
+            let rd = p_reg()
+            let sf = rx
+            comma()
+            let imm = p_imm()
+            let hw = 0
+            if p_shift() {
+                if shift_kind != 0 || shift_amount % 16 != 0 { asm_fail("the shift must be lsl #0/16/32/48") }
+                hw = shift_amount / 16
+            }
+            if imm < 0 || imm > 0xFFFF { asm_fail("immediate out of range (0..65535)") }
+            let base = 0x52800000
+            if mn == Mn.Movk { base = 0x72800000 }
+            if mn == Mn.Movn { base = 0x12800000 }
+            put_insn(base | sf << 31 | hw << 21 | imm << 5 | rd)
+        }
+        case Mn.Neg, Mn.Mvn {
+            let rd = p_reg()
+            let sf = rx
+            comma()
+            let rm = p_reg()
+            if mn == Mn.Neg { put_insn(0x4B0003E0 | sf << 31 | rm << 16 | rd) }
+            else { put_insn(0x2A2003E0 | sf << 31 | rm << 16 | rd) }
+        }
+        case Mn.And, Mn.Ands, Mn.Orr, Mn.Eor {
+            let rd = p_reg()
+            let sf = rx
+            comma()
+            let rn = p_reg()
+            comma()
+            if at_imm() { asm_fail("logical immediates are not supported") }
+            let rm = p_reg()
+            p_shift()
+            let base = 0x0A000000
+            if mn == Mn.Ands { base = 0x6A000000 }
+            if mn == Mn.Orr { base = 0x2A000000 }
+            if mn == Mn.Eor { base = 0x4A000000 }
+            put_insn(base | sf << 31 | shift_kind << 22 | rm << 16 | shift_amount << 10 | rn << 5 | rd)
+        }
+        case Mn.Tst {
+            let rn = p_reg()
+            let sf = rx
+            comma()
+            let rm = p_reg()
+            put_insn(0x6A00001F | sf << 31 | rm << 16 | rn << 5)
+        }
+        case Mn.Mul, Mn.Sdiv, Mn.Udiv {
+            let rd = p_reg()
+            let sf = rx
+            comma()
+            let rn = p_reg()
+            comma()
+            let rm = p_reg()
+            let base = 0x1B007C00
+            if mn == Mn.Sdiv { base = 0x1AC00C00 }
+            if mn == Mn.Udiv { base = 0x1AC00800 }
+            put_insn(base | sf << 31 | rm << 16 | rn << 5 | rd)
+        }
+        case Mn.Madd, Mn.Msub {
+            let rd = p_reg()
+            let sf = rx
+            comma()
+            let rn = p_reg()
+            comma()
+            let rm = p_reg()
+            comma()
+            let ra = p_reg()
+            let base = 0x1B000000
+            if mn == Mn.Msub { base = 0x1B008000 }
+            put_insn(base | sf << 31 | rm << 16 | ra << 10 | rn << 5 | rd)
+        }
+        case Mn.Lsl, Mn.Lsr, Mn.Asr {
+            let rd = p_reg()
+            let sf = rx
+            comma()
+            let rn = p_reg()
+            comma()
+            if at_imm() {
+                let sh = p_imm()
+                let size = 32
+                if sf { size = 64 }
+                if sh < 0 || sh >= size { asm_fail("shift out of range") }
+                let base = 0x53000000 | sf << 31 | sf << 22          // ubfm
+                if mn == Mn.Asr { base = 0x13000000 | sf << 31 | sf << 22 }   // sbfm
+                let immr = sh
+                let imms = size - 1
+                if mn == Mn.Lsl {
+                    immr = (size - sh) % size
+                    imms = size - 1 - sh
+                }
+                put_insn(base | immr << 16 | imms << 10 | rn << 5 | rd)
+            } else {
+                let rm = p_reg()
+                let kind = 0
+                if mn == Mn.Lsr { kind = 1 }
+                if mn == Mn.Asr { kind = 2 }
+                put_insn(0x1AC02000 | sf << 31 | rm << 16 | kind << 10 | rn << 5 | rd)
+            }
+        }
+        case Mn.Sxtb, Mn.Sxth, Mn.Sxtw, Mn.Uxtb, Mn.Uxth {
+            let rd = p_reg()
+            let sf = rx
+            comma()
+            let rn = p_reg()
+            let imms = 7
+            if mn == Mn.Sxth || mn == Mn.Uxth { imms = 15 }
+            if mn == Mn.Sxtw { imms = 31 }
+            if mn == Mn.Uxtb || mn == Mn.Uxth { put_insn(0x53000000 | imms << 10 | rn << 5 | rd) }
+            else { put_insn(0x13000000 | sf << 31 | sf << 22 | imms << 10 | rn << 5 | rd) }
+        }
+        case Mn.Cset {
+            let rd = p_reg()
+            let sf = rx
+            comma()
+            let c = expect_ident()
+            let cc = cond_of(name_str(c))
+            put_insn(0x1A9F07E0 | sf << 31 | (cc ^ 1) << 12 | rd)
+        }
+        case Mn.Csel {
+            let rd = p_reg()
+            let sf = rx
+            comma()
+            let rn = p_reg()
+            comma()
+            let rm = p_reg()
+            comma()
+            let c = expect_ident()
+            put_insn(0x1A800000 | sf << 31 | rm << 16 | cond_of(name_str(c)) << 12 | rn << 5 | rd)
+        }
+        case Mn.B, Mn.Bl {
+            let id = p_sym()
+            add_fix(FK.Branch26, id, sym_add, 0)
+            if mn == Mn.B { put_insn(0x14000000) } else { put_insn(0x94000000) }
+        }
+        case Mn.Br, Mn.Blr {
+            let rn = p_reg()
+            if mn == Mn.Br { put_insn(0xD61F0000 | rn << 5) } else { put_insn(0xD63F0000 | rn << 5) }
+        }
+        case Mn.Ret {
+            let rn = 30
+            if !at_end() { rn = p_reg() }
+            put_insn(0xD65F0000 | rn << 5)
+        }
+        case Mn.Cbz, Mn.Cbnz {
+            let rt = p_reg()
+            let sf = rx
+            comma()
+            let id = p_sym()
+            add_fix(FK.Branch19, id, sym_add, 0)
+            if mn == Mn.Cbz { put_insn(0x34000000 | sf << 31 | rt) } else { put_insn(0x35000000 | sf << 31 | rt) }
+        }
+        case Mn.Adrp {
+            let rd = p_reg()
+            comma()
+            let id = p_sym()
+            if sym_reloc != 1 { asm_fail("adrp needs symbol@PAGE") }
+            add_fix(FK.Page21, id, sym_add, 0)
+            put_insn(0x90000000 | rd)
+        }
+        case Mn.Ldp, Mn.Stp { load_store_pair(mn == Mn.Ldp) }
+        case Mn.Nop { put_insn(ALIGN_NOP) }
+        default { load_store(mn) }
+    }
+    if !at_end() { asm_fail("unexpected text after the instruction") }
+    return 0
+}
+
+// p2: alignment of the current section to 2^p2 bytes (code is padded with nop)
+fn align_sect(p2: auto) {
+    let s = cur_sect
+    if p2 > 15 { asm_fail("alignment too large") }
+    if p2 > [s + Sect.align] { [s + Sect.align] = p2 }
+    let a = 1 << p2
+    while [s + Sect.length] % a != 0 {
+        let size = [s + Sect.length]
+        if [s + Sect.code] && size % 4 == 0 && size + 4 <= (size + a - 1) / a * a {
+            emit_le(ALIGN_NOP, 4)
+        } else {
+            emit_byte(0)
+        }
+    }
+}
+
+// the hooks of the data directives (asm/core.hla): bytes go straight into the section --------
+
+fn out_byte(v: auto) { emit_byte(v) }
+fn out_value(v: auto, size: auto) { emit_le(v, size) }
+fn out_align(p2: auto) { align_sect(p2) }
+
+fn out_symbol(id: auto, add: auto, size: auto) {
+    if size != 8 { asm_fail("symbol addresses need .quad") }
+    add_fix(FK.Abs64, id, add, 0)
+    emit_le(0, 8)
+}
+
+fn out_space(n: auto, fill: auto) {
+    if [cur_sect + Sect.zerofill] && fill == 0 {
+        [cur_sect + Sect.length] = [cur_sect + Sect.length] + n
+        return 0
+    }
+    for i in 0..n { emit_byte(fill) }
+    return 0
+}
+
+fn mark_global(id: auto) {
+    let a = asym_at(id)
+    [a + ASym.global] = 1
+}
+
+// section directives ---------------------------------------------------------------------
+
+// Mach-O section type and attributes, as the assembler gives them (type: the third part of
+// .section, or 0)
+fn sect_flags(seg: auto, name: auto, kind: auto) {
+    if cstr_same(seg, "__TEXT") && cstr_same(name, "__text") { return 0x80000400 }
+    if kind != 0 {
+        if cstr_same(kind, "cstring_literals") { return 2 }
+        if cstr_same(kind, "4byte_literals") { return 3 }
+        if cstr_same(kind, "8byte_literals") { return 4 }
+        if cstr_same(kind, "16byte_literals") { return 0xE }
+        if cstr_same(kind, "zerofill") { return 1 }
+        if cstr_same(kind, "pure_instructions") { return 0x80000400 }
+    }
+    if cstr_same(name, "__cstring") { return 2 }
+    if cstr_same(name, "__literal8") { return 4 }
+    if cstr_same(name, "__literal4") { return 3 }
+    if cstr_same(name, "__literal16") { return 0xE }
+    if cstr_same(name, "__bss") || cstr_same(name, "__common") { return 1 }
+    return 0
+}
+
+fn macho_section(seg: auto, name: auto, kind: auto) {
+    let flags = sect_flags(seg, name, kind)
+    let s = get_section(seg, name, flags)
+    if [s + Sect.length] == 0 && [s + Sect.align] == 0 {
+        [s + Sect.zerofill] = (flags & 0xFF) == 1
+        [s + Sect.code] = (flags & 0x80000000) != 0
+        if cstr_same(name, "__text") { [s + Sect.align] = 2 }
+    }
+    return s
+}
+
+// the name at ap up to a comma, as a C string (segment and section names: __TEXT, __text)
+fn read_part() {
+    skip_sp()
+    let p = ap
+    while u8[ap] != 0 && u8[ap] != ',' && u8[ap] != ' ' && u8[ap] != '\t' { ap++ }
+    if ap == p { asm_fail("expected a name") }
+    return cstr_from(p, ap - p)
+}
+
+fn arm_directive(name: auto) {
+    let s = name_str(name)
+    if cstr_same(s, ".section") {
+        let seg = read_part()
+        comma()
+        let sect = read_part()
+        let kind = 0
+        if accept_char(',') { kind = read_part() }
+        while accept_char(',') { read_part() }
+        cur_sect = macho_section(seg, sect, kind)
+    } elif cstr_same(s, ".text") {
+        cur_sect = macho_section("__TEXT", "__text", 0)
+    } elif cstr_same(s, ".data") {
+        cur_sect = macho_section("__DATA", "__data", 0)
+    } elif cstr_same(s, ".cstring") {
+        cur_sect = macho_section("__TEXT", "__cstring", "cstring_literals")
+    } elif cstr_same(s, ".const_data") {
+        cur_sect = macho_section("__DATA", "__const", 0)
+    } elif cstr_same(s, ".zerofill") {
+        // .zerofill SEG,SECT,sym,size,align
+        let seg = read_part()
+        comma()
+        let sect = read_part()
+        let z = macho_section(seg, sect, "zerofill")
+        if [z + Sect.zerofill] == 0 { asm_fail("not a zerofill section") }
+        if accept_char(',') {
+            let id = expect_ident()
+            comma()
+            let size = read_number()
+            let p2 = 0
+            if accept_char(',') { p2 = read_number() }
+            if p2 > [z + Sect.align] { [z + Sect.align] = p2 }
+            let a = 1 << p2
+            [z + Sect.length] = ([z + Sect.length] + a - 1) / a * a
+            let saved = cur_sect
+            cur_sect = z
+            define_label(id)
+            cur_sect = saved
+            [z + Sect.length] = [z + Sect.length] + size
+        }
+    } elif cstr_same(s, ".align") {
+        align_sect(read_number())
+    } elif !data_directive(name) {
+        asm_fail_name("unknown directive", name)
+    }
+    if !at_end() { asm_fail("unexpected text after the directive") }
+}
+
+// one line: labels, then a directive or an instruction
+fn arm_line() {
+    loop {
+        if at_end() { return 0 }
+        let save = ap
+        let id = read_ident()
+        if id >= 0 && accept_char(':') {
+            define_label(id)
+            continue
+        }
+        ap = save
+        break
+    }
+    let word = read_ident()
+    if word < 0 { asm_fail("expected an instruction or a directive") }
+    let text = name_str(word)
+    if u8[text] == '.' { arm_directive(word) } else { arm_insn(word) }
+    return 0
+}

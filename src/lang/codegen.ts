@@ -438,7 +438,8 @@ class CodeGen extends CodeGenBase {
     const commutative = ['+', '*', '&', '|', '^'].includes(op);
     if (commutative && lc !== null) { [l, r] = [r, l]; }
     if (this.hasCall(l) && !this.hasCall(r)) this.checkClobber([l, r]);
-    if (this.hasCall(r) && !(commutative && !this.hasCall(l))) {
+    // a commutative call goes first only when it cannot change the other operand (left to right otherwise)
+    if (this.hasCall(r) && !(commutative && !this.hasCall(l) && this.callSafe(l))) {
       this.err('a function call may only be the left-most operand of an expression; assign it to a register first', r.t);
     }
     if (commutative && this.hasCall(r)) { [l, r] = [r, l]; }
@@ -1046,7 +1047,9 @@ class CodeGen extends CodeGenBase {
     // memory targets: compute a non-trivial value first, then the address
     const ty = this.targetType(target, value, t);
     const fp = ty === 'f32' || ty === 'f64';
-    const bits: 32 | 64 = memSize(ty) === 8 ? 64 : 32;
+    // 8/16/32-bit memory: computed in 32-bit registers unless the low bits need the high ones
+    const narrowOk = this.lowBitsOnly(value) && (!binop || ['+', '-', '*', '&', '|', '^'].includes(binop));
+    const bits: 32 | 64 = memSize(ty) === 8 || !narrowOk ? 64 : 32;
     if (!binop) {
       const vop = this.operand(value);
       let src: string;

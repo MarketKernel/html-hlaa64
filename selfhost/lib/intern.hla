@@ -1,0 +1,58 @@
+// lib/intern.hla — every name is stored once and known by its number (name id).
+// Programs keep what a name means in their own arrays indexed by the id.
+
+struct Interned {
+    text: ptr       // C string
+    tlen: i64
+    chain: i64      // the next name in the same hash bucket, -1 at the end
+}
+
+const MAX_NAMES = 32768
+const NBUCKETS = 16384                // a power of two
+
+data interned: ptr = 0                // Interned[MAX_NAMES]
+data name_count: i64 = 0
+data buckets: ptr = 0                 // i64[NBUCKETS]: the first name id of a bucket, -1 when empty
+
+fn intern_init() {
+    interned = mem_alloc(MAX_NAMES * Interned.size)
+    buckets = mem_alloc(NBUCKETS * 8)
+    for i in 0..NBUCKETS { [buckets + i * 8] = -1 }
+}
+
+fn name_str(id) { return [interned + id * Interned.size + Interned.text] }
+fn name_len(id) { return [interned + id * Interned.size + Interned.tlen] }
+
+fn name_hash(p, n) {
+    let h = 5381
+    for i in 0..n { h = (h * 33 + u8[p + i]) & 0x7FFFFFFF }
+    return h
+}
+
+// the id of the name made of the n bytes at p (added when new)
+fn intern(p: auto, n: auto) {
+    let h = name_hash(p, n)
+    let slot = buckets + (h & (NBUCKETS - 1)) * 8
+    let id = [slot]
+    while id >= 0 {
+        let rec = interned + id * Interned.size
+        if [rec + Interned.tlen] == n {
+            if mem_same([rec + Interned.text], p, n) { return id }
+        }
+        id = [rec + Interned.chain]
+    }
+    if name_count >= MAX_NAMES { sys_fail("too many names") }
+    id = name_count
+    name_count++
+    let text = cstr_from(p, n)
+    let rec = interned + id * Interned.size
+    [rec + Interned.text] = text
+    [rec + Interned.tlen] = n
+    [rec + Interned.chain] = [slot]
+    [slot] = id
+    return id
+}
+
+fn intern_cstr(s: auto) {
+    return intern(s, cstr_len(s))
+}

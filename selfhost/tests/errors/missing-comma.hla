@@ -1,0 +1,4 @@
+extern puts
+fn main() {
+    puts("a" 5)
+}
