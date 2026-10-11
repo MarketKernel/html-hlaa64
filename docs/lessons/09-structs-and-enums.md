@@ -1,12 +1,20 @@
-# Урок 9. Структуры и перечисления
+# Lesson 9. Structs and enums
 
-## Зачем нужны структуры
+<!-- languages -->
+<h3 align="center">
+<b>🇬🇧 English</b> ·
+<a href="../ru/lessons/09-structs-and-enums.md">🇷🇺 Русский</a>
+</h3>
+<!-- /languages -->
 
-Допустим, мы храним точки на плоскости: у каждой есть `x` и `y`. Можно положить их в память парами:
-`x` по смещению 0, `y` по смещению 8. Тогда для точки по адресу `p` координаты — это `i64[p]` и
-`i64[p + 8]`. Работает, но числа 0 и 8 приходится помнить, а при добавлении нового поля — пересчитывать.
+## Why structs
 
-**Структура** описывает такую раскладку один раз, а смещения считает транслятор:
+Suppose we store points on a plane: each has an `x` and a `y`. We can put them in memory in pairs:
+`x` at offset 0, `y` at offset 8. Then for a point at address `p` the coordinates are `i64[p]` and
+`i64[p + 8]`. It works, but you have to remember the numbers 0 and 8, and recompute them when you
+add a new field.
+
+A **struct** describes such a layout once, and the translator computes the offsets:
 
 ```hla
 extern printf(fmt, ...)
@@ -17,18 +25,19 @@ struct Point {
 }
 
 fn main() {
-    printf("Point.x = %ld, Point.y = %ld, размер = %ld\n", Point.x, Point.y, sizeof(Point))
+    printf("Point.x = %ld, Point.y = %ld, size = %ld\n", Point.x, Point.y, sizeof(Point))
 }
 ```
 
 ```text
-Point.x = 0, Point.y = 8, размер = 16
+Point.x = 0, Point.y = 8, size = 16
 ```
 
-В HLA64 структура — это не новый «тип переменной», а набор **констант-смещений**: `Point.x`, `Point.y`
-и `Point.size` (то же, что `sizeof(Point)`). Так структуры и устроены на уровне процессора.
+In HLA64 a struct is not a new "variable type" but a set of **offset constants**: `Point.x`,
+`Point.y` and `Point.size` (the same as `sizeof(Point)`). That's exactly how structs work at the
+processor level.
 
-## Массив структур
+## An array of structs
 
 ```hla
 extern printf(fmt, ...)
@@ -38,11 +47,11 @@ struct Point {
     y: i64
 }
 
-data points: Point[4]              // 4 точки по 16 байт, заполнены нулями
+data points: Point[4]              // 4 points of 16 bytes each, filled with zeros
 
 fn main() {
     for i in 0..4 {
-        let p = &points[i]         // адрес i-й точки: начало + i * 16
+        let p = &points[i]         // address of the i-th point: start + i * 16
         [p + Point.x] = i * 10
         [p + Point.y] = i * i
     }
@@ -60,21 +69,21 @@ points[2] = (20, 4)
 points[3] = (30, 9)
 ```
 
-`[p + Point.y]` без типа читает 8 байт — для полей `i64` этого достаточно. Для полей другого размера
-пишите тип: `i32[p + Item.qty]`, `u8[p + Item.flags]`.
+`[p + Point.y]` without a type reads 8 bytes — that's enough for `i64` fields. For fields of other
+sizes, write the type: `i32[p + Item.qty]`, `u8[p + Item.flags]`.
 
-## Выравнивание
+## Alignment
 
-Процессору удобнее, когда число из 8 байт лежит по адресу, кратному 8. Поэтому транслятор
-**выравнивает** поля: перед полем может оказаться пустое место.
+The processor prefers an 8-byte number to lie at an address that is a multiple of 8. So the
+translator **aligns** fields: there may be empty space before a field.
 
 ```hla
 extern printf(fmt, ...)
 
 struct Item {
-    flags: u8          // смещение 0, 1 байт
-    count: i32         // смещение 4  (1..3 — пустые байты)
-    price: i64         // смещение 8
+    flags: u8          // offset 0, 1 byte
+    count: i32         // offset 4  (1..3 are empty bytes)
+    price: i64         // offset 8
 }
 
 fn main() {
@@ -86,10 +95,10 @@ fn main() {
 flags=0 count=4 price=8 size=16
 ```
 
-## Функции, работающие со структурами
+## Functions that work with structs
 
-Структуру передают в функцию по адресу. Пример — склад товаров, у каждого есть название (адрес строки),
-количество и цена:
+A struct is passed to a function by address. Here's an example — a warehouse of products, each
+with a name (a string address), a quantity and a price:
 
 ```hla
 extern printf(fmt, ...)
@@ -97,7 +106,7 @@ extern printf(fmt, ...)
 struct Product {
     name: ptr
     qty: i32
-    price: i64          // цена в копейках
+    price: i64          // price in cents
 }
 
 data stock: Product[3]
@@ -115,33 +124,33 @@ fn total_value(p) {
 }
 
 fn main() {
-    set_product(&stock[0], "карандаш", 120, 1550)
-    set_product(&stock[1], "тетрадь", 40, 8900)
-    set_product(&stock[2], "ластик", 75, 2000)
+    set_product(&stock[0], "pencil", 120, 1550)
+    set_product(&stock[1], "notebook", 40, 8900)
+    set_product(&stock[2], "eraser", 75, 2000)
     let sum = 0
     for i in 0..3 {
         let p = &stock[i]
         let value = total_value(p)
         x9 = [p + Product.name]
-        printf("%s: %d шт. на %ld коп.\n", x9, i32[p + Product.qty], value)
+        printf("%s: %d pcs worth %ld cents\n", x9, i32[p + Product.qty], value)
         sum += value
     }
-    printf("итого: %ld руб. %ld коп.\n", sum / 100, sum % 100)
+    printf("total: %ld dollars %ld cents\n", sum / 100, sum % 100)
 }
 ```
 
 ```text
-карандаш: 120 шт. на 186000 коп.
-тетрадь: 40 шт. на 356000 коп.
-ластик: 75 шт. на 150000 коп.
-итого: 6920 руб. 0 коп.
+pencil: 120 pcs worth 186000 cents
+notebook: 40 pcs worth 356000 cents
+eraser: 75 pcs worth 150000 cents
+total: 6920 dollars 0 cents
 ```
 
-`%d` печатает 32-битное число — как раз такое поле `qty`.
+`%d` prints a 32-bit number — exactly what the `qty` field is.
 
-## Вложенные структуры
+## Nested structs
 
-Поле может само быть структурой. Смещение вложенного поля — сумма смещений:
+A field can itself be a struct. The offset of a nested field is the sum of the offsets:
 
 ```hla
 extern printf(fmt, ...)
@@ -166,20 +175,20 @@ fn main() {
     [p + Rect.top_left + Point.y] = 3
     [p + Rect.bottom_right + Point.x] = 12
     [p + Rect.bottom_right + Point.y] = 8
-    printf("размер Rect: %ld, площадь: %ld\n", sizeof(Rect), area(p))
+    printf("Rect size: %ld, area: %ld\n", sizeof(Rect), area(p))
 }
 ```
 
 ```text
-размер Rect: 32, площадь: 50
+Rect size: 32, area: 50
 ```
 
-Поля можно перечислять и в одну строку через запятую, как в `Point`.
+Fields can also be listed on one line, separated by commas, as in `Point`.
 
-## Связный список
+## A linked list
 
-Элемент списка хранит значение и **адрес следующего элемента**; у последнего адрес равен нулю.
-Чтобы пройти список, переходим по адресам, пока не встретим ноль:
+A list element stores a value and the **address of the next element**; the last one has address
+zero. To walk the list, we follow the addresses until we hit zero:
 
 ```hla
 extern printf(fmt, ...)
@@ -192,7 +201,7 @@ struct Node {
 data nodes: Node[5]
 
 fn main() {
-    // связать элементы в обратном порядке: 4 -> 3 -> 2 -> 1 -> 0
+    // link the elements in reverse order: 4 -> 3 -> 2 -> 1 -> 0
     for i in 0..5 {
         let n = &nodes[i]
         [n + Node.value] = (i + 1) * 100
@@ -203,10 +212,10 @@ fn main() {
             [n + Node.next] = prev
         }
     }
-    let node = &nodes[4]                 // голова списка
+    let node = &nodes[4]                 // head of the list
     while node != 0 {
         printf("%ld ", [node + Node.value])
-        node = [node + Node.next]        // перейти к следующему
+        node = [node + Node.next]        // go to the next one
     }
     printf("\n")
 }
@@ -216,9 +225,9 @@ fn main() {
 500 400 300 200 100 
 ```
 
-## Перечисления
+## Enums
 
-`enum` даёт имена последовательным числам — удобно для состояний, видов, направлений:
+`enum` gives names to consecutive numbers — handy for states, kinds, directions:
 
 ```hla
 extern printf(fmt, ...)
@@ -226,7 +235,7 @@ extern printf(fmt, ...)
 enum Light { Red, Yellow, Green }
 enum Http { Ok = 200, NotFound = 404, Teapot = 418 }
 
-rodata light_names: ptr = ["красный", "жёлтый", "зелёный"]
+rodata light_names: ptr = ["red", "yellow", "green"]
 
 fn next_light(l) {
     if l == Light.Red { return Light.Green }
@@ -241,22 +250,22 @@ fn main() {
         printf("%s ", x9)
         l = next_light(l)
     }
-    printf("\nвсего сигналов: %ld, код чайника: %ld\n", Light.count, Http.Teapot)
+    printf("\ntotal lights: %ld, teapot code: %ld\n", Light.count, Http.Teapot)
 }
 ```
 
 ```text
-красный зелёный жёлтый красный 
-всего сигналов: 3, код чайника: 418
+red green yellow red 
+total lights: 3, teapot code: 418
 ```
 
-Значения идут с нуля по порядку; можно задать своё (`Ok = 200`), следующие продолжат с него.
-`Light.count` — количество (точнее, значение после последнего).
+Values go in order starting from zero; you can set your own (`Ok = 200`), and the following ones
+continue from it. `Light.count` is the count (more precisely, the value after the last one).
 
-## Упражнения
+## Exercises
 
-1. Опишите структуру `Student { age: u8, grade: i32, id: i64 }` и напечатайте смещения полей и размер.
-   Объясните, откуда взялись пустые байты.
-2. Сделайте массив из 3 прямоугольников `Rect` и найдите тот, у которого площадь наибольшая.
+1. Describe the struct `Student { age: u8, grade: i32, id: i64 }` and print the field offsets and
+   the size. Explain where the empty bytes came from.
+2. Make an array of 3 `Rect` rectangles and find the one with the largest area.
 
-Дальше: [Урок 10. Библиотека C и система](10-c-library-and-syscalls.md)
+Next: [Lesson 10. The C library and the system](10-c-library-and-syscalls.md)

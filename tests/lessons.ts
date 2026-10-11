@@ -1,4 +1,4 @@
-// Checks every complete program in docs/lessons/*.md.
+// Checks every complete program in docs/lessons/*.md and its Russian copy docs/ru/lessons/*.md.
 // A program is an ```hla block that contains `fn main`; if the next block is
 // ```text, it is the expected output. With --update the text blocks are
 // (re)written from the actual output of the emulator.
@@ -19,11 +19,13 @@ import { runMachO } from '../src/emu/macho-loader.ts';
 const update = process.argv.includes('--update');
 const native = process.argv.includes('--native') && process.platform === 'darwin';
 const dir = 'docs/lessons';
+const dirs = [dir, 'docs/ru/lessons'];
 const tmp = mkdtempSync(join(tmpdir(), 'hla-lessons-'));
 let programs = 0, failures = 0, n = 0;
 
-for (const file of readdirSync(dir).filter((f) => f.endsWith('.md')).sort()) {
-  const path = join(dir, file);
+for (const d of dirs)
+for (const file of readdirSync(d).filter((f) => f.endsWith('.md')).sort()) {
+  const path = join(d, file);
   const md = readFileSync(path, 'utf8');
   const re = /```hla\n([\s\S]*?)```(\n*)(```text\n([\s\S]*?)```)?/g;
   let out = '';
@@ -34,7 +36,7 @@ for (const file of readdirSync(dir).filter((f) => f.endsWith('.md')).sort()) {
     if (!/\bfn main\b/.test(code)) continue;
     programs++;
     const line = md.slice(0, m.index).split('\n').length;
-    const where = `${file}:${line}`;
+    const where = `${path}:${line}`;
     let got: string;
     try {
       const bin = assembleExecutable(compile(code).asm, { name: 'lesson' });
@@ -68,7 +70,7 @@ for (const file of readdirSync(dir).filter((f) => f.endsWith('.md')).sort()) {
   if (update) writeFileSync(path, out + md.slice(last));
 }
 // ------------------------------------------------------------------ lesson directories
-const allMd = readdirSync(dir).filter((f) => f.endsWith('.md')).map((f) => readFileSync(join(dir, f), 'utf8')).join('\n');
+const allMd = dirs.flatMap((d) => readdirSync(d).filter((f) => f.endsWith('.md')).map((f) => readFileSync(join(d, f), 'utf8'))).join('\n');
 let builds = 0;
 for (const sub of readdirSync(dir)) {
   const d = join(dir, sub);

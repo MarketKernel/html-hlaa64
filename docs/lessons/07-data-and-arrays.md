@@ -1,13 +1,20 @@
-# Урок 7. Данные и массивы
+# Lesson 7. Data and arrays
 
-Регистров всего три десятка, а памяти — гигабайты. Всё, что не помещается в регистры
-(таблицы, тексты, большие массивы), хранится в **памяти**. Память — это длинная лента байтов,
-у каждого байта есть номер — **адрес**.
+<!-- languages -->
+<h3 align="center">
+<b>🇬🇧 English</b> ·
+<a href="../ru/lessons/07-data-and-arrays.md">🇷🇺 Русский</a>
+</h3>
+<!-- /languages -->
 
-## Глобальные переменные
+There are only about thirty registers, but gigabytes of memory. Everything that doesn't fit in
+registers (tables, texts, large arrays) is stored in **memory**. Memory is a long tape of bytes,
+and every byte has a number — its **address**.
 
-`data` объявляет переменную в памяти программы. Она существует всё время работы программы и видна
-из всех функций.
+## Global variables
+
+`data` declares a variable in the program's memory. It exists for the whole time the program runs
+and is visible from all functions.
 
 ```hla
 extern printf(fmt, ...)
@@ -30,23 +37,23 @@ fn main() {
 counter = 3
 ```
 
-Запись `counter += 1` выглядит как работа с регистром, но транслятор делает три шага: загружает
-значение из памяти в регистр, прибавляет единицу и записывает обратно.
+`counter += 1` looks like working with a register, but the translator does three steps: it loads
+the value from memory into a register, adds one and writes it back.
 
-## Типы данных
+## Data types
 
-У переменной в памяти есть тип — сколько байт она занимает и со знаком ли она:
+A variable in memory has a type — how many bytes it takes and whether it is signed:
 
-| тип | байт | диапазон |
+| type | bytes | range |
 |---|---|---|
 | `i8` / `u8` | 1 | −128…127 / 0…255 |
 | `i16` / `u16` | 2 | −32 768…32 767 / 0…65 535 |
-| `i32` / `u32` | 4 | ±2.1 млрд / 0…4.2 млрд |
+| `i32` / `u32` | 4 | ±2.1 billion / 0…4.2 billion |
 | `i64` / `u64` | 8 | ±9.2·10¹⁸ / 0…1.8·10¹⁹ |
-| `ptr` | 8 | адрес |
-| `f32` / `f64` | 4 / 8 | дробные числа (урок 11) |
+| `ptr` | 8 | address |
+| `f32` / `f64` | 4 / 8 | fractional numbers (lesson 11) |
 
-`i` — со знаком (integer), `u` — без знака (unsigned), число — количество бит.
+`i` means signed (integer), `u` means unsigned, and the number is the number of bits.
 
 ```hla
 extern printf(fmt, ...)
@@ -56,7 +63,7 @@ data temp: i8 = -40
 
 fn main() {
     printf("small = %ld, temp = %ld\n", small, temp)
-    small += 100                 // 300 не помещается в байт: остаётся 300 - 256 = 44
+    small += 100                 // 300 doesn't fit in a byte: 300 - 256 = 44 remains
     printf("small = %ld\n", small)
 }
 ```
@@ -66,10 +73,10 @@ small = 200, temp = -40
 small = 44
 ```
 
-## Массивы
+## Arrays
 
-Массив — несколько значений одного типа подряд. Тип записывается как `тип[количество]`, элементы
-нумеруются с нуля.
+An array is several values of the same type in a row. The type is written as `type[count]`, and
+elements are numbered from zero.
 
 ```hla
 extern printf(fmt, ...)
@@ -77,31 +84,31 @@ extern printf(fmt, ...)
 data scores: i32[5] = [72, 95, 64, 88, 79]
 
 fn main() {
-    printf("первый: %ld, последний: %ld\n", scores[0], scores[4])
-    scores[2] = 70                         // исправили оценку
+    printf("first: %ld, last: %ld\n", scores[0], scores[4])
+    scores[2] = 70                         // corrected a score
     let sum = 0
     for i in 0..len(scores) {              // len(scores) = 5
         sum += scores[i]
     }
-    printf("сумма: %ld, среднее: %ld\n", sum, sum / len(scores))
+    printf("sum: %ld, average: %ld\n", sum, sum / len(scores))
 }
 ```
 
 ```text
-первый: 72, последний: 79
-сумма: 404, среднее: 80
+first: 72, last: 79
+sum: 404, average: 80
 ```
 
-- `len(массив)` — количество элементов, `sizeof(массив)` — размер в байтах (здесь 5 · 4 = 20).
-  Оба считаются при трансляции.
-- Если элементов в `[ ]` меньше, чем размер массива, остальные будут нулями.
-- Массив без значений (`data buffer: u8[1000]`) целиком заполнен нулями и не занимает места в файле программы.
+- `len(array)` is the number of elements, `sizeof(array)` is the size in bytes (here 5 · 4 = 20).
+  Both are computed at translation time.
+- If there are fewer elements in `[ ]` than the array size, the rest will be zeros.
+- An array without values (`data buffer: u8[1000]`) is entirely filled with zeros and takes no space in the program file.
 
-**Важно:** выход за границы массива процессор не проверяет. `scores[10] = 1` запишет число куда-то
-в соседнюю память. Если индекс — константа, транслятор предупредит, но в цикле следить за границами
-нужно самим.
+**Important:** the processor doesn't check for going past the end of an array. `scores[10] = 1`
+will write the number somewhere into neighboring memory. If the index is a constant, the translator
+will warn you, but in a loop you have to watch the bounds yourself.
 
-## Поиск максимума и сортировка
+## Finding the maximum and sorting
 
 ```hla
 extern printf(fmt, ...)
@@ -125,9 +132,9 @@ fn main() {
             where = i
         }
     }
-    printf("максимум %ld на позиции %ld\n", best, where)
+    printf("maximum %ld at position %ld\n", best, where)
 
-    // сортировка пузырьком: соседей в неправильном порядке меняем местами
+    // bubble sort: swap neighbors that are in the wrong order
     for pass in 0..N - 1 {
         for i in 0..N - 1 - pass {
             if values[i] > values[i + 1] {
@@ -142,14 +149,14 @@ fn main() {
 ```
 
 ```text
-максимум 71 на позиции 2
+maximum 71 at position 2
 -40 -2 0 8 15 34 71 71 
 ```
 
-## Строки
+## Strings
 
-Строка — это массив байтов (`u8`) с нулём в конце, по которому библиотечные функции понимают,
-где она заканчивается. В `printf` строку печатает `%s`.
+A string is an array of bytes (`u8`) with a zero at the end, which library functions use to tell
+where it ends. In `printf`, a string is printed with `%s`.
 
 ```hla
 extern printf(fmt, ...)
@@ -157,9 +164,9 @@ extern printf(fmt, ...)
 data name = "Ada Lovelace"
 
 fn main() {
-    printf("имя: %s, длина: %ld\n", name, len(name))   // len не считает завершающий ноль
-    printf("первая буква: %c\n", name[0])
-    // в верхний регистр: у латинских строчных букв коды 'a'..'z', разница с заглавными — 32
+    printf("name: %s, length: %ld\n", name, len(name))   // len doesn't count the terminating zero
+    printf("first letter: %c\n", name[0])
+    // to upper case: lowercase Latin letters have codes 'a'..'z', the difference from capitals is 32
     for i in 0..len(name) {
         if name[i] >= 'a' && name[i] <= 'z' {
             name[i] = name[i] - 32
@@ -170,55 +177,55 @@ fn main() {
 ```
 
 ```text
-имя: Ada Lovelace, длина: 12
-первая буква: A
+name: Ada Lovelace, length: 12
+first letter: A
 ADA LOVELACE
 ```
 
-`len` строки — это количество **байтов** без завершающего нуля. Для латиницы это то же, что число
-букв, а русская буква в кодировке UTF-8 занимает 2 байта: `len("кот")` равно 6.
+The `len` of a string is the number of **bytes** without the terminating zero. For Latin text this
+is the same as the number of letters, but a Cyrillic letter takes 2 bytes in UTF-8: `len("кот")` is 6.
 
-Когда массив (или строка) используется как значение — например, передаётся в `printf`, —
-передаётся его **адрес**, а не содержимое.
+When an array (or a string) is used as a value — for example, passed to `printf` — its **address**
+is passed, not its contents.
 
-## Данные только для чтения
+## Read-only data
 
-`rodata` — то же, что `data`, но менять нельзя: транслятор не даст записать, а процессор держит такие
-данные в защищённой от записи памяти. Хорошо подходит для таблиц и текстов.
+`rodata` is the same as `data`, but it can't be changed: the translator won't let you write to it,
+and the processor keeps such data in write-protected memory. It's a good fit for tables and texts.
 
 ```hla
 extern printf(fmt, ...)
 
 rodata days_in_month: u8[12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-rodata month_names: ptr = ["январь", "февраль", "март", "апрель", "май", "июнь",
-    "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"]
+rodata month_names: ptr = ["January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December"]
 
 fn main() {
     let total = 0
     for m in 0..12 {
         total += days_in_month[m]
     }
-    printf("дней в году: %ld\n", total)
-    x9 = month_names[9]                        // адрес десятой строки
-    printf("десятый месяц — %s, в нём %ld дней\n", x9, days_in_month[9])
+    printf("days in a year: %ld\n", total)
+    x9 = month_names[9]                        // address of the tenth string
+    printf("the tenth month is %s, it has %ld days\n", x9, days_in_month[9])
 }
 ```
 
 ```text
-дней в году: 365
-десятый месяц — октябрь, в нём 31 дней
+days in a year: 365
+the tenth month is October, it has 31 days
 ```
 
-`month_names` — массив **адресов** строк (тип `ptr`). Каждая строка лежит в памяти отдельно,
-а в массиве — только её адрес.
+`month_names` is an array of string **addresses** (type `ptr`). Each string lies in memory
+separately, and the array holds only its address.
 
-## Пример: гистограмма
+## Example: a histogram
 
 ```hla
 extern printf(fmt, ...)
 
 rodata rolls: u8[20] = [3, 6, 1, 3, 4, 6, 2, 3, 5, 3, 6, 1, 4, 3, 2, 6, 3, 5, 4, 3]
-data counts: i64[7]          // счётчики для значений 1..6 (нулевой не используем)
+data counts: i64[7]          // counters for values 1..6 (index zero is unused)
 
 fn main() {
     for i in 0..len(rolls) {
@@ -242,28 +249,28 @@ fn main() {
 6: #### (4)
 ```
 
-## Что делает процессор
+## What the processor does
 
-Чтобы прочитать `scores[i]`, процессору нужен адрес: адрес начала массива плюс `i · 4` (элементы по
-4 байта). Сначала двумя командами получается адрес массива, потом одна команда загрузки сама
-умножает индекс на 4 (сдвигом `lsl #2`) и прибавляет:
+To read `scores[i]`, the processor needs an address: the address of the start of the array plus
+`i · 4` (the elements are 4 bytes each). First two instructions get the address of the array, then
+a single load instruction multiplies the index by 4 itself (with the `lsl #2` shift) and adds it:
 
 ```asm
-    adrp x17, _scores@PAGE                 // страница памяти, где лежит массив
-    add x17, x17, _scores@PAGEOFF          // + смещение внутри страницы = адрес scores
-    ldrsw x16, [x17, x20, lsl #2]          // x16 = 32-битное число по адресу x17 + i*4
+    adrp x17, _scores@PAGE                 // the memory page where the array lies
+    add x17, x17, _scores@PAGEOFF          // + offset within the page = address of scores
+    ldrsw x16, [x17, x20, lsl #2]          // x16 = 32-bit number at address x17 + i*4
 ```
 
-`ldrsw` — «загрузить 32-битное слово со знаком и расширить до 64 бит».
+`ldrsw` means "load a signed 32-bit word and extend it to 64 bits".
 
-## Упражнения
+## Exercises
 
-1. Посчитайте, сколько в массиве отрицательных чисел.
-2. Разверните массив задом наперёд (первый элемент меняется с последним и т. д.).
-3. Посчитайте количество гласных `a e i o u` в строке `"programming in assembly"`.
+1. Count how many negative numbers there are in an array.
+2. Reverse an array (the first element is swapped with the last, and so on).
+3. Count the vowels `a e i o u` in the string `"programming in assembly"`.
 
 <details>
-<summary>Решение упражнения 2</summary>
+<summary>Solution to exercise 2</summary>
 
 ```hla
 extern printf(fmt, ...)
@@ -291,4 +298,4 @@ fn main() {
 
 </details>
 
-Дальше: [Урок 8. Память и указатели](08-memory-and-pointers.md)
+Next: [Lesson 8. Memory and pointers](08-memory-and-pointers.md)

@@ -1,34 +1,41 @@
-# Урок 10. Библиотека C и система
+# Lesson 10. The C library and the system
 
-В macOS вместе с системой поставляется **libSystem** — библиотека с тысячами готовых функций языка C:
-печать, строки, память, математика, сортировка. HLA64 вызывает их напрямую, по тем же правилам,
-что и свои функции: аргументы в `x0 … x7`, результат в `x0`.
+<!-- languages -->
+<h3 align="center">
+<b>🇬🇧 English</b> ·
+<a href="../ru/lessons/10-c-library-and-syscalls.md">🇷🇺 Русский</a>
+</h3>
+<!-- /languages -->
 
-## Объявление: `extern`
+macOS ships with **libSystem** — a library with thousands of ready-made C functions: printing,
+strings, memory, math, sorting. HLA64 calls them directly, following the same rules as its own
+functions: arguments in `x0 … x7`, the result in `x0`.
+
+## Declaring them: `extern`
 
 ```hla
-extern puts, putchar, strlen          // несколько через запятую
-extern printf(fmt, ...)               // функция с переменным числом аргументов
+extern puts, putchar, strlen          // several, separated by commas
+extern printf(fmt, ...)               // a function with a variable number of arguments
 ```
 
-Многоточие нужно указать для функций вроде `printf`, у которых количество аргументов не фиксировано:
-на Apple ARM64 такие аргументы передаются не в регистрах, а через стек, и транслятор должен об этом знать.
-Перед `...` перечисляются обязательные параметры (их имена ни на что не влияют).
+The ellipsis is required for functions like `printf` whose number of arguments isn't fixed:
+on Apple ARM64 such arguments are passed on the stack rather than in registers, and the translator needs to know that.
+The required parameters are listed before `...` (their names don't matter).
 
-## `printf` подробнее
+## More on `printf`
 
-| шаблон | что печатает | пример |
+| format | what it prints | example |
 |---|---|---|
-| `%ld` | 64-битное целое со знаком | `-42` |
-| `%lu` | 64-битное без знака | `18446744073709551615` |
-| `%d` | 32-битное целое (`w`-регистры, `i32`) | `7` |
-| `%lx`, `%lX` | шестнадцатеричное | `ff`, `FF` |
-| `%c` | символ по коду | `A` |
-| `%s` | строка по адресу | `hello` |
-| `%f`, `%.2f` | дробное (урок 11) | `3.14` |
-| `%%` | знак процента | `%` |
+| `%ld` | 64-bit signed integer | `-42` |
+| `%lu` | 64-bit unsigned | `18446744073709551615` |
+| `%d` | 32-bit integer (`w` registers, `i32`) | `7` |
+| `%lx`, `%lX` | hexadecimal | `ff`, `FF` |
+| `%c` | character by its code | `A` |
+| `%s` | string at an address | `hello` |
+| `%f`, `%.2f` | fractional number (lesson 11) | `3.14` |
+| `%%` | percent sign | `%` |
 
-Между `%` и буквой можно задать ширину поля:
+You can set a field width between `%` and the letter:
 
 ```hla
 extern printf(fmt, ...)
@@ -45,7 +52,7 @@ fn main() {
 [hi] [      hi] [hi      ] [abc]
 ```
 
-## Работа со строками
+## Working with strings
 
 ```hla
 extern printf(fmt, ...)
@@ -56,32 +63,32 @@ data buffer: u8[64]
 fn main() {
     strcpy(buffer, "Hello")
     strcat(buffer, ", HLA64")
-    printf("%s (%ld символов)\n", buffer, strlen(buffer))
+    printf("%s (%ld characters)\n", buffer, strlen(buffer))
 
-    w9 = strcmp("apple", "banana")         // < 0: первая строка раньше по алфавиту
-    printf("strcmp: %s\n", w9 < 0 ? "apple раньше" : "banana раньше")
+    w9 = strcmp("apple", "banana")         // < 0: the first string comes earlier alphabetically
+    printf("strcmp: %s\n", w9 < 0 ? "apple comes first" : "banana comes first")
 
-    w10 = atoi("1234")                     // текст -> число
+    w10 = atoi("1234")                     // text -> number
     printf("1234 + 1 = %d\n", w10 + 1)
 }
 ```
 
 ```text
-Hello, HLA64 (12 символов)
-strcmp: apple раньше
+Hello, HLA64 (12 characters)
+strcmp: apple comes first
 1234 + 1 = 1235
 ```
 
-**Важная деталь.** В языке C тип `int` — 32-битный. Функции, которые возвращают `int` (`strcmp`, `atoi`,
-`putchar` и многие другие), кладут результат в `w0` — младшие 32 бита регистра `x0`, — а старшие биты
-`x0` могут содержать что угодно. Поэтому такой результат сохраняйте в `w`-регистр (`w9 = strcmp(...)`)
-и сравнивайте в 32 битах. Функции, возвращающие размеры и адреса (`strlen`, `malloc`), отдают полные
-64 бита — их результат можно класть куда угодно.
+**An important detail.** In C the `int` type is 32 bits. Functions that return `int` (`strcmp`, `atoi`,
+`putchar` and many others) put the result in `w0` — the low 32 bits of `x0` — and the upper bits of
+`x0` may contain anything. So store such a result in a `w` register (`w9 = strcmp(...)`)
+and compare it in 32 bits. Functions that return sizes and addresses (`strlen`, `malloc`) return the full
+64 bits — their result can go anywhere.
 
-## Динамическая память: `malloc` и `free`
+## Dynamic memory: `malloc` and `free`
 
-`data` фиксирует размер массивов заранее. Если размер узнаётся только во время работы, память можно
-попросить у системы: `malloc(n)` выделяет `n` байт и возвращает их адрес, `free(p)` возвращает обратно.
+`data` fixes the size of arrays in advance. If the size is only known while the program runs, you can
+ask the system for memory: `malloc(n)` allocates `n` bytes and returns their address, `free(p)` gives them back.
 
 ```hla
 extern printf(fmt, ...)
@@ -89,9 +96,9 @@ extern malloc, free
 
 fn main() {
     let count = 10
-    let squares = malloc(count * 8)        // 10 чисел по 8 байт
+    let squares = malloc(count * 8)        // 10 numbers of 8 bytes each
     if squares == 0 {
-        printf("не хватило памяти\n")
+        printf("out of memory\n")
         return 1
     }
     for i in 0..count {
@@ -109,13 +116,13 @@ fn main() {
 0 1 4 9 16 25 36 49 64 81 
 ```
 
-`return 1` из `main` завершает программу с кодом 1 — так принято сообщать об ошибке. Код последней
-программы в терминале можно узнать командой `echo $?`.
+`return 1` from `main` exits the program with code 1 — the usual way to report an error. You can see
+the exit code of the last program in the terminal with `echo $?`.
 
-## Указатели на функции
+## Function pointers
 
-Функция тоже лежит в памяти, и у неё есть адрес. Его можно положить в переменную и потом вызвать
-функцию по адресу:
+A function also lives in memory, and it has an address. You can put that address in a variable and
+later call the function through it:
 
 ```hla
 extern printf(fmt, ...)
@@ -124,12 +131,12 @@ fn add(a, b) { return a + b }
 fn sub(a, b) { return a - b }
 fn mul(a, b) { return a * b }
 
-rodata ops: ptr = [&add, &sub, &mul]       // таблица адресов функций
+rodata ops: ptr = [&add, &sub, &mul]       // a table of function addresses
 rodata names: ptr = ["+", "-", "*"]
 
 fn main() {
-    let op = add                           // имя функции без скобок — её адрес
-    printf("op(3, 4) = %ld\n", op(3, 4))   // вызов по адресу из переменной
+    let op = add                           // a function name without parentheses is its address
+    printf("op(3, 4) = %ld\n", op(3, 4))   // call through the address stored in a variable
 
     for i in 0..3 {
         let f = ops[i]
@@ -146,11 +153,11 @@ op(3, 4) = 7
 20 * 5 = 100
 ```
 
-## Сортировка `qsort` с функцией сравнения
+## Sorting with `qsort` and a comparison function
 
-`qsort` из библиотеки C сортирует массив любых элементов. Как сравнивать элементы, она не знает —
-и просит передать **функцию сравнения**. `qsort` будет сама вызывать нашу функцию, передавая
-адреса двух элементов; функция возвращает отрицательное число, ноль или положительное.
+`qsort` from the C library sorts an array of any kind of elements. It doesn't know how to compare
+the elements, so it asks you to pass a **comparison function**. `qsort` calls our function itself,
+passing the addresses of two elements; the function returns a negative number, zero or a positive one.
 
 ```hla
 extern printf(fmt, ...)
@@ -177,52 +184,52 @@ fn show(title) {
 }
 
 fn main() {
-    qsort(values, len(values), 8, ascending)       // массив, количество, размер элемента, функция
-    show("по возрастанию")
+    qsort(values, len(values), 8, ascending)       // array, count, element size, function
+    show("ascending")
     qsort(values, len(values), 8, descending)
-    show("по убыванию")
+    show("descending")
 }
 ```
 
 ```text
-по возрастанию: -15 -7 0 3 19 42 61 88
-по убыванию: 88 61 42 19 3 0 -7 -15
+ascending: -15 -7 0 3 19 42 61 88
+descending: 88 61 42 19 3 0 -7 -15
 ```
 
-Функции HLA64 называются в ассемблере `_ascending`, `_descending` — по правилам языка C. Поэтому
-код на C может вызывать их без всяких переходников.
+In assembly, HLA64 functions are named `_ascending`, `_descending` — following C's rules. That's why
+C code can call them without any glue code.
 
-## Системные вызовы
+## System calls
 
-Под библиотекой находится **ядро** операционной системы. Программа обращается к нему командой
-`svc #0x80` («supervisor call»): номер операции кладётся в `x16`, аргументы — в `x0 … x5`.
-В HLA64 для этого есть `syscall(номер, аргументы...)` и готовые константы `SYS_write`, `SYS_exit`, `SYS_read` и др.
+Beneath the library sits the operating system **kernel**. A program talks to it with the instruction
+`svc #0x80` ("supervisor call"): the operation number goes in `x16`, the arguments in `x0 … x5`.
+HLA64 has `syscall(number, arguments...)` for this, plus ready-made constants `SYS_write`, `SYS_exit`, `SYS_read` and others.
 
 ```hla
-data message = "Привет напрямую от ядра!\n"
+data message = "Hello straight from the kernel!\n"
 
 fn main() {
-    syscall(SYS_write, 1, message, len(message))   // 1 — стандартный вывод
-    syscall(SYS_exit, 0)                           // завершить программу с кодом 0
+    syscall(SYS_write, 1, message, len(message))   // 1 is standard output
+    syscall(SYS_exit, 0)                           // exit the program with code 0
 }
 ```
 
 ```text
-Привет напрямую от ядра!
+Hello straight from the kernel!
 ```
 
-`write` нужно количество **байтов**. `len(message)` для строки как раз даёт число байтов без
-завершающего нуля (русская буква в кодировке UTF-8 занимает 2 байта, так что символов здесь меньше,
-чем байтов). `sizeof(message)` — то же плюс один байт нуля.
+`write` needs the number of **bytes**. For a string, `len(message)` gives exactly the number of bytes
+without the terminating zero (in UTF-8 a non-Latin letter, such as a Cyrillic one, takes 2 bytes, so a
+string can have fewer characters than bytes). `sizeof(message)` is the same plus one byte for the zero.
 
-**Осторожно со смешиванием.** `printf` копит вывод в буфере и отправляет его ядру порциями, а `syscall(SYS_write, ...)`
-пишет сразу. Если смешивать их, строки могут выйти не в том порядке. Перед системным вызовом можно
-сбросить буфер: `extern fflush` и `fflush(0)`.
+**Be careful when mixing them.** `printf` collects output in a buffer and hands it to the kernel in chunks, while `syscall(SYS_write, ...)`
+writes immediately. If you mix them, lines may come out in the wrong order. You can flush the buffer
+before a system call: `extern fflush` and `fflush(0)`.
 
-## Упражнения
+## Exercises
 
-1. Прочитайте число из строки `"  250"` с помощью `atoi` и напечатайте его удвоенным.
-2. Отсортируйте массив `i32` через `qsort` (размер элемента 4, загрузка — `w9 = i32[a]`).
-3. Сделайте калькулятор: массив символов операций `"+-*/"` и таблица функций; примените каждую к паре 84 и 4.
+1. Read a number from the string `"  250"` with `atoi` and print it doubled.
+2. Sort an `i32` array with `qsort` (element size 4, load with `w9 = i32[a]`).
+3. Make a calculator: an array of operation characters `"+-*/"` and a table of functions; apply each one to the pair 84 and 4.
 
-Дальше: [Урок 11. Числа с плавающей точкой](11-floating-point.md)
+Next: [Lesson 11. Floating-point numbers](11-floating-point.md)

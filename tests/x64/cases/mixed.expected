@@ -1,0 +1,10 @@
+assembler with sugar
+length("assembler with sugar") = 20
+rgb = 0x123456, green = 0x34
+clamp: 0 7 10
+1: 982
+2: 1043
+3: 1007
+4: 943
+5: 979
+6: 1046

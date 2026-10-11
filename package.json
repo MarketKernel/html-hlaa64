@@ -3,7 +3,7 @@
   "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "HLA64: a high-level assembly language for ARM64 macOS and x86-64 Windows, its translator and a browser-side assembler/linker, all in TypeScript",
+  "description": "HLA64: ARM64 and x86-64 assembly with syntactic sugar (write instructions directly, use for/if/expressions where convenient) for macOS and Windows; translator, assembler, linker and emulator, all in TypeScript",
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "node tests/run.ts",

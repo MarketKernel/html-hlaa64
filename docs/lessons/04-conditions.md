@@ -1,8 +1,15 @@
-# Урок 4. Условия
+# Lesson 4. Conditions
+
+<!-- languages -->
+<h3 align="center">
+<b>🇬🇧 English</b> ·
+<a href="../ru/lessons/04-conditions.md">🇷🇺 Русский</a>
+</h3>
+<!-- /languages -->
 
 ## `if`
 
-`if` выполняет блок, только если условие истинно:
+`if` runs a block only if the condition is true:
 
 ```hla
 extern printf(fmt, ...)
@@ -10,32 +17,32 @@ extern printf(fmt, ...)
 fn main() {
     let temperature = 31
     if temperature > 30 {
-        printf("жарко: %ld градус\n", temperature)
+        printf("hot: %ld degrees\n", temperature)
     }
-    printf("конец\n")
+    printf("done\n")
 }
 ```
 
 ```text
-жарко: 31 градус
-конец
+hot: 31 degrees
+done
 ```
 
-Фигурные скобки обязательны, даже если внутри одна команда. Круглые скобки вокруг условия можно
-ставить (`if (temperature > 30) {`), а можно и не ставить.
+The curly braces are required, even if there is only one statement inside. Parentheses around the
+condition are optional: you can write them (`if (temperature > 30) {`) or leave them out.
 
-## Сравнения
+## Comparisons
 
-| запись | значит |
+| syntax | meaning |
 |---|---|
-| `a == b` | равно |
-| `a != b` | не равно |
-| `a < b`, `a <= b` | меньше, меньше или равно |
-| `a > b`, `a >= b` | больше, больше или равно |
+| `a == b` | equal |
+| `a != b` | not equal |
+| `a < b`, `a <= b` | less than, less than or equal |
+| `a > b`, `a >= b` | greater than, greater than or equal |
 
-Не путайте `==` (сравнение) и `=` (присваивание).
+Don't confuse `==` (comparison) with `=` (assignment).
 
-## `else` и `elif`
+## `else` and `elif`
 
 ```hla
 extern printf(fmt, ...)
@@ -43,31 +50,31 @@ extern printf(fmt, ...)
 fn main() {
     let score = 74
     if score >= 90 {
-        printf("отлично\n")
+        printf("excellent\n")
     } elif score >= 70 {
-        printf("хорошо\n")
+        printf("good\n")
     } elif score >= 50 {
-        printf("удовлетворительно\n")
+        printf("satisfactory\n")
     } else {
-        printf("попробуйте ещё раз\n")
+        printf("try again\n")
     }
 }
 ```
 
 ```text
-хорошо
+good
 ```
 
-Проверки идут сверху вниз; выполняется первая подошедшая ветка, остальные пропускаются.
-Вместо `elif` можно писать `else if` — это одно и то же.
+The checks go from top to bottom; the first matching branch runs, and the rest are skipped.
+Instead of `elif` you can write `else if` — it's the same thing.
 
-## И, ИЛИ, НЕ
+## AND, OR, NOT
 
-- `a && b` — истинно, если истинны оба условия;
-- `a || b` — истинно, если истинно хотя бы одно;
-- `!a` — отрицание.
+- `a && b` — true if both conditions are true;
+- `a || b` — true if at least one is true;
+- `!a` — negation.
 
-Пример — високосный год: делится на 4, но не на 100, либо делится на 400.
+Example — a leap year: divisible by 4 but not by 100, or divisible by 400.
 
 ```hla
 extern printf(fmt, ...)
@@ -75,50 +82,50 @@ extern printf(fmt, ...)
 fn main() {
     let year = 2024
     if year % 4 == 0 && year % 100 != 0 || year % 400 == 0 {
-        printf("%ld — високосный\n", year)
+        printf("%ld is a leap year\n", year)
     } else {
-        printf("%ld — обычный\n", year)
+        printf("%ld is a common year\n", year)
     }
     year = 1900
     if year % 4 == 0 && year % 100 != 0 || year % 400 == 0 {
-        printf("%ld — високосный\n", year)
+        printf("%ld is a leap year\n", year)
     } else {
-        printf("%ld — обычный\n", year)
+        printf("%ld is a common year\n", year)
     }
 }
 ```
 
 ```text
-2024 — високосный
-1900 — обычный
+2024 is a leap year
+1900 is a common year
 ```
 
-`&&` выполняется раньше `||`, поэтому скобки вокруг первой пары не нужны.
+`&&` binds tighter than `||`, so no parentheses are needed around the first pair.
 
-**Короткое замыкание.** Если по левой части уже всё ясно, правая не вычисляется. Это позволяет
-защититься от деления на ноль:
+**Short-circuit evaluation.** If the left side already decides the result, the right side is not
+evaluated. This lets you guard against division by zero:
 
 ```hla
 extern printf(fmt, ...)
 
 fn main() {
     let a = 10, b = 0
-    if b != 0 && a / b > 2 {          // a / b не выполнится: b == 0
-        printf("больше двух\n")
+    if b != 0 && a / b > 2 {          // a / b won't run: b == 0
+        printf("greater than two\n")
     } else {
-        printf("делить нельзя или результат мал\n")
+        printf("can't divide or the result is small\n")
     }
 }
 ```
 
 ```text
-делить нельзя или результат мал
+can't divide or the result is small
 ```
 
-## Число как условие
+## A number as a condition
 
-Любое число можно использовать как условие: ноль — ложь, всё остальное — истина.
-`if n { }` значит то же, что `if n != 0 { }`.
+Any number can be used as a condition: zero is false, everything else is true.
+`if n { }` means the same as `if n != 0 { }`.
 
 ```hla
 extern printf(fmt, ...)
@@ -126,21 +133,21 @@ extern printf(fmt, ...)
 fn main() {
     let items = 3
     if items {
-        printf("корзина не пуста\n")
+        printf("the cart is not empty\n")
     }
     if !items {
-        printf("корзина пуста\n")
+        printf("the cart is empty\n")
     }
 }
 ```
 
 ```text
-корзина не пуста
+the cart is not empty
 ```
 
-## Условие как число
+## A condition as a number
 
-Сравнение само по себе — значение: 1 (истина) или 0 (ложь). Его можно сохранить в переменную:
+A comparison is a value in itself: 1 (true) or 0 (false). You can store it in a variable:
 
 ```hla
 extern printf(fmt, ...)
@@ -149,17 +156,17 @@ fn main() {
     let n = 42
     let even = n % 2 == 0
     let big = n > 100
-    printf("чётное: %ld, большое: %ld\n", even, big)
+    printf("even: %ld, big: %ld\n", even, big)
 }
 ```
 
 ```text
-чётное: 1, большое: 0
+even: 1, big: 0
 ```
 
-## Тернарный оператор
+## The ternary operator
 
-`условие ? если_да : если_нет` выбирает одно из двух значений:
+`condition ? if_yes : if_no` picks one of two values:
 
 ```hla
 extern printf(fmt, ...)
@@ -168,38 +175,72 @@ fn main() {
     let a = 15, b = 9
     let biggest = a > b ? a : b
     let sign = a - b > 0 ? 1 : (a - b < 0 ? -1 : 0)
-    printf("больше: %ld, знак разности: %ld\n", biggest, sign)
+    printf("bigger: %ld, sign of the difference: %ld\n", biggest, sign)
 }
 ```
 
 ```text
-больше: 15, знак разности: 1
+bigger: 15, sign of the difference: 1
 ```
 
-## Что делает процессор
+## What the processor does
 
-У процессора нет команды «if». Есть команда сравнения `cmp`, которая выставляет **флаги**
-(«результат равен нулю», «меньше» и т. п.), и команды условного перехода, например `b.lt` —
-«перейти, если меньше». Условие `if temperature > 30 { ... }` превращается в:
+The processor has no "if" instruction. It has the compare instruction `cmp`, which sets **flags**
+("the result is zero", "less than", and so on), and conditional branch instructions, such as `b.lt` —
+"branch if less than". The condition `if temperature > 30 { ... }` turns into:
 
 ```asm
-    cmp x19, #30            // сравнить
-    b.le Lmain.endif0       // если «меньше или равно» — перепрыгнуть тело
-    ...                     // тело if
+    cmp x19, #30            // compare
+    b.le Lmain.endif0       // if "less than or equal" — jump over the body
+    ...                     // body of the if
 Lmain.endif0:
 ```
 
-Заметьте: переход сделан по **обратному** условию — мы перепрыгиваем тело, когда условие ложно.
-Для частых случаев транслятор подбирает команды короче: `if x == 0` превращается в `cbz`
-(«перейти, если ноль»), а `if x & 4` — в `tbnz x, #2` («перейти, если бит 2 установлен»).
+Notice: the branch uses the **opposite** condition — we jump over the body when the condition is false.
+For common cases the translator picks shorter instructions: `if x == 0` becomes `cbz`
+("branch if zero"), and `if x & 4` becomes `tbnz x, #2` ("branch if bit 2 is set").
 
-## Упражнения
+## Branching by hand
 
-1. Напечатайте, положительное число, отрицательное или ноль.
-2. Найдите наибольшее из трёх чисел без функции `max`.
+You can write the same `cmp` and `b.le` yourself. The place to jump to is marked with a **label** — a
+name followed by a colon on its own line. HLA64 labels and branch instructions understand each other:
+
+```hla
+extern printf(fmt, ...)
+
+fn main() {
+    let temperature = 31
+    cmp temperature, #30         // compare, set the flags
+    b.le not_hot                 // if "less than or equal" — jump over the printing
+    printf("hot: %ld degrees\n", temperature)
+not_hot:
+    let a = 7, b = 12
+    cmp a, b
+    csel x9, a, b, gt            // x9 = a if a > b, otherwise b — without a single branch
+    if x9 > 10 {                 // and sugar again
+        printf("bigger: %ld\n", x9)
+    }
+}
+```
+
+```text
+hot: 31 degrees
+bigger: 12
+```
+
+`csel` ("conditional select") picks one of two registers based on the flags set by `cmp`.
+A branch is expensive for the processor when it is hard to predict, so in hot spots such instructions
+are written by hand. The flags live only until the next instruction that changes them — between `cmp`
+and `b.le`/`csel` there must be no sugar lines that do their own comparisons (for example, `if`).
+
+## Exercises
+
+1. Print whether a number is positive, negative or zero.
+2. Find the largest of three numbers without the `max` function.
+3. Find the largest of three numbers with two `cmp` + `csel` pairs, without a single `if`.
 
 <details>
-<summary>Решение упражнения 2</summary>
+<summary>Solution to exercise 2</summary>
 
 ```hla
 extern printf(fmt, ...)
@@ -209,14 +250,14 @@ fn main() {
     let m = a
     if b > m { m = b }
     if c > m { m = c }
-    printf("наибольшее: %ld\n", m)
+    printf("largest: %ld\n", m)
 }
 ```
 
 ```text
-наибольшее: 47
+largest: 47
 ```
 
 </details>
 
-Дальше: [Урок 5. Циклы](05-loops.md)
+Next: [Lesson 5. Loops](05-loops.md)

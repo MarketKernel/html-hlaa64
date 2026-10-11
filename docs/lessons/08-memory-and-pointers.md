@@ -1,8 +1,16 @@
-# Урок 8. Память и указатели
+# Lesson 8. Memory and pointers
 
-## Адрес
+<!-- languages -->
+<h3 align="center">
+<b>🇬🇧 English</b> ·
+<a href="../ru/lessons/08-memory-and-pointers.md">🇷🇺 Русский</a>
+</h3>
+<!-- /languages -->
 
-У каждого байта памяти есть номер — адрес. Узнать адрес переменной можно оператором `&`:
+## Address
+
+Every byte of memory has a number — its address. You can get the address of a variable with the
+`&` operator:
 
 ```hla
 extern printf(fmt, ...)
@@ -10,24 +18,24 @@ extern printf(fmt, ...)
 data numbers: i64[3] = [10, 20, 30]
 
 fn main() {
-    let p = &numbers                       // адрес начала массива
-    let q = &numbers[2]                    // адрес третьего элемента
-    printf("от начала до numbers[2]: %ld байт\n", q - p)
+    let p = &numbers                       // address of the start of the array
+    let q = &numbers[2]                    // address of the third element
+    printf("from the start to numbers[2]: %ld bytes\n", q - p)
 }
 ```
 
 ```text
-от начала до numbers[2]: 16 байт
+from the start to numbers[2]: 16 bytes
 ```
 
-Адрес — это обычное 64-битное число, его можно хранить в регистре, прибавлять к нему, вычитать.
-Переменную, в которой лежит адрес, называют **указателем**. Элементы `i64` занимают по 8 байт,
-поэтому `numbers[2]` начинается через 16 байт после начала.
+An address is an ordinary 64-bit number: you can keep it in a register, add to it and subtract
+from it. A variable that holds an address is called a **pointer**. `i64` elements take 8 bytes
+each, so `numbers[2]` starts 16 bytes after the beginning.
 
-## Чтение и запись по адресу
+## Reading and writing at an address
 
-Квадратные скобки означают «память по этому адресу». Перед скобками пишется тип — сколько байт
-читать и как их понимать:
+Square brackets mean "the memory at this address". The type is written before the brackets — how
+many bytes to read and how to interpret them:
 
 ```hla
 extern printf(fmt, ...)
@@ -37,7 +45,7 @@ data numbers: i64[3] = [10, 20, 30]
 fn main() {
     let p = &numbers
     printf("%ld %ld %ld\n", i64[p], i64[p + 8], i64[p + 16])
-    i64[p + 8] = 99                        // записать 99 во второй элемент
+    i64[p + 8] = 99                        // write 99 into the second element
     printf("numbers[1] = %ld\n", numbers[1])
 }
 ```
@@ -47,15 +55,15 @@ fn main() {
 numbers[1] = 99
 ```
 
-Типы те же, что у данных: `u8 i8 u16 i16 u32 i32 u64 i64 ptr f32 f64`. Без типа (`[p]`) размер
-берётся по регистру: `x9 = [p]` читает 8 байт, `w9 = [p]` — 4.
+The types are the same as for data: `u8 i8 u16 i16 u32 i32 u64 i64 ptr f32 f64`. Without a type
+(`[p]`) the size is taken from the register: `x9 = [p]` reads 8 bytes, `w9 = [p]` reads 4.
 
-**Обратите внимание:** в квадратных скобках считаются **байты**. Индекс массива `numbers[i]` сам
-умножается на размер элемента, а в `i64[p + i * 8]` умножать нужно самим.
+**Note:** inside square brackets you count **bytes**. An array index `numbers[i]` is multiplied by
+the element size automatically, but in `i64[p + i * 8]` you have to multiply yourself.
 
-## Массив как параметр функции
+## An array as a function parameter
 
-Функции нельзя передать массив целиком, но можно передать его адрес и длину:
+You can't pass a whole array to a function, but you can pass its address and length:
 
 ```hla
 extern printf(fmt, ...)
@@ -66,7 +74,7 @@ data b: i64[3] = [100, 200, 300]
 fn sum(arr, count) {
     let total: x9 = 0
     for i: x10 in 0..count {
-        total += i64[arr + i * 8]           // элемент номер i
+        total += i64[arr + i * 8]           // element number i
     }
     return total
 }
@@ -82,13 +90,13 @@ sum(a) = 14
 sum(b) = 600
 ```
 
-Внутри `sum` нет вызовов других функций, поэтому параметры можно держать в `x0`, `x1`, а переменные —
-во временных `x9`, `x10`.
+`sum` doesn't call any other functions, so the parameters can stay in `x0`, `x1`, and the variables
+can live in the temporary `x9`, `x10`.
 
-## Проход по строке указателем
+## Walking a string with a pointer
 
-Строка заканчивается нулевым байтом. Чтобы посчитать её длину, двигаем указатель, пока не встретим ноль.
-Запись `u8[p++]` читает байт по адресу `p` и **после этого** увеличивает `p` на размер элемента (здесь 1):
+A string ends with a zero byte. To count its length, we move a pointer until we hit the zero.
+`u8[p++]` reads the byte at address `p` and **after that** increases `p` by the element size (here 1):
 
 ```hla
 extern printf(fmt, ...)
@@ -99,13 +107,13 @@ fn my_strlen(s) {
         w10 = u8[p++]
         if w10 == 0 { break }
     }
-    return p - s - 1          // p ушёл на байт дальше нуля
+    return p - s - 1          // p went one byte past the zero
 }
 
 fn count_char(s, ch) {
     let n: x9 = 0
     loop {
-        w10 = u8[s++]         // параметр-указатель тоже можно двигать
+        w10 = u8[s++]         // a pointer parameter can be moved too
         if w10 == 0 { break }
         if w10 == ch { n++ }
     }
@@ -114,22 +122,56 @@ fn count_char(s, ch) {
 
 fn main() {
     let text = "hello, world"
-    printf("длина: %ld\n", my_strlen(text))
-    printf("букв 'o': %ld\n", count_char(text, 'o'))
+    printf("length: %ld\n", my_strlen(text))
+    printf("letters 'o': %ld\n", count_char(text, 'o'))
 }
 ```
 
 ```text
-длина: 12
-букв 'o': 2
+length: 12
+letters 'o': 2
 ```
 
-`let text = "hello, world"` кладёт в переменную **адрес** строки — сама строка лежит в памяти программы.
+`let text = "hello, world"` puts the string's **address** into the variable — the string itself
+lies in the program's memory.
 
-Пост-инкремент — это одна команда процессора: `ldrb w10, [x9], #1` («загрузить байт по адресу x9,
-затем прибавить к x9 единицу»).
+Post-increment is a single processor instruction: `ldrb w10, [x9], #1` ("load the byte at address
+x9, then add one to x9").
 
-## Копирование и заполнение памяти
+You can also write load and store instructions yourself — for example, when you need a specific
+addressing mode. Here sugar checks the conditions, while the `ldrb` and `strb` instructions read
+and write memory:
+
+```hla
+extern printf(fmt, ...)
+
+data text = "hello, world"
+
+fn upcase(s) {                   // lowercase Latin letters -> capitals, in place
+    loop {
+        ldrb w10, [s]            // read the byte at address s
+        if w10 == 0 { break }
+        if w10 >= 'a' && w10 <= 'z' {
+            sub w10, w10, #32    // 'a' - 'A' = 32
+        }
+        strb w10, [s], #1        // write the byte and move s by 1
+    }
+}
+
+fn main() {
+    upcase(text)
+    printf("%s\n", text)
+}
+```
+
+```text
+HELLO, WORLD
+```
+
+`[s]` means "at the address in register s", `[s], #1` means the same, and after the access add one
+to `s`. There are other forms too: `[s, #8]` is the address `s + 8`, `[s, x9]` is the address `s + x9`.
+
+## Copying and filling memory
 
 ```hla
 extern printf(fmt, ...)
@@ -152,7 +194,7 @@ fn fill_i32(to, count, value) {
 
 fn main() {
     copy_i32(dst, src, 6)
-    fill_i32(&dst[4], 2, -1)                // перезаписать два последних
+    fill_i32(&dst[4], 2, -1)                // overwrite the last two
     for i in 0..6 { printf("%ld ", dst[i]) }
     printf("\n")
 }
@@ -162,13 +204,14 @@ fn main() {
 1 2 3 4 -1 -1 
 ```
 
-## Локальные буферы на стеке
+## Local buffers on the stack
 
-`data` — это глобальная память. Иногда буфер нужен только на время работы функции. Для этого есть
-`local`: место выделяется в **стеке** при входе в функцию и освобождается при выходе.
+`data` is global memory. Sometimes a buffer is needed only while a function runs. That's what
+`local` is for: the space is allocated on the **stack** when the function is entered and freed
+when it exits.
 
-Пример — перевод числа в строку. Цифры получаются с конца (остатками от деления на 10), поэтому
-заполняем буфер справа налево:
+An example is converting a number to a string. The digits come out from the end (as remainders of
+division by 10), so we fill the buffer from right to left:
 
 ```hla
 extern puts
@@ -176,12 +219,12 @@ extern puts
 fn print_number(value: auto) {
     local buf: u8[24]
     let p = &buf[23]
-    u8[p] = 0                       // конец строки
+    u8[p] = 0                       // end of the string
     let negative = value < 0
     if negative { value = -value }
     do {
         p--
-        u8[p] = value % 10 + '0'    // цифра как символ: '0' + d
+        u8[p] = value % 10 + '0'    // digit as a character: '0' + d
         value /= 10
     } while value != 0
     if negative {
@@ -204,22 +247,22 @@ fn main() {
 0
 ```
 
-Локальной может быть и одиночная переменная: `local total: i64` — она живёт в памяти стека, а
-работают с ней как с обычной переменной (`total = x0`, `total += 5`).
+A single variable can be local too: `local total: i64` lives in stack memory, but you work with it
+like an ordinary variable (`total = x0`, `total += 5`).
 
-**Стек** — область памяти, которая растёт вниз. Каждая вызванная функция занимает в нём свой участок
-(кадр): там лежат сохранённые регистры и локальные буферы. Когда функция возвращается, её кадр
-освобождается. Поэтому **нельзя возвращать адрес локального буфера** — после `return` этой памятью
-воспользуется следующая вызванная функция.
+The **stack** is a memory area that grows downward. Each called function occupies its own section
+of it (a stack frame), which holds saved registers and local buffers. When the function returns,
+its frame is freed. That's why **you must not return the address of a local buffer** — after
+`return`, that memory will be used by the next function that is called.
 
-## Упражнения
+## Exercises
 
-1. Напишите `reverse_string(s)`, которая переворачивает строку на месте (используйте два указателя:
-   на начало и на конец).
-2. Напишите `index_of(arr, count, value)` — номер первого элемента массива `i64`, равного `value`, или −1.
+1. Write `reverse_string(s)`, which reverses a string in place (use two pointers: one to the start
+   and one to the end).
+2. Write `index_of(arr, count, value)` — the index of the first element of an `i64` array equal to `value`, or −1.
 
 <details>
-<summary>Решение упражнения 1</summary>
+<summary>Solution to exercise 1</summary>
 
 ```hla
 extern printf(fmt, ...)
@@ -228,8 +271,8 @@ data word = "assembly"
 
 fn reverse_string(s) {
     let end: x9 = s
-    while u8[end] != 0 { end++ }      // найти конец
-    end--                             // последний символ
+    while u8[end] != 0 { end++ }      // find the end
+    end--                             // the last character
     while s < end {
         w10 = u8[s]
         w11 = u8[end]
@@ -252,4 +295,4 @@ ylbmessa
 
 </details>
 
-Дальше: [Урок 9. Структуры и перечисления](09-structs-and-enums.md)
+Next: [Lesson 9. Structs and enums](09-structs-and-enums.md)

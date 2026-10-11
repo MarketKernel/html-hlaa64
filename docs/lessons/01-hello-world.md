@@ -1,6 +1,13 @@
-# Урок 1. Hello, world
+# Lesson 1. Hello, world
 
-По традиции первая программа печатает приветствие. Вот она целиком:
+<!-- languages -->
+<h3 align="center">
+<b>🇬🇧 English</b> ·
+<a href="../ru/lessons/01-hello-world.md">🇷🇺 Русский</a>
+</h3>
+<!-- /languages -->
+
+By tradition, the first program prints a greeting. Here it is in full:
 
 ```hla
 extern puts
@@ -14,112 +21,157 @@ fn main() {
 Hello, world!
 ```
 
-Разберём по строчкам.
+Let's go through it line by line.
 
-- `extern puts` — говорим транслятору: «есть внешняя функция `puts`, её написали до нас».
-  Она живёт в системной библиотеке macOS (libSystem) и печатает строку с переводом строки в конце.
-  Всё, что мы берём из библиотеки, нужно объявить через `extern`.
-- `fn main() { ... }` — объявление функции с именем `main`. С неё начинается выполнение любой
-  программы. Тело функции записывается в фигурных скобках.
-- `puts("Hello, world!")` — вызов функции `puts` с одним аргументом — строкой в кавычках.
+- `extern puts` — we tell the translator: "there is an external function `puts`, someone wrote it
+  before us". It lives in the macOS system library (libSystem) and prints a string followed by a newline.
+  Everything we take from a library has to be declared with `extern`.
+- `fn main() { ... }` — declares a function named `main`. Every program starts executing from it.
+  The function body is written inside curly braces.
+- `puts("Hello, world!")` — a call to the function `puts` with one argument — a string in quotes.
 
-Когда `main` заканчивается, программа завершается с кодом 0 («всё хорошо»).
+When `main` finishes, the program exits with code 0 ("all good").
 
-## Комментарии
+> **HLA64 is an assembler.** Lines like `puts("Hello, world!")` are syntactic sugar: the translator
+> expands each one into several processor instructions. But the instructions themselves haven't gone
+> anywhere: any of them can be written right in the program, next to the sugar. How — at the end of this
+> lesson.
 
-Всё после `//` до конца строки — комментарий, транслятор его пропускает. Длинный комментарий можно
-взять в `/* ... */`.
+## Comments
+
+Everything after `//` to the end of the line is a comment; the translator skips it. A long comment can
+be wrapped in `/* ... */`.
 
 ```hla
 extern puts
 
-/* Программа, которая
-   здоровается дважды */
+/* A program that
+   says hello twice */
 fn main() {
-    puts("Привет!")      // русские буквы тоже можно
-    puts("Hello again")  // каждая строка печатается с новой строки
+    puts("Grüß dich!")   // non-English letters work too
+    puts("Hello again")  // each string is printed on a new line
 }
 ```
 
 ```text
-Привет!
+Grüß dich!
 Hello again
 ```
 
-Точка с запятой в конце строки не нужна: команда заканчивается вместе со строкой. Если очень хочется
-записать две команды в одной строке, разделите их `;`:
+You don't need a semicolon at the end of a line: a statement ends together with the line. If you really
+want to put two statements on one line, separate them with `;`:
 
 ```hla
 extern puts
 
 fn main() {
-    puts("раз"); puts("два")
+    puts("one"); puts("two")
 }
 ```
 
 ```text
-раз
-два
+one
+two
 ```
 
-## Специальные символы в строках
+## Special characters in strings
 
-Внутри кавычек обратная косая черта `\` начинает специальный символ:
+Inside quotes, a backslash `\` starts a special character:
 
-| запись | что означает |
+| notation | meaning |
 |---|---|
-| `\n` | перевод строки |
-| `\t` | табуляция |
-| `\"` | кавычка |
-| `\\` | сама обратная черта |
+| `\n` | newline |
+| `\t` | tab |
+| `\"` | double quote |
+| `\\` | the backslash itself |
 
 ```hla
 extern puts
 
 fn main() {
-    puts("строка 1\nстрока 2")
-    puts("имя:\t\"HLA64\"")
+    puts("line 1\nline 2")
+    puts("name:\t\"HLA64\"")
 }
 ```
 
 ```text
-строка 1
-строка 2
-имя:	"HLA64"
+line 1
+line 2
+name:	"HLA64"
 ```
 
-## Что получилось внутри
+## What it turned into
 
-Транслятор перевёл нашу программу в ассемблер. Посмотреть его можно командой
-`node src/cli.ts compile hello.hla` или на вкладке **Assembly** в браузере. Для первого примера
-получается вот что (без служебных строк):
+The translator converted our program into assembly. You can view it with the command
+`node src/cli.ts compile hello.hla` or on the **Assembly** tab in the browser. For the first example
+you get this (without the housekeeping lines):
 
 ```asm
 _main:
-    stp x29, x30, [sp, #-16]!       // сохранить два служебных регистра в стек
-    mov x29, sp                     // отметить начало «кадра» функции
-    adrp x0, Lstr.0@PAGE            // x0 = адрес строки (в два шага:
-    add x0, x0, Lstr.0@PAGEOFF      //   страница памяти + смещение в ней)
-    bl _puts                        // вызвать puts
-    mov w0, #0                      // код возврата 0
-    ldp x29, x30, [sp], #16         // восстановить служебные регистры
-    ret                             // вернуться
+    stp x29, x30, [sp, #-16]!       // save two special registers on the stack
+    mov x29, sp                     // mark the start of the function's "frame"
+    adrp x0, Lstr.0@PAGE            // x0 = address of the string (in two steps:
+    add x0, x0, Lstr.0@PAGEOFF      //   memory page + offset within it)
+    bl _puts                        // call puts
+    mov w0, #0                      // return code 0
+    ldp x29, x30, [sp], #16         // restore the special registers
+    ret                             // return
 
 Lstr.0:
-    .asciz "Hello, world!"          // сама строка, с нулём в конце
+    .asciz "Hello, world!"          // the string itself, with a zero at the end
 ```
 
-Уже видно главное правило: **аргумент функции передаётся в регистре `x0`**. Строка лежит в памяти,
-а в `x0` попадает её адрес. Что такое регистры — в следующем уроке. Строки `stp`/`ldp`/`ret` —
-это пролог и эпилог функции: их HLA64 пишет за вас.
+The main rule is already visible: **a function argument is passed in register `x0`**. The string lives
+in memory, and `x0` receives its address. What registers are — in the next lesson. The `stp`/`ldp`/`ret`
+lines are the function's prologue and epilogue: HLA64 writes them for you.
 
-## Упражнения
+## You can write instructions yourself
 
-1. Напечатайте своё имя и город на двух строках одним вызовом `puts`.
-2. Напечатайте рамку из трёх строк: `+-----+`, `| Hi! |`, `+-----+`.
+The three middle lines of the listing — `adrp`, `add`, `bl` — are the call to `puts`. You can write them
+in the program by hand: a line that doesn't look like an HLA64 construct is treated as a processor
+instruction and goes into the output as is.
+
+```hla
+extern puts
+
+rodata hello = "Hello from instructions!"
+
+fn main() {
+    puts("Hello from sugar!")    // sugar: one line
+    adrp x0, hello@PAGE          // instructions: x0 = address of the string hello
+    add x0, x0, hello@PAGEOFF
+    bl puts                      // call puts
+}
+```
+
+```text
+Hello from sugar!
+Hello from instructions!
+```
+
+- `rodata hello = "..."` places the string in the program's memory and gives it a name (more on this
+  in lesson 7).
+- `adrp` and `add` compute the address of the string from its name; `bl` ("branch with link") calls a
+  function. The translator turns the names `hello` and `puts` into `_hello` and `_puts` by itself, as
+  macOS requires.
+- In the listing both halves of the program look the same: the sugar expanded into exactly the same
+  instructions that we wrote by hand.
+
+This is how all of HLA64 works: where the instruction is obvious and boring, you write sugar; where you
+need a specific instruction, you write it. In the following lessons, every new construct will be shown
+along with what it turns into and how to write the same thing with instructions.
+
+On Windows the instructions are different — the x86-64 processor has its own instruction set
+(`lea rcx, [hello]`, `call puts`); the sugar, however, is the same on both platforms.
+
+## Exercises
+
+1. Print your name and city on two lines with a single `puts` call.
+2. Print a three-line box: `+-----+`, `| Hi! |`, `+-----+`.
+3. Print the same box, calling `puts` with the `adrp`/`add`/`bl` instructions for each line.
 
 <details>
-<summary>Решение упражнения 2</summary>
+<summary>Solution to exercise 2</summary>
 
 ```hla
 extern puts
@@ -139,4 +191,4 @@ fn main() {
 
 </details>
 
-Дальше: [Урок 2. Регистры и переменные](02-registers-and-variables.md)
+Next: [Lesson 2. Registers and variables](02-registers-and-variables.md)

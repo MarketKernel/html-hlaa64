@@ -1,12 +1,19 @@
-# Урок 11. Числа с плавающей точкой
+# Lesson 11. Floating-point numbers
 
-Целые регистры `x` не умеют хранить дроби: `7 / 2` в них равно 3. Для дробных чисел у процессора есть
-отдельный набор из 32 регистров:
+<!-- languages -->
+<h3 align="center">
+<b>🇬🇧 English</b> ·
+<a href="../ru/lessons/11-floating-point.md">🇷🇺 Русский</a>
+</h3>
+<!-- /languages -->
 
-- `d0 … d31` — 64-битные числа двойной точности (тип `double` в C, `f64` в HLA64), около 15–16 значащих цифр;
-- `s0 … s31` — 32-битные одинарной точности (`float`, `f32`), около 7 цифр. `s5` — младшая половина `d5`.
+The integer `x` registers can't hold fractions: `7 / 2` in them equals 3. For fractional numbers the
+processor has a separate set of 32 registers:
 
-## Первые вычисления
+- `d0 … d31` — 64-bit double-precision numbers (`double` in C, `f64` in HLA64), about 15–16 significant digits;
+- `s0 … s31` — 32-bit single-precision (`float`, `f32`), about 7 digits. `s5` is the lower half of `d5`.
+
+## First calculations
 
 ```hla
 extern printf(fmt, ...)
@@ -15,31 +22,31 @@ fn main() {
     let price: d8 = 19.99
     let count: d9 = 3.0
     let total: d10 = price * count
-    printf("итого: %f\n", total)
-    printf("итого: %.2f\n", total)       // две цифры после точки
+    printf("total: %f\n", total)
+    printf("total: %.2f\n", total)       // two digits after the point
     printf("7 / 2 = %f\n", 7.0 / 2.0)
 }
 ```
 
 ```text
-итого: 59.970000
-итого: 59.97
+total: 59.970000
+total: 59.97
 7 / 2 = 3.500000
 ```
 
-Для дробных переменных регистр нужно указывать явно: `let x: d8 = ...`. Регистры `d8 … d15` —
-сохраняемые (как `x19 … x28`): они переживают вызовы функций. Регистры `d0 … d7` используются для
-аргументов и результата и портятся при вызовах.
+For fractional variables you have to specify the register explicitly: `let x: d8 = ...`. Registers `d8 … d15`
+are callee-saved (like `x19 … x28`): they survive function calls. Registers `d0 … d7` are used for
+arguments and the result and get clobbered by calls.
 
-Печатает дробные числа `printf`: `%f` (по умолчанию 6 знаков после точки), `%.2f` (два знака),
-`%e` (экспоненциальная запись), `%g` (короткая запись).
+`printf` prints fractional numbers: `%f` (6 digits after the point by default), `%.2f` (two digits),
+`%e` (exponential notation), `%g` (short notation).
 
-## Целые и дробные: `float()` и `int()`
+## Integers and fractions: `float()` and `int()`
 
-Смешивать целые и дробные в одном выражении нельзя — транслятор попросит явно преобразовать:
+You can't mix integers and fractions in one expression — the translator will ask you to convert explicitly:
 
-- `float(n)` — целое в дробное;
-- `int(d)` — дробное в целое, дробная часть **отбрасывается** (к нулю).
+- `float(n)` — integer to fractional;
+- `int(d)` — fractional to integer, the fractional part is **dropped** (toward zero).
 
 ```hla
 extern printf(fmt, ...)
@@ -48,7 +55,7 @@ fn main() {
     let total = 17, parts = 4
     let exact: d8 = float(total) / float(parts)
     printf("%ld / %ld = %.2f\n", total, parts, exact)
-    printf("целая часть: %ld\n", int(exact))
+    printf("integer part: %ld\n", int(exact))
     let neg: d9 = -2.7
     printf("int(-2.7) = %ld\n", int(neg))
 }
@@ -56,39 +63,68 @@ fn main() {
 
 ```text
 17 / 4 = 4.25
-целая часть: 4
+integer part: 4
 int(-2.7) = -2
 ```
 
-Целые константы в дробном выражении преобразуются сами: `d0 = d1 * 2` — то же, что `d0 = d1 * 2.0`.
+Integer constants in a fractional expression are converted automatically: `d0 = d1 * 2` is the same as `d0 = d1 * 2.0`.
 
-## Сравнения и встроенные функции
+## Comparisons and built-in functions
 
 ```hla
 extern printf(fmt, ...)
 
 fn main() {
     let a: d8 = 3.0, b: d9 = 4.0
-    let c: d10 = sqrt(a * a + b * b)          // гипотенуза
-    printf("гипотенуза: %g\n", c)
+    let c: d10 = sqrt(a * a + b * b)          // hypotenuse
+    printf("hypotenuse: %g\n", c)
     let x: d11 = -1.25
     printf("|x| = %g, min = %g, max = %g\n", fabs(x), min(a, x), max(a, x))
     if c > 4.5 && c < 5.5 {
-        printf("примерно пять\n")
+        printf("about five\n")
     }
 }
 ```
 
 ```text
-гипотенуза: 5
+hypotenuse: 5
 |x| = 1.25, min = -1.25, max = 3
-примерно пять
+about five
 ```
 
-## Точность
+## Floating-point instructions directly
 
-Дробные числа хранятся в двоичном виде, и многие десятичные дроби (0.1, 0.2) в нём записываются только
-приблизительно. Поэтому сравнивать дробные числа на точное равенство опасно:
+Sugar covers ordinary arithmetic, but the processor has more floating-point instructions. You can write
+them alongside expressions — with the same `d` registers and variable names:
+
+```hla
+extern printf(fmt, ...)
+
+fn main() {
+    let a: d8 = 3.0, b: d9 = 4.0, c: d10 = 0.5
+    fmadd d0, a, b, c            // d0 = a * b + c in a single instruction
+    printf("3 * 4 + 0.5 = %g\n", d0)
+    let half: d11 = 2.5
+    frintn d12, half             // to nearest, ties to even: 2
+    frinta d13, half             // to nearest, ties away from zero: 3
+    printf("frintn: %g, frinta: %g\n", d12, d13)
+}
+```
+
+```text
+3 * 4 + 0.5 = 12.5
+frintn: 2, frinta: 3
+```
+
+`fmadd` ("fused multiply-add") rounds the result once rather than after the multiplication and again after the addition,
+so it is both faster and more precise than the sugar `d0 = a * b + c` — that one turns into two instructions,
+`fmul` and `fadd`, and keeps the usual rounding after each. The `frint…` instructions round
+to an integer, but the result stays a fractional number in a `d` register.
+
+## Precision
+
+Fractional numbers are stored in binary, and many decimal fractions (0.1, 0.2) can only be written
+in it approximately. That's why comparing fractional numbers for exact equality is dangerous:
 
 ```hla
 extern printf(fmt, ...)
@@ -97,19 +133,19 @@ fn main() {
     let a: d8 = 0.1, b: d9 = 0.2
     let sum: d10 = a + b
     printf("0.1 + 0.2 = %.17f\n", sum)
-    if sum == 0.3 { printf("равно\n") } else { printf("не равно!\n") }
+    if sum == 0.3 { printf("equal\n") } else { printf("not equal!\n") }
     let diff: d11 = fabs(sum - 0.3)
-    if diff < 0.000001 { printf("но почти равно\n") }
+    if diff < 0.000001 { printf("but almost equal\n") }
 }
 ```
 
 ```text
 0.1 + 0.2 = 0.30000000000000004
-не равно!
-но почти равно
+not equal!
+but almost equal
 ```
 
-## Массивы дробных чисел
+## Arrays of fractional numbers
 
 ```hla
 extern printf(fmt, ...)
@@ -127,18 +163,18 @@ fn main() {
         hi = max(hi, d0)
     }
     d1 = sum / float(len(measurements))
-    printf("среднее %.2f, от %.1f до %.1f\n", d1, lo, hi)
+    printf("average %.2f, from %.1f to %.1f\n", d1, lo, hi)
 }
 ```
 
 ```text
-среднее 21.58, от 19.8 до 23.4
+average 21.58, from 19.8 to 23.4
 ```
 
-## Функции с дробными параметрами
+## Functions with fractional parameters
 
-Дробные аргументы передаются в `d0, d1, …`, результат возвращается в `d0`. Чтобы параметр был
-дробным, укажите для него `d`-регистр:
+Fractional arguments are passed in `d0, d1, …`, and the result is returned in `d0`. To make a parameter
+fractional, give it a `d` register:
 
 ```hla
 extern printf(fmt, ...)
@@ -147,7 +183,7 @@ fn circle_area(r: d0) {
     return 3.141592653589793 * r * r
 }
 
-// квадратный корень методом Ньютона: x = (x + n / x) / 2
+// square root by Newton's method: x = (x + n / x) / 2
 fn newton_sqrt(n: d0) {
     let x: d1 = n
     for step in 0..20 {
@@ -158,32 +194,32 @@ fn newton_sqrt(n: d0) {
 
 fn main() {
     d0 = circle_area(2.0)
-    printf("площадь круга r=2: %.4f\n", d0)
+    printf("area of circle r=2: %.4f\n", d0)
     d0 = newton_sqrt(2.0)
-    printf("sqrt(2) по Ньютону: %.12f\n", d0)
+    printf("sqrt(2) by Newton: %.12f\n", d0)
     d1 = sqrt(2.0)
-    printf("sqrt(2) процессором: %.12f\n", d1)
+    printf("sqrt(2) by the CPU: %.12f\n", d1)
 }
 ```
 
 ```text
-площадь круга r=2: 12.5664
-sqrt(2) по Ньютону: 1.414213562373
-sqrt(2) процессором: 1.414213562373
+area of circle r=2: 12.5664
+sqrt(2) by Newton: 1.414213562373
+sqrt(2) by the CPU: 1.414213562373
 ```
 
-Результат дробной функции заберите сразу в `d`-регистр (`d0 = circle_area(2.0)`).
+Grab the result of a fractional function into a `d` register right away (`d0 = circle_area(2.0)`).
 
-## Математика из библиотеки C
+## Math from the C library
 
-Синусы, степени, логарифмы есть в libSystem:
+Sines, powers and logarithms are available in libSystem:
 
 ```hla
 extern printf(fmt, ...)
 extern sin, cos, pow
 
 fn main() {
-    let angle: d8 = 3.141592653589793 / 6.0          // 30 градусов в радианах
+    let angle: d8 = 3.141592653589793 / 6.0          // 30 degrees in radians
     d0 = sin(angle)
     printf("sin(30°) = %.3f\n", d0)
     d0 = cos(0.0)
@@ -199,9 +235,9 @@ cos(0) = 1.000
 2^10 = 1024
 ```
 
-## 32-битные числа: регистры `s`
+## 32-bit numbers: the `s` registers
 
-`s`-регистры и тип `f32` работают так же, но занимают вдвое меньше места и менее точны:
+The `s` registers and the `f32` type work the same way, but take half the space and are less precise:
 
 ```hla
 extern printf(fmt, ...)
@@ -210,8 +246,8 @@ fn main() {
     s8 = 1.0
     s9 = 3.0
     s10 = s8 / s9
-    d11 = 1.0 / 3.0                     // d11, а не d0: первый printf испортил бы d0
-    printf("float:  %.10f\n", s10)      // printf всегда получает double: транслятор преобразует сам
+    d11 = 1.0 / 3.0                     // d11, not d0: the first printf would clobber d0
+    printf("float:  %.10f\n", s10)      // printf always receives a double: the translator converts it
     printf("double: %.10f\n", d11)
 }
 ```
@@ -221,9 +257,9 @@ float:  0.3333333433
 double: 0.3333333333
 ```
 
-## Пример: сложные проценты
+## Example: compound interest
 
-Вклад 100 000 под 8% годовых, проценты начисляются раз в год:
+A deposit of 100,000 at 8% per year, with interest added once a year:
 
 ```hla
 extern printf(fmt, ...)
@@ -233,23 +269,23 @@ fn main() {
     let rate: d9 = 0.08
     for year in 1..=5 {
         money = money * (1.0 + rate)
-        printf("через %ld г.: %10.2f\n", year, money)
+        printf("after %ld yr: %10.2f\n", year, money)
     }
 }
 ```
 
 ```text
-через 1 г.:  108000.00
-через 2 г.:  116640.00
-через 3 г.:  125971.20
-через 4 г.:  136048.90
-через 5 г.:  146932.81
+after 1 yr:  108000.00
+after 2 yr:  116640.00
+after 3 yr:  125971.20
+after 4 yr:  136048.90
+after 5 yr:  146932.81
 ```
 
-## Упражнения
+## Exercises
 
-1. Переведите температуру 36.6 °C в градусы Фаренгейта (`F = C * 9 / 5 + 32`).
-2. Найдите сумму ряда 1 + 1/2 + 1/4 + 1/8 + … (20 слагаемых). К чему она стремится?
-3. Решите квадратное уравнение x² − 3x + 2 = 0 через дискриминант и `sqrt`.
+1. Convert a temperature of 36.6 °C to degrees Fahrenheit (`F = C * 9 / 5 + 32`).
+2. Find the sum of the series 1 + 1/2 + 1/4 + 1/8 + … (20 terms). What does it approach?
+3. Solve the quadratic equation x² − 3x + 2 = 0 using the discriminant and `sqrt`.
 
-Дальше: [Урок 12. Под капотом](12-under-the-hood.md)
+Next: [Lesson 12. Under the hood](12-under-the-hood.md)

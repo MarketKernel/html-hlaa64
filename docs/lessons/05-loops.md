@@ -1,8 +1,15 @@
-# Урок 5. Циклы
+# Lesson 5. Loops
 
-Цикл повторяет блок команд. В HLA64 их несколько видов — для разных ситуаций.
+<!-- languages -->
+<h3 align="center">
+<b>🇬🇧 English</b> ·
+<a href="../ru/lessons/05-loops.md">🇷🇺 Русский</a>
+</h3>
+<!-- /languages -->
 
-## `while` — пока условие истинно
+A loop repeats a block of statements. HLA64 has several kinds of them, for different situations.
+
+## `while` — as long as the condition is true
 
 ```hla
 extern printf(fmt, ...)
@@ -13,17 +20,17 @@ fn main() {
         printf("%ld... ", n)
         n--
     }
-    printf("старт!\n")
+    printf("liftoff!\n")
 }
 ```
 
 ```text
-5... 4... 3... 2... 1... старт!
+5... 4... 3... 2... 1... liftoff!
 ```
 
-Условие проверяется **перед** каждым повтором. Если оно ложно с самого начала, тело не выполнится ни разу.
+The condition is checked **before** each repetition. If it is false from the very start, the body never runs.
 
-Сумма чисел от 1 до 100:
+The sum of the numbers from 1 to 100:
 
 ```hla
 extern printf(fmt, ...)
@@ -43,10 +50,10 @@ fn main() {
 1 + 2 + ... + 100 = 5050
 ```
 
-## `do … while` — хотя бы один раз
+## `do … while` — at least once
 
-Здесь условие проверяется **после** тела, поэтому тело выполняется минимум один раз. Удобно, например,
-чтобы посчитать цифры числа: у нуля тоже одна цифра.
+Here the condition is checked **after** the body, so the body runs at least once. This is handy, for
+example, for counting the digits of a number: zero has one digit too.
 
 ```hla
 extern printf(fmt, ...)
@@ -58,22 +65,22 @@ fn main() {
         digits++
         n /= 10
     } while n != 0
-    printf("цифр: %ld\n", digits)
+    printf("digits: %ld\n", digits)
 }
 ```
 
 ```text
-цифр: 5
+digits: 5
 ```
 
-## `loop`, `break` и `continue`
+## `loop`, `break` and `continue`
 
-`loop { }` повторяется бесконечно. Выйти из него помогает `break` — он немедленно завершает цикл.
-`continue` пропускает остаток тела и сразу переходит к следующему повтору. Обе команды работают
-в любом цикле.
+`loop { }` repeats forever. `break` gets you out of it — it ends the loop immediately.
+`continue` skips the rest of the body and goes straight to the next repetition. Both work
+in any loop.
 
-Гипотеза Коллатца: если число чётное — делим пополам, если нечётное — умножаем на 3 и прибавляем 1.
-Рано или поздно получится 1.
+The Collatz conjecture: if a number is even, halve it; if it is odd, multiply it by 3 and add 1.
+Sooner or later you get 1.
 
 ```hla
 extern printf(fmt, ...)
@@ -90,17 +97,18 @@ fn main() {
         }
         steps++
     }
-    printf("27 дошло до 1 за %ld шагов\n", steps)
+    printf("27 reached 1 in %ld steps\n", steps)
 }
 ```
 
 ```text
-27 дошло до 1 за 111 шагов
+27 reached 1 in 111 steps
 ```
 
-## `for … in` — по диапазону
+## `for … in` — over a range
 
-Самый удобный цикл для счёта. `a..b` — числа от `a` до `b`, **не включая** `b`; `a..=b` — включая.
+The most convenient loop for counting. `a..b` means the numbers from `a` to `b`, **not including** `b`;
+`a..=b` includes it.
 
 ```hla
 extern printf(fmt, ...)
@@ -110,9 +118,9 @@ fn main() {
     printf("\n")
     for i in 1..=5 { printf("%ld ", i) }
     printf("\n")
-    for i in 0..=20 step 5 { printf("%ld ", i) }     // шаг 5
+    for i in 0..=20 step 5 { printf("%ld ", i) }     // step 5
     printf("\n")
-    for i in 10..0 step -3 { printf("%ld ", i) }     // обратный отсчёт
+    for i in 10..0 step -3 { printf("%ld ", i) }     // counting down
     printf("\n")
 }
 ```
@@ -124,10 +132,10 @@ fn main() {
 10 7 4 1 
 ```
 
-Переменная цикла (`i`) создаётся автоматически и исчезает после цикла. Если нужно, чтобы она
-лежала в конкретном регистре, укажите его: `for i: x9 in 0..10 { }`.
+The loop variable (`i`) is created automatically and disappears after the loop. If you need it to
+live in a specific register, specify it: `for i: x9 in 0..10 { }`.
 
-Граница диапазона может быть переменной:
+The range bound can be a variable:
 
 ```hla
 extern printf(fmt, ...)
@@ -146,9 +154,9 @@ fn main() {
 6! = 720
 ```
 
-## `for` в стиле C
+## C-style `for`
 
-Если нужен необычный шаг или условие, есть классическая форма: начало; условие; шаг.
+If you need an unusual step or condition, there is the classic form: init; condition; step.
 
 ```hla
 extern printf(fmt, ...)
@@ -165,9 +173,10 @@ fn main() {
 1 3 9 27 81 243 729 
 ```
 
-## Вложенные циклы
+## Nested loops
 
-Таблица умножения. В шаблоне `%4ld` число 4 — ширина поля: число дополняется пробелами слева.
+A multiplication table. In the format `%4ld` the number 4 is the field width: the number is padded
+with spaces on the left.
 
 ```hla
 extern printf(fmt, ...)
@@ -190,10 +199,10 @@ fn main() {
    5  10  15  20  25
 ```
 
-## Пример: простые числа
+## Example: prime numbers
 
-Число простое, если оно не делится ни на одно число от 2 до своего квадратного корня.
-`continue` здесь ни к чему, а вот `break` экономит лишние проверки:
+A number is prime if it is not divisible by any number from 2 up to its square root.
+`continue` isn't needed here, but `break` saves unnecessary checks:
 
 ```hla
 extern printf(fmt, ...)
@@ -202,7 +211,7 @@ fn main() {
     for n in 2..50 {
         let prime = 1
         for d in 2..n {
-            if d * d > n { break }      // дальше проверять бессмысленно
+            if d * d > n { break }      // no point in checking further
             if n % d == 0 {
                 prime = 0
                 break
@@ -218,23 +227,23 @@ fn main() {
 2 3 5 7 11 13 17 19 23 29 31 37 41 43 47 
 ```
 
-## Метки циклов
+## Loop labels
 
-`break` и `continue` относятся к ближайшему циклу. Чтобы выйти сразу из нескольких вложенных циклов,
-дайте внешнему циклу **метку** и укажите её:
+`break` and `continue` apply to the innermost loop. To exit several nested loops at once,
+give the outer loop a **label** and name it:
 
 ```hla
 extern printf(fmt, ...)
 
 fn main() {
-    // найти первую пару a*b == 391, где a <= b
+    // find the first pair a*b == 391 where a <= b
     search: for a in 2..100 {
         for b in a..100 {
             if a * b == 391 {
                 printf("%ld * %ld = 391\n", a, b)
-                break search            // выход из обоих циклов
+                break search            // exit both loops
             }
-            if a * b > 391 { continue search }   // дальше b только больше
+            if a * b > 391 { continue search }   // b only gets bigger from here
         }
     }
 }
@@ -246,8 +255,8 @@ fn main() {
 
 ## `goto`
 
-Можно поставить метку в любом месте функции и перейти к ней командой `goto`. В программах на HLA64
-это нужно редко — циклы почти всегда понятнее, — но процессор именно так и работает.
+You can put a label anywhere in a function and jump to it with `goto`. HLA64 programs rarely need
+this — loops are almost always clearer — but this is exactly how the processor works.
 
 ```hla
 extern printf(fmt, ...)
@@ -265,29 +274,65 @@ again:
 k = 3
 ```
 
-## Что делает процессор
+## What the processor does
 
-Цикл — это сравнение и переход назад. Транслятор ставит проверку условия **в конец** цикла: тогда на
-каждом повторе выполняется всего один переход. Например, `while i <= 100 { sum += i; i++ }`:
+A loop is a comparison and a branch backwards. The translator puts the condition check **at the end**
+of the loop: that way each repetition executes only one branch. For example,
+`while i <= 100 { sum += i; i++ }`:
 
 ```asm
-    b Lmain.next1           // сначала прыгаем к проверке
+    b Lmain.next1           // first jump to the check
 Lmain.body2:
     add x19, x19, x20       // sum += i
     add x20, x20, #1        // i++
 Lmain.next1:
     cmp x20, #100
-    b.le Lmain.body2        // пока i <= 100 — обратно в тело
+    b.le Lmain.body2        // while i <= 100 — back to the body
 ```
 
-## Упражнения
+## A loop made of instructions
 
-1. Напечатайте все чётные числа от 2 до 20 тремя способами: `while`, `for … in` с `step` и `for … in` с `continue`.
-2. Найдите сумму цифр числа 987654321.
-3. Нарисуйте треугольник из звёздочек высотой 5 (в строке номер k — k звёздочек).
+You can also build a loop out of instructions — a label, a body, a branch back. Or you can mix them:
+a sugar loop with instructions inside.
+
+```hla
+extern printf(fmt, ...)
+
+fn main() {
+    let sum = 0
+    let i = 100
+again:
+    add sum, sum, i              // the body is an instruction
+    subs i, i, #1                // i -= 1 and set the flags right away
+    b.ne again                   // until i becomes zero — go back
+    printf("1 + ... + 100 = %ld\n", sum)
+
+    for k in 1..=3 {             // a sugar loop…
+        lsl x9, k, #4            // …with an instruction inside: x9 = k * 16
+        printf("%ld * 16 = %ld\n", k, x9)
+    }
+}
+```
+
+```text
+1 + ... + 100 = 5050
+1 * 16 = 16
+2 * 16 = 32
+3 * 16 = 48
+```
+
+`subs` is a `sub` that also sets the flags, like `cmp`. So a separate comparison isn't needed:
+a counter going down to zero takes two instructions per repetition instead of three.
+
+## Exercises
+
+1. Print all even numbers from 2 to 20 in three ways: `while`, `for … in` with `step`, and `for … in` with `continue`.
+2. Find the sum of the digits of 987654321.
+3. Draw a triangle of asterisks of height 5 (row number k has k asterisks).
+4. Compute 2¹⁰ with a loop made of instructions: `lsl` for doubling, `subs` and `b.ne` for the counter.
 
 <details>
-<summary>Решение упражнения 3</summary>
+<summary>Solution to exercise 3</summary>
 
 ```hla
 extern printf(fmt, ...)
@@ -310,4 +355,4 @@ fn main() {
 
 </details>
 
-Дальше: [Урок 6. Функции](06-functions.md)
+Next: [Lesson 6. Functions](06-functions.md)

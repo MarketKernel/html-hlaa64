@@ -18,6 +18,7 @@ import exShowcase from '../examples/showcase.hla';
 import exHello from '../examples/hello.hla';
 import exFizz from '../examples/fizzbuzz.hla';
 import exBare from '../examples/bare-metal.hla';
+import exMixed from '../examples/mixed.hla';
 import exArith from '../tests/cases/arith.hla';
 import exMemory from '../tests/cases/memory.hla';
 import exMathlib from '../docs/lessons/14-library/mathlib.hla';
@@ -26,6 +27,7 @@ import wxMandelbrot from '../tests/x64/cases/mandelbrot.hla';
 import wxShowcase from '../tests/x64/cases/showcase.hla';
 import wxArith from '../tests/x64/cases/arith.hla';
 import wxMemory from '../tests/x64/cases/memory.hla';
+import wxMixed from '../tests/x64/cases/mixed.hla';
 import wxMathlib from '../tests/x64/lib/mathlib.hla';
 
 declare const __WORKER_SRC__: string;
@@ -47,6 +49,7 @@ const hlas = (main: string, open: string): Example => ({
 });
 
 const MAC_EXAMPLES: Example[] = [
+  { id: 'mixed', title: 'Assembler + sugar in one function', src: exMixed },
   { id: 'mandelbrot', title: 'Mandelbrot set (floating point)', src: exMandelbrot },
   { id: 'mathlib', title: 'Library for C: mathlib (lesson 14)', src: exMathlib, mode: 'static', cMain: exMathlibMain },
   { id: 'showcase', title: 'Language tour (everything)', src: exShowcase },
@@ -60,6 +63,7 @@ const MAC_EXAMPLES: Example[] = [
 ];
 // the same programs with x86-64 register names (hello and fizzbuzz are portable as they are)
 const WIN_EXAMPLES: Example[] = [
+  { id: 'mixed', title: 'Assembler + sugar in one function', src: wxMixed },
   { id: 'mandelbrot', title: 'Mandelbrot set (floating point)', src: wxMandelbrot },
   { id: 'mathlib', title: 'Library for C: mathlib (lesson 14)', src: wxMathlib, mode: 'static', cMain: exMathlibMain },
   { id: 'showcase', title: 'Language tour (everything)', src: wxShowcase },

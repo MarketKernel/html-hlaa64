@@ -1,58 +1,72 @@
-# HLA64 — справочник языка
+# HLA64 — language reference
 
-HLA64 — язык «чуть выше ассемблера» для AArch64 (Apple Silicon, macOS).
-Регистры никуда не делись: вы по-прежнему решаете, что лежит в `x19`, а что в `d8`.
-Но у регистров есть имена, у выражений — операторы, у кода — структура (`if`, `while`, `for`),
-а пролог/эпилог, сохранение регистров и вызовы по ABI транслятор пишет сам.
+<!-- languages -->
+<h3 align="center">
+<b>🇬🇧 English</b> ·
+<a href="ru/language.md">🇷🇺 Русский</a>
+</h3>
+<!-- /languages -->
 
-Транслятор выдаёт обычный ассемблер Apple-диалекта, который собирается и `clang`, и встроенным
-ассемблером HLA64 (см. [README](../README.md)).
+HLA64 is an AArch64 (Apple Silicon, macOS) and x86-64 (Windows) assembler with syntactic sugar,
+not a separate language. Every line of a function is either a **processor instruction**, which goes
+into the listing as is (`csel x0, a, b, gt`, `ldrb w9, [p], #1`), or **sugar**, which the translator
+expands into instructions: `if`, `while`, `for`, expressions `a = b + c * 4`, memory accesses
+`numbers[i]`, calls `printf(...)`. Both kinds of lines mix freely within one function, and
+instructions see variables, parameters, constants, data and labels by name — see
+[Processor instructions in code](#processor-instructions-in-code).
+
+Registers haven't gone anywhere: you still decide what lives in `x19` and what lives in `d8`.
+Sugar gives registers names, expressions operators, and code structure, while the translator writes
+the prologue/epilogue, register saving and ABI calls for you.
+
+The translator emits ordinary Apple-dialect assembly, which can be assembled both by `clang` and by
+the built-in HLA64 assembler (see the [README](../README.md)).
 
 ---
 
-## Лексика
+## Lexical structure
 
-- Комментарии: `// до конца строки`, `/* блочные */`.
-- Инструкции разделяются переводом строки или `;` (точка с запятой необязательна).
-- Бинарный оператор в конце строки продолжает выражение на следующей строке.
-- Числа: `42`, `-7`, `0xFF`, `0b1010`, `0o17`, `1_000_000`, символы `'a'`, `'\n'`; дробные `1.5`, `2.0e-3`.
-- Строки: `"Hello\n"` (escape: `\n \t \r \0 \\ \" \xHH`).
+- Comments: `// to end of line`, `/* block */`.
+- Statements are separated by a newline or `;` (the semicolon is optional).
+- A binary operator at the end of a line continues the expression on the next line.
+- Numbers: `42`, `-7`, `0xFF`, `0b1010`, `0o17`, `1_000_000`, characters `'a'`, `'\n'`; fractional `1.5`, `2.0e-3`.
+- Strings: `"Hello\n"` (escapes: `\n \t \r \0 \\ \" \xHH`).
 
-## Регистры и псевдонимы
+## Registers and aliases
 
-Любой регистр можно использовать по имени: `x0..x30`, `w0..w30`, `sp`, `xzr`, `wzr`, `fp` (= x29), `lr` (= x30),
+Any register can be used by name: `x0..x30`, `w0..w30`, `sp`, `xzr`, `wzr`, `fp` (= x29), `lr` (= x30),
 `d0..d31`, `s0..s31`.
 
 ```hla
-alias count = x19          // псевдоним — как в hlaa64 (`alias a = X1;` тоже работает)
-let i: x20 = 0             // псевдоним + начальное значение
-let sum = 0                // регистр выбирается автоматически из x19..x28
-let unsigned n = x0        // беззнаковый: сравнения hi/lo, деление udiv, сдвиг >> логический
-let a = 7, b = 5           // несколько сразу
-let half: w9 = 100         // 32-битное представление регистра
-let pi: d8 = 3.14159       // регистр с плавающей точкой
+alias count = x19          // alias — as in hlaa64 (`alias a = X1;` works too)
+let i: x20 = 0             // alias + initial value
+let sum = 0                // the register is picked automatically from x19..x28
+let unsigned n = x0        // unsigned: hi/lo comparisons, udiv division, logical >> shift
+let a = 7, b = 5           // several at once
+let half: w9 = 100         // 32-bit view of a register
+let pi: d8 = 3.14159       // floating-point register
 ```
 
-- `let` без регистра берёт **свободный callee-saved** регистр (x19..x28), который не упоминается явно
-  в функции. Поэтому такие переменные переживают вызовы функций.
-- Когда свободных callee-saved регистров не осталось (на ARM их 10, на x64 — 8), переменная
-  **вытесняется в кадр**: живёт в 8-байтовом слоте стека, как `local x: i64`, и работает во всех
-  выражениях, присваиваниях (в том числе `x = f()` и `x += f()`), циклах `for … in` и как указатель
-  на функцию. Это медленнее регистра; в ассемблере видно по комментарию `// x -> frame`. Внутри
-  `asm { }` такую переменную использовать нельзя — транслятор попросит назвать ей регистр.
-- Если выражению не хватает скретч-регистров, потому что все callee-saved заняты переменными,
-  транслятор заново генерирует эту функцию и отдаёт одну переменную в кадр, а её регистр берёт для
-  выражений. Так повторяется, пока выражения не поместятся. Функции, которым регистров хватает,
-  не меняются.
-- Псевдонимы видимы до конца блока `{ }`; автоматический регистр освобождается при выходе из блока.
-- `alias` на верхнем уровне — **глобальная регистровая переменная**: видна во всех функциях и
-  не сохраняется/не восстанавливается (кроме `main`).
+- `let` without a register takes a **free callee-saved** register (x19..x28) that isn't mentioned
+  explicitly in the function. That's why such variables survive function calls.
+- When there are no free callee-saved registers left (10 on ARM, 8 on x64), the variable
+  **spills to the frame**: it lives in an 8-byte stack slot, like `local x: i64`, and works in all
+  expressions, assignments (including `x = f()` and `x += f()`), `for … in` loops and as a function
+  pointer. It's slower than a register; in the assembly you can see it by the comment `// x -> frame`.
+  Such a variable can't be used inside `asm { }` — the translator will ask you to give it a register.
+- If an expression runs out of scratch registers because all callee-saved registers are taken by
+  variables, the translator regenerates that function and moves one variable to the frame, taking its
+  register for expressions. This repeats until the expressions fit. Functions that have enough
+  registers don't change.
+- Aliases are visible until the end of the `{ }` block; an automatic register is freed on leaving the block.
+- A top-level `alias` is a **global register variable**: it's visible in all functions and
+  isn't saved/restored (except in `main`).
 
-**Зарезервированы транслятором**: `x16`, `x17` (IP0/IP1) и `d29..d31` — скретч-регистры для
-вычисления выражений. Если их не хватает, транслятор берёт свободные callee-saved регистры, а затем
-`x9..x15`, которые функция не называет явно (промежуточные значения никогда не живут через вызов).
+**Reserved by the translator**: `x16`, `x17` (IP0/IP1) and `d29..d31` — scratch registers for
+evaluating expressions. If they aren't enough, the translator takes free callee-saved registers, and
+then `x9..x15` that the function doesn't name explicitly (intermediate values never live across a call).
 
-## Присваивание и выражения
+## Assignment and expressions
 
 ```hla
 x0 = 5
@@ -60,14 +74,14 @@ a = b + c * 4 - (d >> 1)
 a += 1;  a -= b;  a *= 3;  a /= 2;  a %= 7
 a &= 0xFF;  a |= 1;  a ^= b;  a <<= 2;  a >>= 1;  a >>>= 1
 i++;  i--
-flag = a < b               // 0 или 1 (cset)
-big = a > b ? a : b        // csel, если ветки простые
+flag = a < b               // 0 or 1 (cset)
+big = a > b ? a : b        // csel, if the branches are simple
 ```
 
-Приоритеты операторов — как в Go (битовые операции связывают сильнее сравнений,
-поэтому `x & 1 == 0` означает `(x & 1) == 0`):
+Operator precedence is as in Go (bitwise operations bind tighter than comparisons,
+so `x & 1 == 0` means `(x & 1) == 0`):
 
-| уровень | операторы |
+| level | operators |
 |---|---|
 | 5 | `*  /  %  <<  >>  >>>  &` |
 | 4 | `+  -  \|  ^` |
@@ -75,104 +89,106 @@ big = a > b ? a : b        // csel, если ветки простые
 | 2 | `&&` |
 | 1 | `\|\|` |
 | 0 | `c ? a : b` |
-| унарные | `-  ~  !  &` (взять адрес) |
+| unary | `-  ~  !  &` (take address) |
 
-- `>>` — арифметический сдвиг для знаковых, логический для `unsigned`; `>>>` — всегда логический.
-- `/` и `%` знаковые (`sdiv`), для `unsigned` — беззнаковые.
-- Ширина вычисления определяется целевым регистром: `w`-регистр → 32 бита, `x` → 64.
-- Сравнение `x`-регистра с `w`-регистром выполняется как `cmp x, w, sxtw` (или `uxtw` для unsigned).
+- `>>` is an arithmetic shift for signed values and a logical one for `unsigned`; `>>>` is always logical.
+- `/` and `%` are signed (`sdiv`); for `unsigned` they are unsigned.
+- The width of the computation is set by the destination register: `w` register → 32 bits, `x` → 64.
+- Comparing an `x` register with a `w` register is done as `cmp x, w, sxtw` (or `uxtw` for unsigned).
 
-Транслятор подбирает инструкции сам: `add x0, x1, #imm`, `add x0, x1, x2, lsl #3`,
-`madd`/`msub` для `a + b*c`, `bic` для `a & ~b`, `lsl` для умножения на степень двойки,
-`movz/movk/movn` или bitmask-`mov` для любых 64-битных констант, `cbz`/`tbnz`/`tst` для условий.
+The translator picks instructions itself: `add x0, x1, #imm`, `add x0, x1, x2, lsl #3`,
+`madd`/`msub` for `a + b*c`, `bic` for `a & ~b`, `lsl` for multiplying by a power of two,
+`movz/movk/movn` or bitmask `mov` for any 64-bit constant, `cbz`/`tbnz`/`tst` for conditions.
 
-## Память
+## Memory
 
 ```hla
-x0 = [x1]              // 64-битная загрузка (размер по регистру назначения)
-w0 = [x1 + 8]          // 32-битная
+x0 = [x1]              // 64-bit load (size taken from the destination register)
+w0 = [x1 + 8]          // 32-bit
 w0 = u8[x1 + x2]       // ldrb (zero-extend)
 x0 = i8[p]             // ldrsb (sign-extend)
 x0 = i32[base + i*4]   // ldrsw x0, [base, i, lsl #2]
 u16[p + 2] = w3        // strh
 [sp + 16] = x19        // str
-w0 = u8[p++]           // пост-инкремент: ldrb w0, [p], #1
+w0 = u8[p++]           // post-increment: ldrb w0, [p], #1
 ```
 
-Типы доступа: `i8 u8 i16 u16 i32 u32 i64 u64 ptr f32 f64`.
-Адрес раскладывается в режимы адресации AArch64 (`[base, #imm]`, `[base, idx, lsl #s]`,
-`[base, w, sxtw #s]`); всё, что сложнее, вычисляется в скретч-регистр.
+Access types: `i8 u8 i16 u16 i32 u32 i64 u64 ptr f32 f64`.
+The address is mapped onto AArch64 addressing modes (`[base, #imm]`, `[base, idx, lsl #s]`,
+`[base, w, sxtw #s]`); anything more complex is computed into a scratch register.
 
-## Данные
+## Data
 
 ```hla
-const N = 10                               // константа времени трансляции
+const N = 10                               // translation-time constant
 const MASK = 0xFF00FF00FF00FF00
 data counter: i64 = 0                      // __DATA,__data
-data numbers: i32[N] = [42, -7, 19, 3]     // остаток заполняется нулями
-data greeting = "Hello"                    // строка (asciz)
-rodata names: ptr = ["zero", "one"]        // массив указателей на строки (read-only)
-data buffer: u8[4096]                      // без инициализатора → __bss (zerofill)
+data numbers: i32[N] = [42, -7, 19, 3]     // the rest is filled with zeros
+data greeting = "Hello"                    // string (asciz)
+rodata names: ptr = ["zero", "one"]        // array of pointers to strings (read-only)
+data buffer: u8[4096]                      // no initializer → __bss (zerofill)
 data pi: f64 = 3.141592653589793
 ```
 
-Использование:
+Usage:
 
 ```hla
-counter += 1               // загрузка/операция/сохранение через adrp + ldr/str
-x0 = numbers[i]            // ldrsw с масштабированием индекса
-numbers[i + 1] = w12       // константа индекса уходит в базовый адрес
-x0 = &numbers              // адрес (adrp + add)
+counter += 1               // load/operate/store via adrp + ldr/str
+x0 = numbers[i]            // ldrsw with a scaled index
+numbers[i + 1] = w12       // the constant part of the index goes into the base address
+x0 = &numbers              // address (adrp + add)
 x1 = &numbers[3]
-puts(greeting)             // массивы и строки при использовании как значение дают адрес
-x2 = len(greeting)         // 5 (элементов; для строк — без завершающего нуля)
-x3 = sizeof(numbers)       // 40 (байт)
+puts(greeting)             // arrays and strings used as a value give their address
+x2 = len(greeting)         // 5 (elements; for strings — without the terminating zero)
+x3 = sizeof(numbers)       // 40 (bytes)
 ```
 
-Строковые литералы в выражениях (`puts("hi")`) попадают в `__TEXT,__cstring` автоматически.
+String literals in expressions (`puts("hi")`) go into `__TEXT,__cstring` automatically.
 
-### Структуры и перечисления
+### Structs and enums
 
-Структура — это набор смещений (natural alignment), как в ассемблере, только считает их транслятор:
+A struct is a set of offsets (natural alignment), just like in assembly, except the translator
+computes them:
 
 ```hla
 struct Point { x: i64, y: i64 }      // Point.x = 0, Point.y = 8, Point.size = 16
 data points: Point[3]
 
-let p = &points[2]                   // адрес элемента: base + i * 16
+let p = &points[2]                   // element address: base + i * 16
 [p + Point.y] = 42
 x0 = [p + Point.y]
 
 enum Color { Red, Green, Blue = 5, Purple }   // 0, 1, 5, 6; Color.count = 7
 ```
 
-### Локальные переменные на стеке
+### Local variables on the stack
 
 ```hla
 fn f() {
-    local buf: u8[64]        // место во фрейме, адресуется от x29
+    local buf: u8[64]        // space in the frame, addressed from x29
     local tmp: i64
     tmp = x0                 // str x0, [x29, #-8]
     buf[0] = 'A'
     let p = &buf[63]
-    local total = 0          // i64 с начальным значением
-    local small: u8 = 250    // запись хранит 8 бит
-    for i in 0..10 { }       // если i уже объявлена (local или let), цикл идёт по ней
+    local total = 0          // i64 with an initial value
+    local small: u8 = 250    // a write stores 8 bits
+    for i in 0..10 { }       // if i is already declared (local or let), the loop uses it
 }
 ```
 
-`local` — переменная, которая **всегда живёт в кадре стека**, а `let` — в регистре, пока он есть.
-Чтение `local` — загрузка из кадра, запись — сохранение. Регистр нужен только на время
-операции, поэтому таких переменных может быть сколько угодно, и вызовы их не портят.
-Начальное значение вычисляется до того, как имя становится видно: `local x = x * 2` читает
-внешнюю `x`. Начальное значение бывает только у одного значения, не у массива или структуры.
+`local` is a variable that **always lives in the stack frame**, while `let` lives in a register as
+long as one is available. Reading a `local` is a load from the frame, writing is a store. A register
+is needed only for the duration of the operation, so you can have as many such variables as you
+like, and calls don't clobber them. The initial value is computed before the name becomes visible:
+`local x = x * 2` reads the outer `x`. Only a single value can have an initial value, not an array
+or a struct.
 
-## Управление потоком
+## Control flow
 
 ```hla
 if a == 0 {
     ...
-} elif a < 0 && a > -10 {         // также `else if`
+} elif a < 0 && a > -10 {         // `else if` too
     ...
 } else {
     ...
@@ -185,142 +201,143 @@ loop { if done { break } }
 for i in 0..10 { }                // 0..9
 for i in 0..=10 step 2 { }        // 0, 2, ..., 10
 for i in 10..0 step -1 { }        // 10..1
-for i: x9 in 0..n { }             // переменная цикла в заданном регистре
-for (let k = 0; k < 10; k++) { }  // C-стиль, скобки необязательны
+for i: x9 in 0..n { }             // loop variable in a given register
+for (let k = 0; k < 10; k++) { }  // C style, parentheses are optional
 
-outer: for a in 1..20 {           // метки циклов
+outer: for a in 1..20 {           // loop labels
     for b in a..20 {
         if a * b == 91 { break outer }
         if b > a + 10 { continue outer }
     }
 }
 
-again:                            // метка и goto
+again:                            // label and goto
     k++
     if k < 3 { goto again }
 ```
 
-В `for i in a..b` сначала вычисляется `a`, потом `b`, оба один раз, до первой итерации.
-Изменение `b` внутри цикла число итераций не меняет. Если переменная `i` уже объявлена (`let`
-или `local`), цикл идёт по ней, и после цикла в ней остаётся последнее значение.
+In `for i in a..b`, `a` is evaluated first, then `b`, each once, before the first iteration.
+Changing `b` inside the loop doesn't change the number of iterations. If the variable `i` is already
+declared (`let` or `local`), the loop uses it, and after the loop it holds the last value.
 
 ### switch
 
 ```hla
 switch c {
-    case '0'..='9' { kind = DIGIT }          // диапазон: ..= включает конец, .. — нет
-    case '+', '-', '*' { kind = OP }         // несколько значений через запятую
+    case '0'..='9' { kind = DIGIT }          // range: ..= includes the end, .. doesn't
+    case '+', '-', '*' { kind = OP }         // several values separated by commas
     case 'a'..='z', 'A'..='Z', '_' { kind = NAME }
-    default { kind = OTHER }                 // необязательно; также `else { }`
+    default { kind = OTHER }                 // optional; `else { }` too
 }
 ```
 
-`switch` — сокращение для цепочки `if`/`elif`: условия проверяются сверху вниз, выполняется
-**первая** подходящая ветка, проваливания в следующую нет (`break` не нужен). `break` и `continue`
-внутри `switch` относятся к объемлющему циклу, как и внутри `if`. Значения в `case` — любые
-выражения, обычно константы, символы и `enum`. Если проверяемое выражение — не просто имя
-(`switch next_char() { }`, `switch u8[p] { }`), оно вычисляется один раз в скрытую переменную.
+`switch` is shorthand for an `if`/`elif` chain: conditions are checked top to bottom, the **first**
+matching branch runs, and there's no fallthrough to the next one (no `break` needed). `break` and
+`continue` inside a `switch` refer to the enclosing loop, just as inside `if`. Values in `case` can
+be any expressions, usually constants, characters and `enum`s. If the expression being tested isn't
+just a name (`switch next_char() { }`, `switch u8[p] { }`), it's evaluated once into a hidden variable.
 
-Условия компилируются в «прыжковый» код: `&&`/`||` — короткое замыкание без вычисления 0/1,
-`x == 0` → `cbz`, `x & 8` → `tbnz x, #3`, `x & mask` → `tst`. Циклы «развёрнуты»: условие стоит в конце,
-одна ветка на итерацию.
+Conditions are compiled into "jumping" code: `&&`/`||` short-circuit without computing 0/1,
+`x == 0` → `cbz`, `x & 8` → `tbnz x, #3`, `x & mask` → `tst`. Loops are "rotated": the condition is at
+the end, one branch per iteration.
 
-## Функции
+## Functions
 
 ```hla
-fn add3(a, b, c) {           // параметры без регистра — это псевдонимы x0, x1, x2
+fn add3(a, b, c) {           // parameters without a register are aliases for x0, x1, x2
     return a + b + c
 }
 
-fn fact(n: auto) {           // n копируется в свободный callee-saved регистр и переживает вызовы
+fn fact(n: auto) {           // n is copied into a free callee-saved register and survives calls
     if n <= 1 { return 1 }
     x0 = fact(n - 1)
     return x0 * n
 }
 
-fn hypot(a: d0, b: d1) {     // параметры с плавающей точкой — d0..d7
+fn hypot(a: d0, b: d1) {     // floating-point parameters — d0..d7
     return sqrt(a * a + b * b)
 }
 
 export fn api() { }          // .globl _api
-naked fn twice(v) {          // без пролога/эпилога — всё вручную
+naked fn twice(v) {          // no prologue/epilogue — everything by hand
     lsl x0, x0, #1
     ret
 }
 ```
 
-- Имя функции `foo` становится символом `_foo` (совместимо с C: функцию можно передать в `qsort`).
-- Пролог: `stp x29, x30, [sp, #-16]!`, место под локальные переменные, сохранение **всех
-  callee-saved регистров, которые встречаются в теле** (x19..x28, d8..d15).
-- `return expr` кладёт значение в `x0` (или `d0`, если выражение вещественное).
-- `main` без `return` возвращает 0.
-- Аргументы командной строки: `fn main(argc: i32, argv: ptr)` — как в C, `argv` указывает на
-  массив указателей на строки, `argv[0]` — имя программы. Параметры приходят в регистрах
-  аргументов, поэтому до первого вызова скопируйте их: `let n = argc`. На Windows их достаёт
-  `hla_start` (`__getmainargs` из msvcrt.dll); в CLI аргументы передаются после `--`:
-  `node src/cli.ts run prog.hla -- one two` (и в `emu`). Пример — `tests/cases/args.hla`.
+- A function named `foo` becomes the symbol `_foo` (C-compatible: the function can be passed to `qsort`).
+- Prologue: `stp x29, x30, [sp, #-16]!`, space for local variables, saving **all callee-saved
+  registers that appear in the body** (x19..x28, d8..d15).
+- `return expr` puts the value into `x0` (or `d0` if the expression is floating-point).
+- `main` without `return` returns 0.
+- Command-line arguments: `fn main(argc: i32, argv: ptr)` — as in C, `argv` points to an
+  array of pointers to strings, `argv[0]` is the program name. The parameters arrive in argument
+  registers, so copy them before the first call: `let n = argc`. On Windows they're fetched by
+  `hla_start` (`__getmainargs` from msvcrt.dll); in the CLI, arguments are passed after `--`:
+  `node src/cli.ts run prog.hla -- one two` (and in `emu`). Example: `tests/cases/args.hla`.
 
-### Вызовы
+### Calls
 
 ```hla
-extern puts, malloc, free, qsort       // функции libSystem
-extern printf(fmt, ...)                // variadic: аргументы после fmt идут через стек (Apple ABI)
+extern puts, malloc, free, qsort       // libSystem functions
+extern printf(fmt, ...)                // variadic: arguments after fmt go on the stack (Apple ABI)
 
 puts("Hello")
-let p = malloc(64)                     // результат из x0
+let p = malloc(64)                     // result from x0
 printf("%ld + %ld = %ld\n", a, b, add3(a, b, 0))
-qsort(&numbers, N, 4, cmp_i32)         // адрес своей функции
-x9(x0)                                 // вызов по указателю в регистре (blr)
+qsort(&numbers, N, 4, cmp_i32)         // address of your own function
+x9(x0)                                 // call through a pointer in a register (blr)
 ```
 
-- Аргументы раскладываются в `x0..x7` / `d0..d7`. Если аргументы зависят друг от друга
-  (`f(x1, x0)`), транслятор переставляет их через стек.
-- Вызовы можно писать в любом месте выражения: `f(a) + g(b)`, `[p + 8] = f(x)`,
-  `g(f(1), f(2))`. Выражение вычисляется слева направо. Если результат вызова или значение,
-  вычисленное до него, не переживёт следующий вызов в регистрах, транслятор кладёт его в скрытую
-  ячейку кадра стека и потом достаёт обратно. Адрес записи `[addr] = f(x)` вычисляется до вызова.
-- Исключения: правая часть `&&`/`||`, ветви `?:` и выражения с плавающей точкой. Там вызов
-  по-прежнему должен быть первым вычисляемым операндом, а иначе транслятор сообщит об ошибке
-  с подсказкой.
+- Arguments are placed in `x0..x7` / `d0..d7`. If arguments depend on each other
+  (`f(x1, x0)`), the translator shuffles them through the stack.
+- Calls can appear anywhere in an expression: `f(a) + g(b)`, `[p + 8] = f(x)`,
+  `g(f(1), f(2))`. The expression is evaluated left to right. If a call's result, or a value
+  computed before it, won't survive the next call in registers, the translator stores it in a hidden
+  stack frame slot and loads it back later. The address in a store `[addr] = f(x)` is computed before the call.
+- Exceptions: the right-hand side of `&&`/`||`, the branches of `?:` and floating-point expressions.
+  There the call must still be the first operand evaluated, otherwise the translator reports an error
+  with a hint.
 
-### Системные вызовы
+### System calls
 
 ```hla
-syscall(SYS_write, 1, msg, len(msg))   // x16 = номер, svc #0x80
+syscall(SYS_write, 1, msg, len(msg))   // x16 = number, svc #0x80
 syscall(SYS_exit, 0)
 ```
 
-Предопределены `SYS_exit, SYS_read, SYS_write, SYS_open, SYS_close, SYS_getpid, SYS_mmap, ...`.
+Predefined: `SYS_exit, SYS_read, SYS_write, SYS_open, SYS_close, SYS_getpid, SYS_mmap, ...`.
 
-## Встроенные функции
+## Built-in functions
 
-| функция | код |
+| function | code |
 |---|---|
 | `min(a,b)`, `max(a,b)`, `umin`, `umax` | `cmp` + `csel` |
 | `abs(x)` | `cmp` + `cneg` |
-| `clz(x)`, `rbit(x)`, `rev(x)` | одноимённые инструкции |
+| `clz(x)`, `rbit(x)`, `rev(x)` | instructions of the same name |
 | `sext8/16/32(x)`, `zext8/16/32(x)` | `sxtb/sxth/sxtw`, `uxtb/uxth/mov w` |
-| `float(x)` | `scvtf` (`ucvtf` для unsigned) |
+| `float(x)` | `scvtf` (`ucvtf` for unsigned) |
 | `int(d)` | `fcvtzs` |
 | `sqrt(d)`, `fabs(d)` | `fsqrt`, `fabs` |
-| `sizeof(x)`, `len(x)` | константы времени трансляции |
+| `sizeof(x)`, `len(x)` | translation-time constants |
 | `syscall(n, ...)` | `svc #0x80` |
 
-## Плавающая точка
+## Floating point
 
 ```hla
 let r: d8 = 2.0
-d0 = pi * r * r              // fmul; константы — fmov #imm или литерал из __literal8
+d0 = pi * r * r              // fmul; constants — fmov #imm or a literal from __literal8
 d1 = float(a) / 3.0
 x0 = int(d1)
 if d0 > 4.0 && d1 >= 0.5 { } // fcmp
-s0 = fl                      // f32 из памяти
+s0 = fl                      // f32 from memory
 ```
 
-## Встроенный ассемблер
+## Processor instructions in code
 
-Любая строка, которая не похожа на конструкцию языка, — это инструкция ассемблера.
-Псевдонимы, константы, метки и имена функций/данных подставляются:
+Any line that doesn't look like a sugar construct is an assembly instruction; it goes into the
+listing as is. Aliases, `let` variables, parameters, constants, labels and function/data names
+are substituted:
 
 ```hla
 fn popcount(v) {
@@ -335,31 +352,60 @@ fn popcount(v) {
 
 asm {
     mov x9, value
-1:  cbz x9, 2f              // числовые локальные метки
+1:  cbz x9, 2f              // numeric local labels
     sub x10, x9, #1
     and x9, x9, x10
     b 1b
 2:
 }
 asm "dmb ish"
-1:  add x9, x9, #1           // числовая метка допустима и вне блока asm
+1:  add x9, x9, #1           // a numeric label is allowed outside an asm block too
 push x19, x20                // stp x19, x20, [sp, #-16]!
 pop x19, x20
 ```
 
-Первое слово строки — всегда команда процессора (в `b 1b` не заменится даже псевдоним `b`).
-Команда `ret` в обычной (не `naked`) функции пропускает эпилог — транслятор предупредит; используйте `return`.
+The first word of a line is always a processor instruction (in `b 1b`, even an alias named `b` won't
+be substituted). A `ret` instruction in an ordinary (non-`naked`) function skips the epilogue — the
+translator will warn you; use `return`.
 
-## Несколько файлов
+Instructions and sugar see the same things:
 
 ```hla
-// main.hla — сборка начинается с этого файла
-include "util/text.hla"      // путь от включающего файла; '/' и на Windows
-include "geometry.hla"
-include "std/file.hla"       // встроенная библиотека (см. ниже)
+data counter: i64 = 41
 
 fn main() {
-    say("hello")             // функция из util/text.hla
+    adrp x9, counter@PAGE        // data by name (the translator adds the '_' prefix)
+    ldr x10, [x9, counter@PAGEOFF]
+    let n = 4                    // a sugar variable — register x19…x28
+again:                           // a sugar label — a target for b.cond
+    add x10, x10, #1
+    subs n, n, #1
+    b.ne again
+    if x10 > 44 { counter = x10 }  // sugar again: a condition on a register, a store to memory
+}
+```
+
+- `asm { }` isn't required: it only groups instructions and lets you put labels at the start of a
+  line inside the block. Individual instructions are written among sugar lines without a wrapper.
+- If a function ends with an instruction that put the result into `x0` (`rax` on x64), no `return`
+  is needed: the epilogue doesn't touch the result register.
+- Sugar uses the scratch registers `x16`, `x17`, `d29…d31` (on x64 — `r10`, `r11`, `xmm4`,
+  `xmm5`): their values aren't preserved between sugar lines.
+- Instructions are written in the platform's syntax: the Apple dialect of AArch64 or Intel (LLVM) for
+  x86-64. The built-in assembler understands ≈140 AArch64 mnemonics and the main integer and SSE
+  instructions of x86-64; whatever it doesn't know (for example, `adc`, `crc32b`, SIMD) can be
+  assembled with `--clang`.
+
+## Multiple files
+
+```hla
+// main.hla — the build starts from this file
+include "util/text.hla"      // path relative to the including file; '/' on Windows too
+include "geometry.hla"
+include "std/file.hla"       // built-in library (see below)
+
+fn main() {
+    say("hello")             // function from util/text.hla
 }
 ```
 
@@ -370,54 +416,55 @@ extern puts
 fn say(s) { puts(s) }
 ```
 
-`include` подставляет текст файла вместо строки — программа собирается как один большой файл.
-Каждый файл подключается **один раз**: повторный `include` того же файла и циклы включений
-пропускаются, так что каждый файл может сам подключать то, что ему нужно. Пример —
+`include` substitutes the file's text in place of the line — the program is built as one big file.
+Each file is included **once**: a repeated `include` of the same file and include cycles are
+skipped, so every file can include whatever it needs itself. Example:
 [tests/include](../tests/include).
 
-- **Форма.** `include "путь"` — одна на строке; после неё можно оставить `// комментарий`.
-  Включение текстовое, поэтому работает в любом месте файла (даже внутри `{ }`), но обычно
-  его пишут в начале.
-- **Пути** — от каталога включающего файла: из `util/text.hla` строка `include "fmt.hla"` ищет
-  `util/fmt.hla`. Разделитель — `/` на всех системах (`\` тоже понимается), `..` поднимается на
-  каталог выше.
-- **`std/…`** — файлы, встроенные в транслятор (сейчас один: `std/file.hla`). Их не нужно класть
-  в проект и можно подключать из любого каталога. Файл с тем же путём в проекте главнее
-  встроенного — так библиотеку можно заменить своей.
-- **Одно пространство имён.** После склейки все имена верхнего уровня (`fn`, `data`, `const`,
-  `struct`, `enum`, глобальные `alias`, `extern`) видны во всех файлах, в том числе раньше места
-  определения: `main` может вызывать функцию из файла, подключённого в конце. Одно имя
-  в двух файлах — ошибка `'twice' is already defined`.
-- **Ошибки и предупреждения** указывают настоящий файл и строку: `util/text.hla:12:5: error: …`;
-  отсутствующий файл — `cannot find included file 'util/fmt.hla'` на строке с `include`.
-- **CLI** получает только главный файл, остальные читает с диска сам:
-  `node src/cli.ts run main.hla` (так же `build`, `emu`, `obj`, `lib`; имя библиотеки — по главному файлу).
-- **На странице** файлы проекта — в панели **Files** слева. Главный помечен `main`; кнопка ▶ у
-  другого `.hla` делает главным его. Файлы можно создавать, переименовывать (строки `include`
-  в остальных файлах исправляются сами), удалять и перетаскивать с диска; **Download project .zip**
-  скачивает все файлы.
+- **Form.** `include "path"` — one per line; you can leave a `// comment` after it.
+  Inclusion is textual, so it works anywhere in a file (even inside `{ }`), but it's usually
+  written at the top.
+- **Paths** are relative to the including file's directory: from `util/text.hla`, the line
+  `include "fmt.hla"` looks for `util/fmt.hla`. The separator is `/` on all systems (`\` is understood
+  too), `..` goes up one directory.
+- **`std/…`** are files built into the translator (currently just one: `std/file.hla`). You don't
+  need to put them in your project, and they can be included from any directory. A file with the same
+  path in the project takes precedence over the built-in one — that's how you can replace the library
+  with your own.
+- **One namespace.** After merging, all top-level names (`fn`, `data`, `const`,
+  `struct`, `enum`, global `alias`, `extern`) are visible in all files, including before the point of
+  definition: `main` can call a function from a file included at the end. The same name
+  in two files is an error: `'twice' is already defined`.
+- **Errors and warnings** point to the real file and line: `util/text.hla:12:5: error: …`;
+  a missing file gives `cannot find included file 'util/fmt.hla'` on the `include` line.
+- **The CLI** takes only the main file and reads the rest from disk itself:
+  `node src/cli.ts run main.hla` (likewise `build`, `emu`, `obj`, `lib`; the library is named after the main file).
+- **On the web page**, project files are in the **Files** panel on the left. The main one is marked
+  `main`; the ▶ button next to another `.hla` makes it the main one. Files can be created, renamed
+  (`include` lines in other files are fixed automatically), deleted and dragged in from disk;
+  **Download project .zip** downloads all files.
 
-## Файлы: std/file.hla
+## Files: std/file.hla
 
-Встроенная библиотека для чтения и записи файлов. Функции называются и работают **одинаково на
-macOS и Windows**, поэтому программа с ними переносится между платформами без изменений — не нужны
-ни `syscall` macOS, ни WinAPI. Её не нужно класть в проект и не нужно объявлять функции через
-`extern` — достаточно `include "std/file.hla"`.
+A built-in library for reading and writing files. The functions are named and behave **the same on
+macOS and Windows**, so a program using them moves between platforms unchanged — you need neither
+macOS `syscall` nor WinAPI. You don't need to put it in your project or declare the functions with
+`extern` — `include "std/file.hla"` is enough.
 
-| функция | что делает | результат |
+| function | what it does | result |
 |---|---|---|
-| `read_file(path, buf, size)` | читает файл целиком, но не больше `size` байт, в `buf` | прочитано байт; `-1` — файл не открылся |
-| `write_file(path, buf, size)` | создаёт файл или заменяет его содержимое `size` байтами из `buf` | записано байт; `-1` — ошибка |
-| `append_file(path, buf, size)` | дописывает байты в конец (создаёт файл, если его нет) | записано байт; `-1` — ошибка |
-| `file_size(path)` | размер файла | байт; `-1` — файла нет |
-| `file_open(path, mode)` | открывает файл для пошаговой работы: `"r"` чтение, `"w"` запись (создать/обнулить), `"a"` дописывание; `"r+"`, `"w+"`, `"a+"` — чтение и запись | дескриптор; `0` — ошибка |
-| `file_read(f, buf, size)` | читает следующие байты, не больше `size` | прочитано байт; `0` — конец файла |
-| `file_write(f, buf, size)` | пишет `size` байт из `buf` | записано байт |
-| `file_close(f)` | закрывает файл | `0` — данные записаны |
+| `read_file(path, buf, size)` | reads the whole file, but no more than `size` bytes, into `buf` | bytes read; `-1` — the file didn't open |
+| `write_file(path, buf, size)` | creates the file or replaces its contents with `size` bytes from `buf` | bytes written; `-1` — error |
+| `append_file(path, buf, size)` | appends bytes to the end (creates the file if it doesn't exist) | bytes written; `-1` — error |
+| `file_size(path)` | file size | bytes; `-1` — no such file |
+| `file_open(path, mode)` | opens a file for step-by-step work: `"r"` read, `"w"` write (create/truncate), `"a"` append; `"r+"`, `"w+"`, `"a+"` — read and write | handle; `0` — error |
+| `file_read(f, buf, size)` | reads the next bytes, no more than `size` | bytes read; `0` — end of file |
+| `file_write(f, buf, size)` | writes `size` bytes from `buf` | bytes written |
+| `file_close(f)` | closes the file | `0` — data written |
 
-`path` и `mode` — строки с нулём в конце (литерал `"input.txt"` или адрес в `data`), `buf` —
-адрес буфера. `read_file` и `file_read` не дописывают `0` после данных: чтобы работать с прочитанным
-как со строкой, оставьте под него байт — `read_file(p, buf, sizeof(buf) - 1)`, затем `buf[n] = 0`.
+`path` and `mode` are zero-terminated strings (a literal `"input.txt"` or an address in `data`), `buf`
+is the buffer address. `read_file` and `file_read` don't append a `0` after the data: to work with
+what you read as a string, leave a byte for it — `read_file(p, buf, sizeof(buf) - 1)`, then `buf[n] = 0`.
 
 ```hla
 include "std/file.hla"
@@ -425,21 +472,21 @@ include "std/file.hla"
 data buf: u8[4096]
 
 fn main() {
-    let n = read_file("input.txt", buf, sizeof(buf))   // прочитано байт или -1
-    write_file("copy.txt", buf, n)                      // создать/заменить; записано байт или -1
-    append_file("log.txt", "done\n", 5)                 // дописать в конец (создаёт файл)
-    let size = file_size("input.txt")                   // -1, если файла нет
+    let n = read_file("input.txt", buf, sizeof(buf))   // bytes read or -1
+    write_file("copy.txt", buf, n)                      // create/replace; bytes written or -1
+    append_file("log.txt", "done\n", 5)                 // append to the end (creates the file)
+    let size = file_size("input.txt")                   // -1 if there's no such file
 
-    let f = file_open("numbers.txt", "w")               // "r", "w", "a" (+ "r+" ...); 0 — ошибка
+    let f = file_open("numbers.txt", "w")               // "r", "w", "a" (+ "r+" ...); 0 — error
     file_write(f, buf, 16)
-    file_close(f)                                       // 0 — данные в файле
+    file_close(f)                                       // 0 — data is in the file
     f = file_open("numbers.txt", "r")
-    let got = file_read(f, buf, 4)                      // 0 — конец файла
+    let got = file_read(f, buf, 4)                      // 0 — end of file
     file_close(f)
 }
 ```
 
-Чтение файла по кускам — до конца:
+Reading a file in chunks, to the end:
 
 ```hla
 let f = file_open("data.bin", "r")
@@ -447,28 +494,28 @@ if f == 0 { return 1 }
 loop {
     let got = file_read(f, buf, sizeof(buf))
     if got == 0 { break }
-    // ... обработать got байт из buf
+    // ... process got bytes from buf
 }
 file_close(f)
 ```
 
-Как это устроено:
+How it works:
 
-- Функции написаны на обычном HLA64 (текст — в [src/lang/stdlib.ts](../src/lang/stdlib.ts)) поверх
-  `fopen`/`fread`/`fwrite`/`fclose`/`fseek`/`ftell` из C runtime — они есть и в libSystem, и в
-  `msvcrt.dll`. Регистры в библиотеке не названы, поэтому один и тот же текст собирается для обеих
-  платформ. Эти имена C (`fopen`, `fread`, …) заняты библиотекой: свою функцию с таким именем
-  определить нельзя, а вызывать их напрямую можно.
-- Файлы всегда открываются в двоичном режиме (транслятор добавляет `b` к `mode`), поэтому на Windows
-  `\n` не превращается в `\r\n`, и байты в файле одинаковы на обеих системах.
-- Пути — от текущего каталога программы; `/` работает и на Windows.
-- Где программа видит файлы: нативно и в `cli emu` — на диске; на странице — файлы проекта
-  (их можно читать, а записанные программой появляются в панели **Files**, как текст).
-- `file_size` — до 2 ГБ (`long` в C на Windows 32-битный).
+- The functions are written in ordinary HLA64 (the source is in [src/lang/stdlib.ts](../src/lang/stdlib.ts))
+  on top of `fopen`/`fread`/`fwrite`/`fclose`/`fseek`/`ftell` from the C runtime — they exist both in
+  libSystem and in `msvcrt.dll`. The library doesn't name any registers, so the same source builds for
+  both platforms. These C names (`fopen`, `fread`, …) are taken by the library: you can't define your
+  own function with such a name, but you can call them directly.
+- Files are always opened in binary mode (the translator adds `b` to `mode`), so on Windows
+  `\n` doesn't turn into `\r\n`, and the bytes in the file are the same on both systems.
+- Paths are relative to the program's current directory; `/` works on Windows too.
+- Where the program sees files: natively and in `cli emu` — on disk; on the web page — the project
+  files (they can be read, and files written by the program appear in the **Files** panel as text).
+- `file_size` — up to 2 GB (`long` in C on Windows is 32-bit).
 
-Пример со всеми функциями — [tests/cases/files.hla](../tests/cases/files.hla).
+An example using all the functions: [tests/cases/files.hla](../tests/cases/files.hla).
 
-## Библиотеки и связь с C
+## Libraries and interop with C
 
 ```hla
 export const VERSION = 3                    // #define VERSION 3
@@ -479,35 +526,37 @@ export fn clamp(v: i32, lo: i32, hi: i32) -> i32 { ... }   // int32_t clamp(int3
 export fn length(v: ptr) -> f64 { ... }                    // double length(void *v);
 ```
 
-- У параметра вместо регистра можно указать тип: `i8 u8 i16 u16 i32 u32 i64 u64 ptr f32 f64`.
-  Целые меньше 64 бит при входе расширяются до 64 бит (`sxtw`, `uxtb`, …): C передаёт `int` и `char`
-  только в младших битах. `f32`/`f64` приходят в `s`/`d`-регистрах.
-- `-> тип` задаёт тип результата для заголовка (`-> void`, `-> i64`, `-> f64`, …).
-- `node src/cli.ts lib name.hla` создаёт `name.h`, `name.o`, `libname.a`, `libname.dylib`
+- Instead of a register, a parameter can be given a type: `i8 u8 i16 u16 i32 u32 i64 u64 ptr f32 f64`.
+  Integers narrower than 64 bits are extended to 64 bits on entry (`sxtw`, `uxtb`, …): C passes `int`
+  and `char` only in the low bits. `f32`/`f64` arrive in `s`/`d` registers.
+- `-> type` sets the result type for the header (`-> void`, `-> i64`, `-> f64`, …).
+- `node src/cli.ts lib name.hla` creates `name.h`, `name.o`, `libname.a`, `libname.dylib`
   (install name `@rpath/libname.dylib`).
-- `node src/cli.ts obj prog.hla` — объектный файл программы, чтобы скомпоновать её с кодом на C:
+- `node src/cli.ts obj prog.hla` produces the program's object file so you can link it with C code:
   `clang prog.o helpers.c -o app`.
-- Вызов по указателю на функцию (`f(x)`, где `f` — параметр в `x0 … x7`) транслятор переносит
-  во временный регистр, чтобы аргументы его не затёрли.
+- For a call through a function pointer (`f(x)`, where `f` is a parameter in `x0 … x7`), the
+  translator moves the pointer to a temporary register so the arguments don't overwrite it.
 
-Подробно, с примерами: [урок 14](lessons/14-c-library.md).
+In detail, with examples: [lesson 14](lessons/14-c-library.md).
 
-## Совместимость с hlaa64
+## Compatibility with hlaa64
 
-Синтаксис исходного hlaa64 тоже принимается: `alias a = X1;`, `set a = b + c;`,
+The syntax of the original hlaa64 is accepted too: `alias a = X1;`, `set a = b + c;`,
 `function name() { ... }`, `call name();`, `loop { ... break; }`, `if (a >= b) { } else { }`, `return;`.
+`call` without parentheses after the name (`call puts`, `call rax`) is an x86-64 instruction.
 
-## Платформы
+## Platforms
 
-Язык один, генераторов кода два: AArch64 для macOS (по умолчанию на macOS) и x86-64 для Windows
-(`--target x64-windows`, по умолчанию на Windows). Всё, что не называет регистры явно (`let`,
-данные, структуры, циклы, вызовы C), переносится без изменений; имена регистров, встроенный
-ассемблер и `syscall` у каждой платформы свои. Регистры, соглашение Win64 и отличия —
-в [windows.md](windows.md).
+One language, two code generators: AArch64 for macOS (the default on macOS) and x86-64 for Windows
+(`--target x64-windows`, the default on Windows). Everything that doesn't name registers explicitly
+(`let`, data, structs, loops, C calls) carries over unchanged; register names, the built-in
+assembler and `syscall` are specific to each platform. Registers, the Win64 convention and the
+differences are described in [windows.md](windows.md).
 
-## Ограничения
+## Limitations
 
-- Целочисленная арифметика 64-битная по умолчанию; переполнение — как у машины (wrap-around).
-- Структуры нельзя инициализировать в `data` (только zero-fill) — заполняйте их в коде.
-- Нет SIMD-выражений (но `ld1`/`v`-регистры можно писать в `asm`, если их понимает ассемблер — встроенный пока нет).
-- AArch64: не более 8 регистровых аргументов у функции (на x64 аргументы после четвёртого идут через стек).
+- Integer arithmetic is 64-bit by default; overflow behaves like the machine (wrap-around).
+- Structs can't be initialized in `data` (zero-fill only) — fill them in code.
+- No SIMD expressions (but `ld1`/`v` registers can be written in `asm` if the assembler understands
+  them — the built-in one doesn't yet).
+- AArch64: at most 8 register arguments per function (on x64, arguments after the fourth go on the stack).

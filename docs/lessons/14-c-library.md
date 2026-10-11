@@ -1,49 +1,57 @@
-# Урок 14. Библиотека для C (и C для HLA64)
+# Lesson 14. A library for C (and C for HLA64)
 
-Программы на C и на HLA64 соблюдают одно и то же **соглашение о вызовах** (урок 6 и шпаргалка
-в уроке 12): аргументы в `x0 … x7` и `d0 … d7`, результат в `x0` или `d0`, регистры `x19 … x28`
-сохраняются. Поэтому функция, написанная на HLA64, для C — самая обычная функция, и наоборот.
-Остаётся объяснить компилятору C, что это за функции, и собрать всё вместе.
+<!-- languages -->
+<h3 align="center">
+<b>🇬🇧 English</b> ·
+<a href="../ru/lessons/14-c-library.md">🇷🇺 Русский</a>
+</h3>
+<!-- /languages -->
 
-В этом уроке мы:
+C and HLA64 programs follow the same **calling convention** (lesson 6 and the cheat sheet
+in lesson 12): arguments in `x0 … x7` and `d0 … d7`, the result in `x0` or `d0`, registers `x19 … x28`
+are preserved. So a function written in HLA64 is a perfectly ordinary function for C, and vice versa.
+All that's left is to tell the C compiler what these functions are and to build everything together.
 
-1. напишем на HLA64 библиотеку математических функций и вызовем её из программы на C — со статической
-   и с динамической компоновкой;
-2. сделаем наоборот: программа на HLA64 вызовет функции, написанные на C.
+In this lesson we will:
 
-Этот урок нужно выполнять на Mac: для части на C понадобится компилятор `clang` (команда
-`xcode-select --install` ставит его вместе с инструментами командной строки). Все файлы урока лежат в
-папке [`14-library`](14-library/), а [`build.sh`](14-library/build.sh) собирает и запускает всё сразу.
+1. write a library of math functions in HLA64 and call it from a C program — with static
+   and with dynamic linking;
+2. do the reverse: an HLA64 program will call functions written in C.
 
-Чтобы команды были короче, заведите в терминале сокращение (из корня проекта):
+This lesson has to be done on a Mac: the C part needs the `clang` compiler (the command
+`xcode-select --install` installs it along with the command-line tools). All the lesson's files are in
+the [`14-library`](14-library/) folder, and [`build.sh`](14-library/build.sh) builds and runs everything at once.
+
+To keep the commands short, create an alias in the terminal (from the project root):
 
 ```sh
 alias hla="node $PWD/src/cli.ts"
 ```
 
-## Как это устроено
+## How it works
 
-Программа на C собирается из нескольких **объектных файлов** (`.o`): компилятор переводит каждый
-исходник в машинный код, но адреса чужих функций ещё не знает и оставляет в коде пометки —
-**релокации** («сюда подставить адрес `_gcd`»). Затем **компоновщик** (`ld`) склеивает объектные файлы
-и библиотеки в программу и заполняет все пометки.
+A C program is built from several **object files** (`.o`): the compiler translates each source
+file into machine code, but it doesn't know the addresses of other files' functions yet, so it leaves
+notes in the code — **relocations** ("put the address of `_gcd` here"). Then the **linker** (`ld`)
+glues the object files and libraries into a program and fills in all the notes.
 
-Встроенный ассемблер HLA64 умеет делать такие же объектные файлы, а из них — библиотеки двух видов:
+HLA64's built-in assembler can produce the same kind of object files, and from them, two kinds of
+libraries:
 
-| вид | файл | как подключается |
+| kind | file | how it's linked |
 |---|---|---|
-| статическая | `libmathlib.a` | код библиотеки **копируется** в программу при сборке |
-| динамическая | `libmathlib.dylib` | программа хранит только ссылку, а код загружается при запуске |
+| static | `libmathlib.a` | the library code is **copied** into the program at build time |
+| dynamic | `libmathlib.dylib` | the program only stores a reference, and the code is loaded at startup |
 
-Ещё компилятору C нужен **заголовок** `mathlib.h`: в нём записано, какие функции есть, какие у них
-параметры и что они возвращают. HLA64 создаёт его сам.
+The C compiler also needs a **header**, `mathlib.h`: it records which functions exist, what their
+parameters are and what they return. HLA64 generates it by itself.
 
-## Шаг 1. Что экспортировать
+## Step 1. What to export
 
-По умолчанию функции и данные программы HLA64 видны только внутри неё. Слово `export` делает их
-доступными снаружи:
+By default, the functions and data of an HLA64 program are visible only inside it. The `export`
+keyword makes them available from outside:
 
-| HLA64 | в заголовке C |
+| HLA64 | in the C header |
 |---|---|
 | `export fn gcd(a: i64, b: i64) -> i64` | `int64_t gcd(int64_t a, int64_t b);` |
 | `export data call_count: i64 = 0` | `extern int64_t call_count;` |
@@ -51,26 +59,27 @@ alias hla="node $PWD/src/cli.ts"
 | `export enum Shape { Circle, Square }` | `enum Shape { Shape_Circle = 0, Shape_Square = 1 };` |
 | `export const VERSION = 3` | `#define VERSION 3` |
 
-Компилятору C важны **типы**, поэтому у параметров экспортируемых функций их стоит указать — после
-двоеточия, там, где раньше писался регистр:
+The C compiler cares about **types**, so it's worth specifying them for the parameters of exported
+functions — after the colon, where you used to write a register:
 
-| тип HLA64 | тип C | где приходит |
+| HLA64 type | C type | where it arrives |
 |---|---|---|
-| `i64`, `u64` | `int64_t`, `uint64_t` (`long`) | `x`-регистр |
-| `i32`, `u32` | `int32_t`, `uint32_t` (`int`) | младшие 32 бита `x`-регистра |
-| `i16`, `u16`, `i8`, `u8` | `int16_t` … `uint8_t` (`short`, `char`) | младшие биты |
-| `ptr` | `void *` (любой указатель, строки, массивы) | `x`-регистр |
-| `f64`, `f32` | `double`, `float` | `d`/`s`-регистр |
+| `i64`, `u64` | `int64_t`, `uint64_t` (`long`) | an `x` register |
+| `i32`, `u32` | `int32_t`, `uint32_t` (`int`) | the low 32 bits of an `x` register |
+| `i16`, `u16`, `i8`, `u8` | `int16_t` … `uint8_t` (`short`, `char`) | the low bits |
+| `ptr` | `void *` (any pointer, strings, arrays) | an `x` register |
+| `f64`, `f32` | `double`, `float` | a `d`/`s` register |
 
-Тип результата пишется после стрелки: `-> i64`, `-> i32`, `-> f64`, `-> ptr`. Если стрелки нет, а
-функция возвращает значение, в заголовке будет `int64_t`; если не возвращает — `void`.
+The result type goes after the arrow: `-> i64`, `-> i32`, `-> f64`, `-> ptr`. If there's no arrow but
+the function returns a value, the header will say `int64_t`; if it doesn't return anything, `void`.
 
-**Почему типы важны.** Когда C передаёт `int` (32 бита), он кладёт число только в младшую половину
-регистра, а старшие 32 бита могут содержать что угодно. Параметр `v: i32` HLA64 при входе в функцию
-**расширяет** до честного 64-битного значения (командой `sxtw`), и дальше с ним можно работать как
-обычно. Без типа (`v` или `v: x0`) мусор в старших битах испортил бы сравнения.
+**Why types matter.** When C passes an `int` (32 bits), it puts the number only in the lower half of
+the register, and the upper 32 bits may contain anything. For a parameter `v: i32`, HLA64 **extends**
+it to a proper 64-bit value on entry to the function (with the `sxtw` instruction), and from then on
+you can work with it as usual. Without a type (`v` or `v: x0`), garbage in the upper bits would break
+comparisons.
 
-Вот вся библиотека:
+Here is the whole library:
 
 ```hla file=mathlib.hla
 // mathlib.hla — a small library written in HLA64 and called from C
@@ -155,26 +164,27 @@ export fn area(kind: i32, size: f64) -> f64 {
 }
 ```
 
-На что обратить внимание:
+Things to note:
 
-- `call_count` — общая переменная: функции HLA64 её увеличивают, а C может читать и даже менять.
-- `map_i64` получает **указатель на функцию C** и вызывает её для каждого элемента: `func(...)`.
-  Параметры сразу копируются в «долгие» переменные (`let p = values`), потому что вызов `func`
-  имеет право испортить `x0 … x17`.
-- `vec2_length` читает поля структуры по смещениям `Vec2.x` и `Vec2.y`. Раскладка структур в HLA64
-  и в C одинаковая (естественное выравнивание, урок 9), а заголовок дополнительно проверяет это
-  через `_Static_assert`.
-- Функции `main` в библиотеке нет — она будет в программе на C.
+- `call_count` is a shared variable: the HLA64 functions increment it, and C can read it and even
+  change it.
+- `map_i64` receives a **pointer to a C function** and calls it for each element: `func(...)`.
+  The parameters are immediately copied into "long-lived" variables (`let p = values`), because the
+  call to `func` is allowed to clobber `x0 … x17`.
+- `vec2_length` reads the struct fields at the offsets `Vec2.x` and `Vec2.y`. Struct layout in HLA64
+  and in C is the same (natural alignment, lesson 9), and the header additionally checks this
+  with `_Static_assert`.
+- There is no `main` function in the library — it will be in the C program.
 
-## Шаг 2. Собрать библиотеку
+## Step 2. Build the library
 
 ```sh
 cd docs/lessons/14-library
 hla lib mathlib.hla
 ```
 
-Команда создаёт четыре файла: `mathlib.h` (заголовок), `mathlib.o` (объектный файл),
-`libmathlib.a` (статическая библиотека) и `libmathlib.dylib` (динамическая). Заголовок получился такой:
+The command creates four files: `mathlib.h` (the header), `mathlib.o` (the object file),
+`libmathlib.a` (the static library) and `libmathlib.dylib` (the dynamic one). Here's the header:
 
 ```c file=mathlib.h
 // mathlib.h — generated by HLA64 from mathlib.hla. Do not edit.
@@ -218,9 +228,9 @@ double area(int32_t kind, double size);
 #endif // MATHLIB_H
 ```
 
-`extern "C"` нужен, чтобы библиотеку можно было подключить и из C++.
+`extern "C"` is needed so that the library can also be used from C++.
 
-## Шаг 3. Программа на C
+## Step 3. The C program
 
 ```c file=main.c
 // main.c — a C program that uses the HLA64 library
@@ -255,9 +265,9 @@ int main(void) {
 }
 ```
 
-`(void *)square` — адрес функции C, который мы передаём в `map_i64`.
+`(void *)square` is the address of a C function, which we pass to `map_i64`.
 
-**Статическая сборка** — код библиотеки становится частью программы:
+**Static build** — the library code becomes part of the program:
 
 ```sh
 clang -Wall main.c libmathlib.a -o demo_static
@@ -277,20 +287,20 @@ functions called: 9
 after reset: 1
 ```
 
-**Динамическая сборка** — программа только ссылается на `libmathlib.dylib`:
+**Dynamic build** — the program only references `libmathlib.dylib`:
 
 ```sh
 clang -Wall main.c -L. -lmathlib -Wl,-rpath,@executable_path -o demo_dynamic
 ./demo_dynamic
 ```
 
-- `-L.` — искать библиотеки в текущей папке, `-lmathlib` — подключить `libmathlib.dylib`
-  (приставку `lib` и расширение компилятор добавляет сам).
-- Внутри библиотеки записано её имя `@rpath/libmathlib.dylib`. `-Wl,-rpath,@executable_path` говорит:
-  «`@rpath` — это папка, где лежит сама программа». Поэтому `demo_dynamic` и `libmathlib.dylib`
-  должны лежать рядом.
+- `-L.` means look for libraries in the current folder, `-lmathlib` means link `libmathlib.dylib`
+  (the compiler adds the `lib` prefix and the extension by itself).
+- The library has its name, `@rpath/libmathlib.dylib`, recorded inside it. `-Wl,-rpath,@executable_path`
+  says: "`@rpath` is the folder where the program itself is". So `demo_dynamic` and `libmathlib.dylib`
+  must be next to each other.
 
-Посмотреть, от каких библиотек зависит программа, можно командой `otool -L demo_dynamic`:
+You can see which libraries a program depends on with `otool -L demo_dynamic`:
 
 ```text
 demo_dynamic:
@@ -298,12 +308,12 @@ demo_dynamic:
 	/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1359.0.0)
 ```
 
-Если пересобрать `libmathlib.dylib` (например, исправить ошибку в `gcd`), `demo_dynamic` сразу начнёт
-пользоваться новой версией без пересборки. Статической программе для этого нужна новая сборка.
+If you rebuild `libmathlib.dylib` (say, to fix a bug in `gcd`), `demo_dynamic` immediately starts
+using the new version without being rebuilt. The static program needs a new build for that.
 
-## Шаг 4. Наоборот: HLA64 вызывает C
+## Step 4. The reverse: HLA64 calls C
 
-Функции на C подключаются так же, как функции из системной библиотеки, — через `extern`:
+C functions are linked the same way as functions from the system library — via `extern`:
 
 ```c file=helpers.c
 // helpers.c — C functions called from an HLA64 program
@@ -340,8 +350,8 @@ fn main() {
 }
 ```
 
-Программа на HLA64 собирается в объектный файл командой `hla obj`, а `clang` компилирует файл на C
-и компонует оба вместе:
+The HLA64 program is built into an object file with the `hla obj` command, and `clang` compiles the
+C file and links both together:
 
 ```sh
 hla obj app.hla                  # -> app.o
@@ -355,10 +365,10 @@ c_fib(20) = 6765
 c_average = 4.00
 ```
 
-`c_average` возвращает `double`, поэтому результат приходит в `d0` (урок 11), и мы сразу переносим
-его в сохраняемый `d8` — следующий `printf` испортил бы `d0`.
+`c_average` returns a `double`, so the result arrives in `d0` (lesson 11), and we immediately move
+it into the callee-saved `d8` — the next `printf` would clobber `d0`.
 
-## Всё сразу: build.sh
+## All at once: build.sh
 
 ```sh file=build.sh
 #!/bin/sh
@@ -379,31 +389,31 @@ clang app.o helpers.c -o app
 ./app
 ```
 
-Запустите `sh build.sh` в папке урока — он соберёт обе части и выполнит программы.
+Run `sh build.sh` in the lesson folder — it builds both parts and runs the programs.
 
-## То же самое в браузере
+## The same in the browser
 
-На странице `dist/hla64.html` выберите пример **Library for C: mathlib (lesson 14)** и переключатель
-**Build as** в положение **Static lib .a** или **Dynamic lib .dylib**:
+On the `dist/hla64.html` page, choose the example **Library for C: mathlib (lesson 14)** and set the
+**Build as** switch to **Static lib .a** or **Dynamic lib .dylib**:
 
-- вкладка **C header** показывает сгенерированный `mathlib.h`, пример `main.c` и команду сборки;
-- вкладка **Mach-O** — содержимое библиотеки: для `.a` — объектный файл, экспорт и число релокаций,
-  для `.dylib` — сегменты, таблицу экспорта и подпись;
-- **Download .zip** отдаёт папку с `mathlib.h`, библиотекой, `main.c` и `build.sh`;
-- **Copy Terminal command** копирует команду, которая в терминале создаёт эту папку, собирает `main.c`
-  через `clang` и запускает программу — без скачивания и без пометки карантина.
+- the **C header** tab shows the generated `mathlib.h`, an example `main.c` and the build command;
+- the **Mach-O** tab shows the library's contents: for `.a` — the object file, the exports and the
+  number of relocations, for `.dylib` — the segments, the export table and the signature;
+- **Download .zip** gives you a folder with `mathlib.h`, the library, `main.c` and `build.sh`;
+- **Copy Terminal command** copies a command that creates this folder in the terminal, builds `main.c`
+  with `clang` and runs the program — no download and no quarantine flag.
 
-Режим сборки можно переключить для любого примера или своего кода: функции с `export` попадут в
-библиотеку и заголовок.
+The build mode can be switched for any example or for your own code: functions marked `export` go into
+the library and the header.
 
-## Что внутри объектного файла
+## What's inside an object file
 
-Объектный файл — это тот же Mach-O, что и программа, только с пометками для компоновщика. Его можно
-разглядеть стандартными инструментами macOS:
+An object file is the same Mach-O as a program, just with notes for the linker. You can
+examine it with the standard macOS tools:
 
 ```sh
-nm mathlib.o            # символы: T — код, D — данные, s — внутренние
-otool -rv mathlib.o     # релокации
+nm mathlib.o            # symbols: T — code, D — data, s — internal
+otool -rv mathlib.o     # relocations
 ```
 
 ```text
@@ -417,23 +427,23 @@ address  pcrel length extern type    scattered symbolnum/value
 ...
 ```
 
-- Переходы внутри одной функции (циклы, `if`) ассемблер вычисляет сам — расстояние между командами
-  не изменится при компоновке.
-- `adrp`/`add`/`ldr` к данным получают релокации `PAGE21` и `PAGEOFF12`: окончательный адрес
-  `_call_count` станет известен только компоновщику.
-- Вызовы чужих функций (`bl _printf`) получают релокацию `BR26`.
+- Branches within a single function (loops, `if`) are resolved by the assembler itself — the distance
+  between instructions won't change during linking.
+- `adrp`/`add`/`ldr` accessing data get `PAGE21` and `PAGEOFF12` relocations: the final address of
+  `_call_count` will only be known to the linker.
+- Calls to external functions (`bl _printf`) get a `BR26` relocation.
 
-У динамической библиотеки вместо релокаций — **таблица экспорта**, по которой загрузчик `dyld`
-находит функции при запуске программы: `dyld_info -exports libmathlib.dylib`.
+Instead of relocations, a dynamic library has an **export table**, which the `dyld` loader uses to
+find functions when the program starts: `dyld_info -exports libmathlib.dylib`.
 
-## Упражнения
+## Exercises
 
-1. Добавьте в библиотеку функцию `export fn is_prime(n: i64) -> i32` и вызовите её из C в цикле
-   от 1 до 50.
-2. Экспортируйте `rodata` таблицу квадратов `squares: i64[10]` и напечатайте её из C.
-3. Напишите на C функцию `int64_t c_max(int64_t a, int64_t b)` и используйте её из HLA64 при поиске
-   максимума в массиве.
-4. Посмотрите командой `hla compile mathlib.hla`, во что превратился параметр `v: i32` функции `clamp`
-   (ищите команду `sxtw`).
+1. Add a function `export fn is_prime(n: i64) -> i32` to the library and call it from C in a loop
+   from 1 to 50.
+2. Export a `rodata` table of squares `squares: i64[10]` and print it from C.
+3. Write a C function `int64_t c_max(int64_t a, int64_t b)` and use it from HLA64 to find
+   the maximum in an array.
+4. Use `hla compile mathlib.hla` to see what the parameter `v: i32` of the `clamp` function turned into
+   (look for the `sxtw` instruction).
 
-Дальше — [итоги курса](13-project-game-of-life.md#итоги-курса) и [справочник языка](../language.md).
+Next: the [course summary](13-project-game-of-life.md#course-summary) and the [language reference](../language.md).

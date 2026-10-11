@@ -2,7 +2,7 @@
 // with the built-in x64 assembler, linked by the built-in PE linker and executed in the
 // x64 emulator (on Windows they are also run natively).
 //   * tests/x64/cases/*.hla   programs written for x64 (xmm registers, rax..., inline asm)
-//   * docs/lessons/*.md       every lesson program that does not name ARM registers;
+//   * docs/{,ru/}lessons/*.md every lesson program (English and Russian) that does not name ARM registers;
 //                             %ld becomes %lld (long is 32 bits on Windows)
 // With --clang every program is also assembled by clang (--target=x86_64-pc-windows-msvc) and
 // linked by lld-link against import libraries made by llvm-dlltool; that executable must
@@ -110,7 +110,7 @@ for (const f of readdirSync('tests/cases').filter((f) => f.endsWith('.hla')).sor
 }
 
 // ---------------------------------------------------------------- portable lesson programs
-const lessons = 'docs/lessons';
+for (const lessons of ['docs/lessons', 'docs/ru/lessons'])
 for (const file of readdirSync(lessons).filter((f) => f.endsWith('.md')).sort()) {
   const md = readFileSync(join(lessons, file), 'utf8');
   const re = /```hla\n([\s\S]*?)```(\n*)(```text\n([\s\S]*?)```)?/g;
@@ -118,7 +118,7 @@ for (const file of readdirSync(lessons).filter((f) => f.endsWith('.md')).sort())
   while ((m = re.exec(md))) {
     const code = m[1];
     if (!/\bfn main\b/.test(code) || m[4] === undefined) continue;
-    const where = `${file}:${md.slice(0, m.index).split('\n').length}`;
+    const where = `${join(lessons, file)}:${md.slice(0, m.index).split('\n').length}`;
     if (ARM.test(code.replace(/"(\\.|[^"\\])*"|\/\/.*$/gm, ''))) { skipped++; continue; }
     check(where, code.replace(/%l([dux])/g, '%ll$1'), m[4]);
   }

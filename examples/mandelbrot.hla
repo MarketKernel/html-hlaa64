@@ -1,4 +1,5 @@
-// ASCII Mandelbrot set: floating point in d-registers
+// ASCII Mandelbrot set: floating point in d-registers,
+// sugar and plain FP instructions side by side
 extern putchar
 
 const W = 64
@@ -16,8 +17,8 @@ fn main() {
             let zr: d10 = 0.0, zi: d11 = 0.0
             let n = 0
             while n < MAX_ITER {
-                d12 = zr * zr
-                d13 = zi * zi
+                fmul d12, zr, zr        // instructions: zr^2 and zi^2
+                fmul d13, zi, zi
                 if d12 + d13 > 4.0 { break }
                 zi = 2.0 * zr * zi + ci
                 zr = d12 - d13 + cr

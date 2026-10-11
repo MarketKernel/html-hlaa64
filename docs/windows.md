@@ -1,50 +1,57 @@
-# HLA64 для Windows x64
+# HLA64 for Windows x64
 
-Тот же язык, вторая платформа: транслятор выдаёт ассемблер x86-64 (синтаксис Intel в диалекте
-LLVM, его понимают `clang` и встроенный ассемблер), дальше — свой ассемблер, объектные файлы COFF,
-линковщик PE и эмулятор x64. Всё работает и в Node, и на странице `dist/hla64.html`
-(переключатель **Platform** в самом верху).
+<!-- languages -->
+<h3 align="center">
+<b>🇬🇧 English</b> ·
+<a href="ru/windows.md">🇷🇺 Русский</a>
+</h3>
+<!-- /languages -->
+
+The same language, a second platform: the translator emits x86-64 assembly (Intel syntax in the
+LLVM dialect, understood by `clang` and by the built-in assembler), followed by our own assembler,
+COFF object files, a PE linker and an x64 emulator. Everything works both in Node and on the
+`dist/hla64.html` page (the **Platform** switch at the very top).
 
 ```
 prog.hla ─► src/lang/x64 ─► .s (Intel, .seh_*) ─► src/asm/x64 ─► COFF .obj ─► src/asm/coff/pe.ts ─► prog.exe
                                                                      │
-                                                    .lib (статическая / импорт), .dll
+                                                    .lib (static / import), .dll
 ```
 
-## Командная строка
+## Command line
 
-На Windows платформа по умолчанию `x64-windows`, на macOS — `arm64-macos`; явно — `--target`:
+On Windows the default platform is `x64-windows`, on macOS — `arm64-macos`; to choose explicitly — `--target`:
 
 ```sh
-node src/cli.ts run   examples/hello.hla --target x64-windows   # вне Windows — во встроенном эмуляторе x64
+node src/cli.ts run   examples/hello.hla --target x64-windows   # outside Windows — in the built-in x64 emulator
 node src/cli.ts build examples/hello.hla --target x64-windows   # hello.exe
-node src/cli.ts compile prog.hla --target x64-windows           # ассемблер x86-64
-node src/cli.ts obj   app.hla --target x64-windows              # app.obj для link.exe / lld-link
+node src/cli.ts compile prog.hla --target x64-windows           # x86-64 assembly
+node src/cli.ts obj   app.hla --target x64-windows              # app.obj for link.exe / lld-link
 node src/cli.ts lib   mathlib.hla --target x64-windows          # mathlib.h, .obj, mathlib_static.lib, mathlib.dll, mathlib.lib
-node src/cli.ts emu   prog.hla --target x64-windows             # эмулятор x64
-node src/cli.ts build prog.hla --target x64-windows --clang     # собрать через clang + lld-link (нужен только LLVM)
-node src/cli.ts run   prog.hla -- one "two words"               # аргументы после -- получает main(argc, argv) (и в emu)
+node src/cli.ts emu   prog.hla --target x64-windows             # x64 emulator
+node src/cli.ts build prog.hla --target x64-windows --clang     # build via clang + lld-link (only LLVM is needed)
+node src/cli.ts run   prog.hla -- one "two words"               # arguments after -- go to main(argc, argv) (in emu too)
 ```
 
-`--clang` собирает тот же ассемблер clang'ом и линкует lld-link с той же точкой входа `hla_start`
-и теми же DLL, что и встроенный линковщик (библиотеки импорта пишет `writeImportLibrary`): Visual
-Studio и её C runtime не нужны.
+`--clang` assembles the same assembly with clang and links it with lld-link using the same `hla_start`
+entry point and the same DLLs as the built-in linker (the import libraries are written by
+`writeImportLibrary`): Visual Studio and its C runtime are not needed.
 
-## Регистры и соглашение о вызовах (Win64)
+## Registers and the calling convention (Win64)
 
 | | |
 |---|---|
-| целые аргументы | `rcx`, `rdx`, `r8`, `r9`, дальше — стек (после 32 байт shadow space) |
-| FP-аргументы | `xmm0`–`xmm3` **по позиции**: `f(a, x: f64)` — `a` в `rcx`, `x` в `xmm1` |
-| результат | `rax` / `xmm0` |
-| портятся при вызове | `rax rcx rdx r8–r11 xmm0–xmm5` |
-| сохраняются | `rbx rbp rsi rdi r12–r15 xmm6–xmm15` — пролог сохраняет те, что встретились в функции |
-| `let x = …` без регистра | один из `rbx rsi rdi r12–r15 rbp` (8 штук; на ARM их 10), дальше — слот в кадре |
-| скретч транслятора | `r10`, `r11` (+ свободные сохраняемые), `xmm5`, `xmm4` (+ свободные `xmm6`–`xmm15`) |
+| integer arguments | `rcx`, `rdx`, `r8`, `r9`, then the stack (after 32 bytes of shadow space) |
+| FP arguments | `xmm0`–`xmm3` **by position**: `f(a, x: f64)` — `a` in `rcx`, `x` in `xmm1` |
+| result | `rax` / `xmm0` |
+| clobbered by a call | `rax rcx rdx r8–r11 xmm0–xmm5` |
+| preserved | `rbx rbp rsi rdi r12–r15 xmm6–xmm15` — the prologue saves those that appear in the function |
+| `let x = …` without a register | one of `rbx rsi rdi r12–r15 rbp` (8 of them; on ARM there are 10), then a slot in the frame |
+| translator scratch | `r10`, `r11` (+ free preserved ones), `xmm5`, `xmm4` (+ free `xmm6`–`xmm15`) |
 
-Регистры можно называть 64-битными (`rax`, `r12`) и 32-битными (`eax`, `r12d`) именами — как
-`x`/`w` на ARM: запись в 32-битный регистр обнуляет старшую половину. Плавающая точка — в `xmm`,
-всегда `double`; `f32` в памяти читается и пишется с преобразованием.
+Registers can be named by their 64-bit (`rax`, `r12`) and 32-bit (`eax`, `r12d`) names — like
+`x`/`w` on ARM: writing to a 32-bit register zeroes the upper half. Floating point lives in `xmm`,
+always as `double`; an `f32` in memory is read and written with conversion.
 
 ```hla
 extern printf(fmt, ...)
@@ -60,115 +67,119 @@ fn main() {
 }
 ```
 
-Кадр функции адресуется от `rsp` (без `rbp`), место под исходящие аргументы выделяется один раз в
-прологе, для каждой функции генерируются директивы `.seh_*` — по ним ассемблер строит `.pdata`/`.xdata`,
-без которых Windows не может раскрутить стек (исключения, отладчик). `push`/`pop` в HLA64 на x64 пишут
-в слоты кадра, а не меняют `rsp`. Кадр больше 4 КБ (`local buf: u8[20000]`) пролог сначала
-«прощупывает» постранично, как `__chkstk`: Windows выделяет стек по одной guard-странице, и прыжок
-через неё — access violation (эмулятор моделирует это так же).
+The function's frame is addressed from `rsp` (without `rbp`), space for outgoing arguments is
+allocated once in the prologue, and `.seh_*` directives are generated for every function — from them
+the assembler builds `.pdata`/`.xdata`, without which Windows can't unwind the stack (exceptions,
+debugger). `push`/`pop` in HLA64 on x64 write to frame slots instead of changing `rsp`. A frame
+larger than 4 KB (`local buf: u8[20000]`) is first "probed" page by page in the prologue, like
+`__chkstk`: Windows grows the stack one guard page at a time, and jumping over it is an access
+violation (the emulator models this the same way).
 
-## Чем отличается от ARM64
+## How it differs from ARM64
 
-- **`printf("%ld")` печатает 32 бита**: в Windows `long` 32-битный. Для 64-битных чисел — `%lld`
-  (работает и на macOS). Программы из уроков с `%ld` верны, пока числа влезают в 32 бита.
-- Нет `syscall(...)`: системные вызовы Windows не документированы, вместо них — функции WinAPI
-  (`extern GetStdHandle, WriteFile`), см. [tests/x64/cases/showcase.hla](../tests/x64/cases/showcase.hla).
-  Для файлов проще `include "std/file.hla"`: `read_file`, `write_file`, `file_open` … называются и
-  работают одинаково на Windows и macOS (поверх C runtime, в двоичном режиме — `\n` остаётся `\n`),
-  см. [справочник](language.md#файлы-stdfilehla).
-- Нет `rbit()` (нет такой инструкции); `clz()` использует `lzcnt` (Haswell и новее).
-- 8 регистров для `let` вместо 10: в больших функциях лишние переменные вытесняются в кадр
-  (`// x -> frame` в ассемблере) и читаются операндами из памяти (`add r10, qword ptr [rsp + …]`).
-- `extern`-функции вызываются напрямую (`call printf`); для функций из DLL линковщик вставляет
-  переходник `jmp [__imp_printf]`, для статически скомпонованного кода на C — прямой вызов.
-- Встроенный ассемблер — синтаксис Intel: `mov r8, v` / `and r8, 1` / `add count, r8`; псевдонимы
-  подставляются так же. Комментарии в `asm { }` — `//` (`;` в LLVM-диалекте разделяет команды).
-- Программа начинается с `hla_start`: он вызывает `main` и завершает процесс через `exit()` из
-  `msvcrt.dll` (буферы `printf` сбрасываются). Если у `main` есть параметры (`argc, argv, envp`),
-  `hla_start` сначала получает их от `__getmainargs` из `msvcrt.dll`. Линковщик берёт каждую `extern`-функцию из той DLL,
-  которая её экспортирует: `msvcrt.dll`, `kernel32.dll` или `user32.dll` (списки экспорта Windows 11
-  встроены — `src/asm/coff/winapi.ts`, обновляет `node tools/gen-winapi.ts`). Имя, которого нет ни
-  в программе, ни в этих DLL (опечатка), — ошибка сборки с номером строки, а не `.exe`, который
-  Windows откажется загружать.
+- **`printf("%ld")` prints 32 bits**: on Windows `long` is 32-bit. For 64-bit numbers use `%lld`
+  (works on macOS too). Lesson programs with `%ld` are correct as long as the numbers fit in 32 bits.
+- No `syscall(...)`: Windows system calls are undocumented; use WinAPI functions instead
+  (`extern GetStdHandle, WriteFile`), see [tests/x64/cases/showcase.hla](../tests/x64/cases/showcase.hla).
+  For files it's simpler to `include "std/file.hla"`: `read_file`, `write_file`, `file_open` … have the
+  same names and behave the same on Windows and macOS (on top of the C runtime, in binary mode — `\n`
+  stays `\n`), see the [reference](language.md#files-stdfilehla).
+- No `rbit()` (there is no such instruction); `clz()` uses `lzcnt` (Haswell and newer).
+- 8 registers for `let` instead of 10: in big functions the extra variables are spilled to the frame
+  (`// x -> frame` in the assembly) and read as memory operands (`add r10, qword ptr [rsp + …]`).
+- `extern` functions are called directly (`call printf`); for functions from a DLL the linker inserts
+  a `jmp [__imp_printf]` thunk, for statically linked C code — a direct call.
+- Instructions in code use Intel syntax: `mov r8, v` / `and r8, 1` / `add count, r8` /
+  `cmovg rax, hi` / `lea rcx, [rip + text]` + `call puts`; aliases, parameters and labels are
+  substituted the same way. `call name(…)` with parentheses is a sugar call (the hlaa64 form), without
+  parentheses it's an instruction. Comments in `asm { }` are `//` (`;` separates instructions in the
+  LLVM dialect). Example — [tests/x64/cases/mixed.hla](../tests/x64/cases/mixed.hla).
+- A program starts at `hla_start`: it calls `main` and terminates the process via `exit()` from
+  `msvcrt.dll` (the `printf` buffers are flushed). If `main` has parameters (`argc, argv, envp`),
+  `hla_start` first gets them from `__getmainargs` in `msvcrt.dll`. The linker takes each `extern` function from the DLL
+  that exports it: `msvcrt.dll`, `kernel32.dll` or `user32.dll` (the Windows 11 export lists are
+  built in — `src/asm/coff/winapi.ts`, updated by `node tools/gen-winapi.ts`). A name that is neither
+  in the program nor in these DLLs (a typo) is a build error with a line number, rather than an `.exe`
+  that Windows will refuse to load.
 
-## Библиотеки для C
+## Libraries for C
 
-`lib --target x64-windows` создаёт:
+`lib --target x64-windows` creates:
 
-| файл | для чего |
+| file | what for |
 |---|---|
-| `name.h` | заголовок; `#define NAME_DLL` перед `#include` — объявления с `__declspec(dllimport)` для DLL |
-| `name_static.lib` | статическая библиотека (архив MS с `name.obj`) |
-| `name.dll` + `name.lib` | DLL с таблицей экспорта и библиотека импорта для неё (байт-в-байт как у `llvm-lib /def`) |
-| `name.obj` | объектный файл |
+| `name.h` | header; `#define NAME_DLL` before `#include` gives declarations with `__declspec(dllimport)` for the DLL |
+| `name_static.lib` | static library (an MS archive with `name.obj`) |
+| `name.dll` + `name.lib` | a DLL with an export table and an import library for it (byte for byte like `llvm-lib /def`) |
+| `name.obj` | object file |
 
 ```bat
-clang main.c mathlib_static.lib -o demo.exe                  :: статически
-clang -DMATHLIB_DLL main.c mathlib.lib -o demo.exe           :: через DLL (mathlib.dll рядом с demo.exe)
-cl main.c mathlib_static.lib                                 :: то же с MSVC
+clang main.c mathlib_static.lib -o demo.exe                  :: statically
+clang -DMATHLIB_DLL main.c mathlib.lib -o demo.exe           :: via the DLL (mathlib.dll next to demo.exe)
+cl main.c mathlib_static.lib                                 :: the same with MSVC
 cl /DMATHLIB_DLL main.c mathlib.lib
 ```
 
-Эти команды работают в **x64 Native Tools Command Prompt** (или Developer PowerShell): `cl`
-есть только там, а `clang` нужны оттуда же `INCLUDE`/`LIB` — заголовки и C runtime из Visual
-Studio и Windows SDK (clang 23 сам не находит Visual Studio 2026), к тому же установщик LLVM не
-добавляет `clang` в PATH. `build.bat` со страницы находит всё сам (`vswhere` → `vcvars64.bat`,
-`%ProgramFiles%\LLVM\bin`).
+These commands work in the **x64 Native Tools Command Prompt** (or Developer PowerShell): `cl`
+exists only there, and `clang` needs `INCLUDE`/`LIB` from there too — the headers and C runtime from
+Visual Studio and the Windows SDK (clang 23 can't find Visual Studio 2026 by itself); besides, the
+LLVM installer doesn't add `clang` to PATH. The `build.bat` from the page finds everything by itself
+(`vswhere` → `vcvars64.bat`, `%ProgramFiles%\LLVM\bin`).
 
-Заголовок проверяет раскладку структур (`MATHLIB_STATIC_ASSERT`): в C11 и clang это
-`_Static_assert`, в C++ — `static_assert`, а в режиме C у `cl` по умолчанию (без `/std:c11`, где
-`_Static_assert` нет) — массив отрицательного размера.
+The header checks the struct layout (`MATHLIB_STATIC_ASSERT`): in C11 and clang it's
+`_Static_assert`, in C++ — `static_assert`, and in `cl`'s default C mode (without `/std:c11`, where
+there is no `_Static_assert`) — a negative-size array.
 
-Если библиотека сама вызывает функцию, которую определяет программа на C (`extern guarded` в
-[tests/x64/seh/seh.hla](../tests/x64/seh/seh.hla)), DLL из неё не собрать — в Windows DLL не может
-ссылаться на функции загрузившей её программы. `lib` тогда пишет только статическую библиотеку и
-объясняет, почему DLL нет.
+If the library itself calls a function defined by the C program (`extern guarded` in
+[tests/x64/seh/seh.hla](../tests/x64/seh/seh.hla)), a DLL can't be built from it — on Windows a DLL
+can't reference functions of the program that loaded it. `lib` then writes only the static library
+and explains why there is no DLL.
 
-Наоборот, программа на HLA64 вызывает C: `node src/cli.ts obj app.hla --target x64-windows`,
-затем `clang app.obj helpers.c -o app.exe` или `cl app.obj helpers.c` (точка входа — `main` из CRT),
-либо `link /entry:hla_start app.obj helpers.obj msvcrt.lib`, где `msvcrt.lib` — библиотека импорта
-самого `msvcrt.dll` (`lib /def:msvcrt.def /machine:x64`; `msvcrt.lib` из SDK — это стартовый код UCRT).
-Пример целиком: [tests/x64/lib](../tests/x64/lib).
+The other way round, an HLA64 program calls C: `node src/cli.ts obj app.hla --target x64-windows`,
+then `clang app.obj helpers.c -o app.exe` or `cl app.obj helpers.c` (the entry point is `main` from the CRT),
+or `link /entry:hla_start app.obj helpers.obj msvcrt.lib`, where `msvcrt.lib` is the import library of
+`msvcrt.dll` itself (`lib /def:msvcrt.def /machine:x64`; the `msvcrt.lib` from the SDK is the UCRT startup code).
+The complete example: [tests/x64/lib](../tests/x64/lib).
 
-## Исключения (SEH)
+## Exceptions (SEH)
 
-Для каждой функции ассемблер строит `.pdata`/`.xdata` из директив `.seh_*`, поэтому структурные
-исключения Windows проходят сквозь код на HLA64: `__try`/`__except` в C ловит `RaiseException` из
-колбэка, вызванного функцией на HLA64, и access violation внутри неё самой; все сохраняемые регистры
-(`rbx rbp rsi rdi r12–r15 xmm6–xmm15`) восстанавливаются, `RtlCaptureStackBackTrace` видит каждый
-кадр. Тест — [tests/x64/seh](../tests/x64/seh): кадры больше 4 КБ, все nonvolatile-регистры, сборка
-C через `cl` (`/Od`, `/O2`) и `clang`; unwind-информация совпадает с clang байт-в-байт.
+For every function the assembler builds `.pdata`/`.xdata` from the `.seh_*` directives, so Windows
+structured exceptions pass through HLA64 code: `__try`/`__except` in C catches a `RaiseException` from
+a callback called by an HLA64 function, and an access violation inside the function itself; all
+preserved registers (`rbx rbp rsi rdi r12–r15 xmm6–xmm15`) are restored, and `RtlCaptureStackBackTrace`
+sees every frame. The test — [tests/x64/seh](../tests/x64/seh): frames larger than 4 KB, all nonvolatile
+registers, building C with `cl` (`/Od`, `/O2`) and `clang`; the unwind information matches clang byte for byte.
 
-## Страница
+## The page
 
-Переключатель **Platform: macOS / Windows** в самом верху меняет примеры, проекты на панели слева
-(у каждой платформы свои), конвейер и вкладки:
-**PE / COFF** (секции, импорты по DLL, экспорт), машинный код побайтно (префиксы, REX, opcode,
-ModRM…), консоль эмулятора x64. **Download .exe** — неподписанный файл; Chrome и Edge помечают
-скачанное «Mark of the Web» (`Zone.Identifier`, `ZoneId=3`). При запуске из Проводника SmartScreen
-может спросить (Подробнее → Выполнить в любом случае); из PowerShell файл запускается как есть,
-`Unblock-File .\prog.exe` снимает пометку насовсем. **Copy PowerShell command** кладёт в буфер команду
-(4–11 КБ для примеров), которая воссоздаёт файлы из base64 прямо в PowerShell 5.1 или 7 — без
-скачивания и без пометки. Для библиотек — zip с `.h`, `.lib`/`.dll`, `main.c` и `build.bat`;
-`build.bat` подключает окружение Visual Studio (`vswhere` → `vcvars64.bat`) и собирает clang'ом
-или `cl`, поэтому работает из обычной консоли. PowerShell-команда для библиотеки пишет тот же
-`build.bat` и запускает его.
+The **Platform: macOS / Windows** switch at the very top changes the examples, the projects in the left
+panel (each platform has its own), the pipeline and the tabs:
+**PE / COFF** (sections, imports by DLL, exports), machine code byte by byte (prefixes, REX, opcode,
+ModRM…), the x64 emulator console. **Download .exe** gives an unsigned file; Chrome and Edge mark
+downloads with the "Mark of the Web" (`Zone.Identifier`, `ZoneId=3`). When launched from Explorer,
+SmartScreen may ask (More info → Run anyway); from PowerShell the file runs as is, and
+`Unblock-File .\prog.exe` removes the mark for good. **Copy PowerShell command** puts a command on the
+clipboard (4–11 KB for the examples) that recreates the files from base64 right in PowerShell 5.1 or 7 —
+without a download and without the mark. For libraries — a zip with the `.h`, `.lib`/`.dll`, `main.c`
+and `build.bat`; `build.bat` sets up the Visual Studio environment (`vswhere` → `vcvars64.bat`) and
+builds with clang or `cl`, so it works from a regular console. The PowerShell command for a library
+writes the same `build.bat` and runs it.
 
-## Что проверено и как
+## What has been tested and how
 
 | | |
 |---|---|
-| кодировка | 987 форм инструкций бит-в-бит с `clang --target=x86_64-pc-windows-msvc` (`npm run test:x64-encoding`) |
-| объектные файлы | секции, релокации и unwind-информация совпадают с clang; линкуются `lld-link` (`npm run test:coff`) |
-| программы | 5 программ для x64 + 66 переносимых программ из уроков в эмуляторе; `--clang`: тот же ассемблер через clang + lld-link (`npm run test:x64`) |
-| фаззер | каждое случайное выражение считается на ARM (натив и эмулятор) и в эмуляторе x64 (`npm run fuzz`) |
-| C | C от clang + наша статическая библиотека / DLL + библиотека импорта через lld-link; программа на HLA64, вызывающая C (`npm run test:x64-lib`) |
-| **Windows, нативно** | Windows 11 x64: все 71 программа `test:x64` запускаются как `.exe`, вывод и код возврата совпадают с эмулятором; C + `.lib`/`.dll`, HLA64 + C — тоже нативно |
-| **MSVC** | Visual Studio 2026 (`cl` 19.51): `main.c` урока 14 (`<stdio.h>`, `/W4`) со статической библиотекой и DLL; `cl app.obj helpers.c`; `link /entry:hla_start` с нашей библиотекой импорта `msvcrt.dll`; `lib /list`, `dumpbin /exports /all /unwindinfo` — без предупреждений (`test:x64-lib`, MSVC находится через `vswhere`) |
-| **SEH** | исключения сквозь кадры HLA64 ловятся `__except`, 18 сохраняемых регистров восстанавливаются, стек виден целиком; `.xdata` = clang (`test:x64-lib`) |
-| **страница** | Chrome и Edge, `file://`: скачанные `.exe` и zip, `build.bat` (clang и cl) и PowerShell-команды всех примеров выполнены в PowerShell 5.1 и 7 из обычной консоли, в каталоге с пробелами; команда для DLL-библиотеки вставлена вручную в окно PowerShell (PSReadLine) — собирается и работает |
-| **CLI** | `run`, `build`, `obj`, `lib`, `emu`, `compile`, `--clang` из обычной консоли; пути с пробелами |
+| encoding | 987 instruction forms bit for bit with `clang --target=x86_64-pc-windows-msvc` (`npm run test:x64-encoding`) |
+| object files | sections, relocations and unwind information match clang; they link with `lld-link` (`npm run test:coff`) |
+| programs | 5 x64 programs + 66 portable lesson programs in the emulator; `--clang`: the same assembly via clang + lld-link (`npm run test:x64`) |
+| fuzzer | every random expression is computed on ARM (native and emulator) and in the x64 emulator (`npm run fuzz`) |
+| C | C from clang + our static library / DLL + import library via lld-link; an HLA64 program calling C (`npm run test:x64-lib`) |
+| **Windows, native** | Windows 11 x64: all 71 `test:x64` programs run as `.exe`, output and exit code match the emulator; C + `.lib`/`.dll`, HLA64 + C — natively as well |
+| **MSVC** | Visual Studio 2026 (`cl` 19.51): lesson 14's `main.c` (`<stdio.h>`, `/W4`) with the static library and the DLL; `cl app.obj helpers.c`; `link /entry:hla_start` with our `msvcrt.dll` import library; `lib /list`, `dumpbin /exports /all /unwindinfo` — no warnings (`test:x64-lib`, MSVC is located via `vswhere`) |
+| **SEH** | exceptions through HLA64 frames are caught by `__except`, 18 preserved registers are restored, the whole stack is visible; `.xdata` = clang (`test:x64-lib`) |
+| **page** | Chrome and Edge, `file://`: downloaded `.exe`s and zips, `build.bat` (clang and cl) and the PowerShell commands of all examples run in PowerShell 5.1 and 7 from a regular console, in a directory with spaces; the command for the DLL library pasted by hand into a PowerShell window (PSReadLine) — builds and works |
+| **CLI** | `run`, `build`, `obj`, `lib`, `emu`, `compile`, `--clang` from a regular console; paths with spaces |
 
-На macOS всё проверяется через эмулятор; на Windows тесты дополнительно запускают `.exe` нативно
-(`tests/x64.ts`, `tests/x64-lib.ts` сравнивают вывод с эмулятором) и, если установлена Visual Studio,
-собирают C через MSVC. LLVM ищется в PATH и в `C:\Program Files\LLVM\bin`.
+On macOS everything is checked via the emulator; on Windows the tests additionally run the `.exe`s
+natively (`tests/x64.ts`, `tests/x64-lib.ts` compare the output with the emulator) and, if Visual Studio
+is installed, build the C code with MSVC. LLVM is looked up in PATH and in `C:\Program Files\LLVM\bin`.

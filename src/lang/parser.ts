@@ -323,7 +323,12 @@ class Parser {
     switch (t.text) {
       case 'let': case 'var': case 'alias': return this.letStmt();
       case 'set': this.next(); return this.assignStmt();
-      case 'call': { this.next(); const e = this.expr(); this.endStmt(); return { k: 'expr', e, t }; }
+      case 'call': {
+        // `call name(args)` is the hlaa64 call statement; `call puts`, `call rax` are x86-64 instructions
+        const n1 = this.peek(), n2 = this.peek(2);
+        if (n1.nl || n1.kind !== 'ident' || n2.nl || !this.isOp('(', n2)) return this.rawLine();
+        this.next(); const e = this.expr(); this.endStmt(); return { k: 'expr', e, t };
+      }
       case 'if': return this.ifStmt();
       case 'switch': return this.switchStmt();
       case 'while': {

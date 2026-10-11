@@ -1,4 +1,5 @@
-// ASCII Mandelbrot set: floating point in xmm registers
+// ASCII Mandelbrot set: floating point in xmm registers,
+// sugar and plain SSE instructions side by side
 extern putchar
 
 const W = 64
@@ -16,8 +17,10 @@ fn main() {
             let zr: xmm8 = 0.0, zi: xmm9 = 0.0
             let n = 0
             while n < MAX_ITER {
-                xmm10 = zr * zr
-                xmm11 = zi * zi
+                movsd xmm10, zr         // instructions: zr^2 and zi^2
+                mulsd xmm10, zr
+                movsd xmm11, zi
+                mulsd xmm11, zi
                 if xmm10 + xmm11 > 4.0 { break }
                 zi = 2.0 * zr * zi + ci
                 zr = xmm10 - xmm11 + cr

@@ -1,0 +1,67 @@
+// HLA64 is an assembler: every line is either a CPU instruction or sugar that
+// expands into instructions. Both mix freely in one function, and instructions
+// see let-variables, parameters, data and labels by name.
+extern puts, printf(fmt, ...)
+
+data state: u64 = 88172645463325252
+data counts: i64[6]
+rodata text = "assembler with sugar"
+
+// string length: a sugar loop around a post-indexed load
+fn length(s) {
+    let p: x9 = s
+    do {
+        ldrb w10, [p], #1       // w10 = byte at p, then p += 1
+    } while w10 != 0
+    return p - s - 1
+}
+
+// pack 0xRRGGBB: one bit-field insert per channel
+fn rgb(red, green, blue) {
+    bfi blue, green, #8, #8
+    bfi blue, red, #16, #8
+    return blue
+}
+
+// no branches: cmp sets the flags, csel picks a register
+fn clamp(v, lo, hi) {
+    cmp v, lo
+    csel v, lo, v, lt
+    cmp v, hi
+    csel x0, hi, v, gt          // the result is already in x0, no return needed
+}
+
+// a random number in 0..n-1: xorshift64 in sugar, then the high half
+// of the 128-bit product x * n, which has no operator, only an instruction
+fn below(n) {
+    let x: x9 = state
+    x ^= x << 13
+    x ^= x >>> 7
+    x ^= x << 17
+    state = x
+    umulh x0, x, n
+}
+
+fn main() {
+    adrp x0, text@PAGE          // puts(text), written as instructions
+    add x0, x0, text@PAGEOFF
+    bl puts
+    printf("length(\"%s\") = %ld\n", text, length(text))
+
+    let c = rgb(0x12, 0x34, 0x56)
+    ubfx x9, c, #8, #8          // take the green channel back out
+    printf("rgb = 0x%06lx, green = 0x%lx\n", c, x9)
+
+    printf("clamp: %ld %ld %ld\n", clamp(-5, 0, 10), clamp(7, 0, 10), clamp(99, 0, 10))
+
+    for i in 0..6000 {
+        x0 = below(6)
+        counts[x0] += 1
+    }
+    let face = 0
+again:                          // a label for the instructions below
+    printf("%ld: %ld\n", face + 1, counts[face])
+    add face, face, #1
+    cmp face, #6
+    b.lt again
+}

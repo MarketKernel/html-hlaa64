@@ -1,79 +1,158 @@
-# HLA64 — ассемблер «чуть выше уровнем» для Apple Silicon и Windows x64, целиком на TypeScript
+# HLA64 — an assembler with syntactic sugar for Apple Silicon and Windows x64, written entirely in TypeScript
 
-Переосмысление [hlaa64](../hlaa64) на TypeScript: язык, в котором вы по-прежнему управляете
-регистрами, но пишете `for`, `if`, `a = b + c * 4`, `numbers[i]` и `printf(...)` вместо
-десятков строк `stp/adrp/ldr/b.lt`.
+<!-- languages -->
+<h3 align="center">
+<b>🇬🇧 English</b> ·
+<a href="docs/ru/README.md">🇷🇺 Русский</a>
+</h3>
+<!-- /languages -->
 
-Весь конвейер написан на TypeScript без внешних зависимостей во время выполнения и работает
-и в Node, и **в браузере оффлайн**:
+**HLA64 is an assembler, not a new programming language.** An HLA64 program is an ordinary
+assembly listing: `ldr`, `bfi`, `csel`, `umulh`, `b.lt` (on x64 — `mov`, `cmovg`, `mul`, `jl`)
+are written right in the code, as they are. The sugar — `for`, `if`, `a = b + c * 4`, `numbers[i]`,
+`printf(...)` — is added on top so you don't have to type dozens of `stp/adrp/ldr/b.lt` lines by
+hand where they are obvious. Each line of sugar expands into a few instructions that you can see in
+the listing, and anywhere in a function you can go back to plain instructions.
+
+What makes it different:
+
+1. **The whole toolchain is one HTML file.** The translator, assembler, linker and emulator all fit
+   in a single page that works offline. Open the
+   [online version](https://marketkernel.github.io/html-hlaa64/) or download `hla64-vX.Y.Z.html`
+   from the [latest release](../../releases/latest): it runs in any modern browser on macOS,
+   Windows, Linux or a phone, needs no installation and no network, and can be carried around
+   on a USB stick.
+2. **The toolchain builds itself.** Among the examples are **Translator in HLA64 (hla → s)** and
+   **Assembler in HLA64 (s → executable)**: a translator and an assembler written in HLA64 itself
+   ([selfhost/](selfhost/README.md)). The TypeScript toolchain builds them into native executables
+   (Mach-O for macOS or `.exe` for Windows), and those executables can in turn rebuild themselves
+   from the same sources, byte for byte.
+3. **A course of 14 lessons** — from “Hello, world” to the Game of Life and calling HLA64 from C.
+   Every lesson has programs you can run and exercises, and processor instructions appear right from
+   the first one, next to the sugar, so the course works well for teaching assembly.
+   See the [list of lessons](#lessons).
+
+This is not an attempt to recreate C: there is no hidden runtime, no optimizer that reorders code,
+and registers have no types (width and signedness are set by the instructions themselves and by
+`i32[...]`, `u8[p]` when accessing memory). The registers belong to you: a variable is a name for a
+register (`let i: x19`), and instructions see variables, parameters, data and labels by name.
+
+```hla
+fn clamp(v, lo, hi) {            // the parameters are x0, x1, x2
+    cmp v, lo                    // processor instructions as they are
+    csel v, lo, v, lt
+    cmp v, hi
+    csel x0, hi, v, gt           // the result is already in x0
+}
+
+fn length(s) {
+    let p: x9 = s                // sugar: variable = register x9
+    do {
+        ldrb w10, [p], #1        // instruction: load the byte at address p, then p += 1
+    } while w10 != 0             // sugar: a single cbnz
+    return p - s - 1
+}
+```
+
+The listing of `length` — your instruction in place, the sugar around it; the translator added the
+prologue and epilogue:
+
+```asm
+_length:
+    stp x29, x30, [sp, #-16]!
+    mov x29, sp
+    mov x9, x0                   // let p: x9 = s
+Llength.body2:
+    ldrb w10, [x9], #1           // the line from the source, p replaced with x9
+    cbnz w10, Llength.body2      // } while w10 != 0
+    sub x0, x9, x0               // return p - s - 1
+    sub x0, x0, #1
+    ldp x29, x30, [sp], #16
+    ret
+```
+
+Instructions are written in the platform's syntax (the Apple dialect of AArch64, Intel/LLVM for
+x86-64). The built-in assembler understands ≈140 AArch64 mnemonics and the main integer and SSE
+instructions of x86-64 (no SIMD vectors yet); with `--clang` the build is done by `clang`, and then
+everything it knows is available. A complete example — [examples/mixed.hla](examples/mixed.hla).
+
+A rethinking of hlaa64, a [high-level assembler](https://en.wikipedia.org/wiki/High-level_assembler), in TypeScript.
+
+The whole pipeline is written in TypeScript with no external runtime dependencies and works
+both in Node and **in the browser, offline**:
 
 ```
- program.hla ──► транслятор ──► ассемблер AArch64 ──► кодировщик + линковщик ──► Mach-O (arm64, подписан) ──► запуск
-                 src/lang          (текст, Apple-диалект)   src/asm                        на macOS или в эмуляторе src/emu
+ program.hla ──► translator ──► AArch64 assembly ──► encoder + linker ──► Mach-O (arm64, signed) ──► run
+                 src/lang        (text, Apple dialect)  src/asm                                     on macOS or in the src/emu emulator
 ```
 
-| Компонент | Что делает |
+| Component | What it does |
 |---|---|
-| `src/lang` | лексер, парсер и генератор кода HLA64 → ассемблер AArch64 |
-| `src/asm` | ассемблер (≈140 мнемоник + все `b.cond`, директивы, числовые метки); объектные файлы `.o` с релокациями, статические `.a` и динамические `.dylib` библиотеки; линковщик Mach-O: GOT/стабы для libSystem, rebase/bind опкоды dyld, таблица символов, **ad-hoc подпись кода** (SHA-256 CodeDirectory — без неё ядро не запустит arm64-бинарник) |
-| `src/emu` | эмулятор ARM64: загружает получившийся Mach-O, применяет bind-опкоды, подставляет libSystem на JS (`printf`, `puts`, `malloc`, `qsort` с обратным вызовом и т. д.) и исполняет машинный код |
-| `web/` → `dist/hla64.html` | один самодостаточный HTML-файл: редактор с подсветкой, живая трансляция, листинг машинного кода с разбором битов, инспектор Mach-O / PE, консоль эмулятора, сборка программы или библиотеки для C (`.a` / `.dylib` или `.lib` / `.dll` + `.h`) и скачивание результата; платформа переключается в самом верху |
-| `src/lang/x64`, `src/asm/x64`, `src/asm/coff`, `src/emu/x64` | вторая платформа — **Windows x64**: генератор кода Win64, ассемблер x86-64 (Intel, диалект LLVM), объектные файлы COFF, линковщик PE (`.exe`/`.dll`), статические библиотеки и библиотеки импорта `.lib`, эмулятор x64 с загрузчиком PE. Подробно — [docs/windows.md](docs/windows.md) |
+| `src/lang` | HLA64 lexer, parser and code generator → AArch64 assembly |
+| `src/asm` | assembler (≈140 mnemonics + all `b.cond`, directives, numeric labels); `.o` object files with relocations, static `.a` and dynamic `.dylib` libraries; Mach-O linker: GOT/stubs for libSystem, dyld rebase/bind opcodes, symbol table, **ad-hoc code signature** (SHA-256 CodeDirectory — without it the kernel won't run an arm64 binary) |
+| `src/emu` | ARM64 emulator: loads the resulting Mach-O, applies the bind opcodes, substitutes a JS libSystem (`printf`, `puts`, `malloc`, `qsort` with a callback, etc.) and executes the machine code |
+| `web/` → `dist/hla64.html` | a single self-contained HTML file: an editor with syntax highlighting, live translation, a machine-code listing with bit-level breakdown, a Mach-O / PE inspector, the emulator console, building a program or a library for C (`.a` / `.dylib` or `.lib` / `.dll` + `.h`) and downloading the result; the platform is switched at the very top |
+| `src/lang/x64`, `src/asm/x64`, `src/asm/coff`, `src/emu/x64` | the second platform — **Windows x64**: Win64 code generator, x86-64 assembler (Intel, LLVM dialect), COFF object files, PE linker (`.exe`/`.dll`), static libraries and `.lib` import libraries, x64 emulator with a PE loader. Details — [docs/windows.md](docs/windows.md) |
 
-## Быстрый старт
+## Quick start
 
 ```sh
-npm install                                    # только инструменты разработки (typescript, esbuild)
+npm install                                    # development tools only (typescript, esbuild)
 
-node src/cli.ts run examples/showcase.hla      # транслировать + собрать своим ассемблером + запустить
-node src/cli.ts compile examples/hello.hla     # показать сгенерированный ассемблер
+node src/cli.ts run examples/showcase.hla      # translate + build with our own assembler + run
+node src/cli.ts compile examples/hello.hla     # show the generated assembly
 node src/cli.ts build examples/hello.hla -o hello && ./hello
-node src/cli.ts build examples/hello.hla -o hello --zip   # + hello.zip: внутри файл с битом +x
-node src/cli.ts run examples/hello.hla --clang # то же через clang (для сравнения)
-node src/cli.ts emu examples/mandelbrot.hla    # запустить во встроенном эмуляторе (macOS не нужна)
-node src/cli.ts asm hello.s -o hello           # собрать обычный .s встроенным ассемблером
-node src/cli.ts lib mathlib.hla                # библиотека для C: mathlib.h + .o + .a + .dylib
-node src/cli.ts obj app.hla                    # объектный файл, чтобы скомпоновать с кодом на C
+node src/cli.ts build examples/hello.hla -o hello --zip   # + hello.zip: contains the file with the +x bit
+node src/cli.ts run examples/hello.hla --clang # the same via clang (for comparison)
+node src/cli.ts emu examples/mandelbrot.hla    # run in the built-in emulator (no macOS needed)
+node src/cli.ts asm hello.s -o hello           # build a regular .s with the built-in assembler
+node src/cli.ts lib mathlib.hla                # a library for C: mathlib.h + .o + .a + .dylib
+node src/cli.ts obj app.hla                    # an object file to link with C code
 
-node src/cli.ts run examples/hello.hla --target x64-windows    # Windows x64 (вне Windows — в эмуляторе x64)
+node src/cli.ts run examples/hello.hla --target x64-windows    # Windows x64 (outside Windows — in the x64 emulator)
 node src/cli.ts build examples/hello.hla --target x64-windows  # hello.exe
 
-npm run build:web                              # собрать dist/hla64.html и PWA в dist/pages/
-open dist/hla64.html                           # работает с file://, без сети
+npm run build:web                              # build dist/hla64.html and the PWA in dist/pages/
+open dist/hla64.html                           # works over file://, no network needed
 
-./build.sh                                     # то же одной командой (сам ставит инструменты, если их нет)
-./build.sh check open                          # + typecheck и тесты CI перед сборкой, затем открыть страницу
+./build.sh                                     # the same in one command (installs the tools itself if missing)
+./build.sh check open                          # + typecheck and CI tests before the build, then open the page
 ```
 
-Онлайн страница живёт на GitHub Pages как устанавливаемое приложение (PWA): после первого
-открытия service worker держит её в кэше, и она работает без сети. Готовый файл `hla64-vX.Y.Z.html`
-прикладывается к каждому [релизу](../../releases).
+The online page lives on GitHub Pages as an installable app (PWA): after the first visit the
+service worker keeps it in the cache, and it works without a network. A ready-made
+`hla64-vX.Y.Z.html` file is attached to every [release](../../releases).
 
-Слева на странице — панель как в IDE: **Files** (файлы открытого проекта; главный помечен `main`,
-остальные подключаются через `include`; файлы можно создавать, переименовывать — `include` следуют
-за файлом, — удалять и перетаскивать с диска), **Projects** (свои проекты для текущей платформы)
-и **Examples** (встроенные примеры; изменённый пример помечен точкой и сбрасывается к оригиналу).
-Проекты хранятся в IndexedDB этого браузера, **Download project .zip** скачивает все файлы проекта.
-Программа с `include "std/file.hla"` (одинаковые функции файлов для macOS и Windows) читает файлы
-проекта, а записанные ею файлы появляются в панели.
+On the left of the page is an IDE-like panel: **Files** (the files of the open project; the main one
+is marked `main`, the others are pulled in via `include`; files can be created, renamed — `include`s
+follow the file — deleted and dragged in from disk), **Projects** (your own projects for the current
+platform) and **Examples** (built-in examples; a modified example is marked with a dot and can be
+reset to the original). Projects are stored in this browser's IndexedDB; **Download project .zip**
+downloads all the project's files. A program with `include "std/file.hla"` (the same file functions
+for macOS and Windows) reads the project's files, and the files it writes appear in the panel.
 
-Нужен Node 24+ (запускает `.ts` напрямую). На странице кнопка **Download executable** отдаёт
-готовый Mach-O; браузер снимает бит исполнения и ставит карантин, поэтому страница показывает
-команду для Terminal (`chmod +x … && xattr -d com.apple.quarantine … ; ./…`) и предлагает
-вариант `.zip`: в архиве файл записан с режимом `0755`, поэтому после распаковки (Finder или `unzip`)
-он сразу исполняемый. Если zip получен через браузер, macOS переносит пометку карантина на
-распакованный файл, и Gatekeeper его не запустит, пока не выполнить `xattr -d com.apple.quarantine <файл>`
-(обойти это может только подпись Developer ID с нотаризацией). Кнопка **Copy Terminal command**
-обходится без скачивания: команда воссоздаёт файл из base64 прямо в Terminal, без карантина.
+Node 24+ is required (it runs `.ts` directly). On the page, the **Download executable** button gives
+you a ready Mach-O; the browser strips the executable bit and sets quarantine, so the page shows
+a command for Terminal (`chmod +x … && xattr -d com.apple.quarantine … ; ./…`) and offers a
+`.zip` option: in the archive the file is stored with mode `0755`, so after unpacking (Finder or
+`unzip`) it is executable right away. If the zip was obtained via a browser, macOS carries the
+quarantine flag over to the unpacked file, and Gatekeeper won't run it until you execute
+`xattr -d com.apple.quarantine <file>` (only a Developer ID signature with notarization can get
+around this). The **Copy Terminal command** button needs no download: the command recreates the
+file from base64 right in Terminal, without quarantine.
 
-## Как выглядит язык
+## Sugar up close
+
+Sugar is shorthand for what you would otherwise write as instructions: loops, conditions,
+expressions, array access, ABI calls. Where an instruction is more convenient, you write an
+instruction:
 
 ```hla
 extern printf(fmt, ...)
 
 data numbers: i32[8] = [42, -7, 19, 3, 88, 0, -15, 61]
 
-fn sort_numbers() {                         // сортировка вставками
+fn sort_numbers() {                         // insertion sort
     for i: x9 in 1..8 {
         let key: w10 = numbers[i]
         let j: x11 = i - 1
@@ -86,11 +165,11 @@ fn sort_numbers() {                         // сортировка вставк
     }
 }
 
-fn fib(n: auto) {                           // n переживает рекурсивный вызов
+fn fib(n: auto) {                           // n survives the recursive call
     if n < 2 { return n }
     let a = fib(n - 1)
     x0 = fib(n - 2)
-    return a + x0
+    add x0, x0, a                           // an instruction instead of return a + x0
 }
 
 fn main() {
@@ -99,7 +178,7 @@ fn main() {
 }
 ```
 
-Во что превращается `while j >= 0 && numbers[j] > key`:
+What `while j >= 0 && numbers[j] > key` turns into:
 
 ```asm
 Lsort_numbers.next5:
@@ -112,109 +191,133 @@ Lsort_numbers.next5:
     b.gt Lsort_numbers.body6
 ```
 
-Уроки для начинающих, от «Hello, world» до игры «Жизнь»: **[docs/lessons](docs/lessons/README.md)**.
-Полный справочник: **[docs/language.md](docs/language.md)**. Большая программа, задействующая
-почти всё: [examples/showcase.hla](examples/showcase.hla).
+The full reference: **[docs/language.md](docs/language.md)**. A big program that uses
+almost everything: [examples/showcase.hla](examples/showcase.hla).
 
-## Библиотеки для C
+## Lessons
 
-Функции с `export` и типами параметров можно вызывать из C: `node src/cli.ts lib mathlib.hla`
-генерирует заголовок и библиотеки, дальше — обычный `clang main.c libmathlib.a`. Работает и наоборот:
-программа на HLA64 вызывает функции на C через `extern`. Пошагово — в [уроке 14](docs/lessons/14-c-library.md).
-На странице `dist/hla64.html` то же самое делает переключатель **Build as: Program / Static lib .a / Dynamic lib .dylib**:
-заголовок на вкладке **C header**, zip с `.h`, библиотекой и `main.c` или команда для Terminal, которая всё собирает `clang` и запускает.
+A course for beginners, from “Hello, world” to the Game of Life: **[docs/lessons](docs/lessons/README.md)**.
+Processor instructions appear in it from the first lesson, alongside the sugar.
 
-## Примеры
+| # | Lesson | What it covers |
+|---|---|---|
+| 1 | [Hello, world](docs/lessons/01-hello-world.md) | first program, the `main` function, comments, the first processor instruction in code |
+| 2 | [Registers and variables](docs/lessons/02-registers-and-variables.md) | what a register is, `let`, `alias`, constants, printing numbers |
+| 3 | [Arithmetic and expressions](docs/lessons/03-arithmetic.md) | operators, precedence, bits and shifts, 32 and 64 bits |
+| 4 | [Conditions](docs/lessons/04-conditions.md) | `if / elif / else`, comparisons, `&&` `\|\|` `!`, the ternary operator |
+| 5 | [Loops](docs/lessons/05-loops.md) | `while`, `do … while`, `loop`, `for … in`, `break` and `continue` |
+| 6 | [Functions](docs/lessons/06-functions.md) | parameters, `return`, recursion, which registers a call clobbers |
+| 7 | [Data and arrays](docs/lessons/07-data-and-arrays.md) | `data`, `rodata`, strings, arrays, `len` and `sizeof` |
+| 8 | [Memory and pointers](docs/lessons/08-memory-and-pointers.md) | addresses, `u8[p]`, `[p++]`, local buffers on the stack |
+| 9 | [Structs and enums](docs/lessons/09-structs-and-enums.md) | `struct`, `enum`, arrays of structs, a linked list |
+| 10 | [The C library and the system](docs/lessons/10-c-library-and-syscalls.md) | `extern`, `printf`, `malloc`, `qsort` and function pointers, `syscall` |
+| 11 | [Floating-point numbers](docs/lessons/11-floating-point.md) | `d` and `s` registers, `float()` and `int()`, `sqrt` |
+| 12 | [Under the hood](docs/lessons/12-under-the-hood.md) | `asm { }` blocks and numeric labels, `naked`, `push`/`pop`, how a function call works |
+| 13 | [Project: the Game of Life](docs/lessons/13-project-game-of-life.md) | everything together in one program |
+| 14 | [A library for C (and C for HLA64)](docs/lessons/14-c-library.md) | `export`, parameter types, `.h`/`.o`/`.a`/`.dylib`, C ↔ HLA64 calls (needs a Mac with `clang`) |
 
-| Файл | О чём |
+## Libraries for C
+
+Functions with `export` and parameter types can be called from C: `node src/cli.ts lib mathlib.hla`
+generates a header and libraries, then it's the usual `clang main.c libmathlib.a`. It also works the
+other way round: an HLA64 program calls C functions via `extern`. Step by step — in [lesson 14](docs/lessons/14-c-library.md).
+On the `dist/hla64.html` page the same is done by the **Build as: Program / Static lib .a / Dynamic lib .dylib** switch:
+the header is on the **C header** tab, plus a zip with the `.h`, the library and `main.c`, or a Terminal command that builds everything with `clang` and runs it.
+
+## Examples
+
+| File | What it's about |
 |---|---|
-| [hello.hla](examples/hello.hla) | минимальная программа |
-| [showcase.hla](examples/showcase.hla) | тур по языку: структуры, enum, массивы, строки, рекурсия, qsort с колбэком, FP, syscall, naked-функции, push/pop, goto |
-| [mandelbrot.hla](examples/mandelbrot.hla) | множество Мандельброта на d-регистрах |
+| [mixed.hla](examples/mixed.hla) | instructions and sugar in the same functions: `ldrb` with post-increment inside `do … while`, `bfi`/`ubfx`, `cmp`+`csel` without branches, `umulh` after a sugar xorshift, a loop on a label with `b.lt` (for Windows — [tests/x64/cases/mixed.hla](tests/x64/cases/mixed.hla) with `cmovg`, `mul`, `jl`) |
+| [hello.hla](examples/hello.hla) | a minimal program |
+| [showcase.hla](examples/showcase.hla) | a tour of the language: structs, enums, arrays, strings, recursion, qsort with a callback, FP, syscall, naked functions, push/pop, goto |
+| [mandelbrot.hla](examples/mandelbrot.hla) | the Mandelbrot set on d registers: floating-point expressions next to `fmul` |
 | [fizzbuzz.hla](examples/fizzbuzz.hla) | `for … in`, `if/elif/else` |
-| [bare-metal.hla](examples/bare-metal.hla) | без libc: `svc #0x80`, печать чисел в стековый буфер, встроенный ассемблер с числовыми метками |
+| [bare-metal.hla](examples/bare-metal.hla) | no libc: `svc #0x80`, printing numbers into a stack buffer, inline assembly with numeric labels |
 
-## Тулчейн на самом HLA64 (`selfhost/`)
+## A toolchain in HLA64 itself (`selfhost/`)
 
-В [selfhost/](selfhost/README.md) лежат транслятор и ассемблер, написанные на HLA64:
-`hlc-arm`/`hlc-x64` переводят HLA64 (без регистров) в ассемблер AArch64 или x86-64,
-`hlas-arm`/`hlas-x64` собирают из него подписанный Mach-O или `.exe`. После раскрутки
-TypeScript-версией они пересобирают сами себя побайтно, а их исполняемые файлы совпадают
-с результатом линковщиков из `src/asm`. Проверка — `selfhost/test.sh`.
+[selfhost/](selfhost/README.md) contains a translator and an assembler written in HLA64:
+`hlc-arm`/`hlc-x64` translate HLA64 (without registers) into AArch64 or x86-64 assembly,
+`hlas-arm`/`hlas-x64` build a signed Mach-O or an `.exe` from it. After bootstrapping with
+the TypeScript version they rebuild themselves byte for byte, and their executables match
+the output of the linkers in `src/asm`. To check — `selfhost/test.sh`.
 
-## Тесты
+## Tests
 
 ```sh
-npm test                 # все примеры и tests/cases × {clang, свой ассемблер, эмулятор}: 24 прогона
-npm run test:lessons     # 100 программ из уроков + сборка урока 14 с clang (--native: программы ещё и на macOS)
-npm run test:encoding    # 248 форм инструкций: кодировка бит-в-бит совпадает с clang
-npm run fuzz             # дифференциальный фаззер: ~1200 случайных выражений, натив и эмулятор против BigInt-эталона
-npm run check:web        # открыть страницу в headless Chrome, прогнать примеры обеих платформ, сделать скриншоты
-npm run check:pwa        # dist/pages/ по http в headless Chrome: service worker, манифест, перезагрузка без сети
+npm test                 # all examples and tests/cases × {clang, own assembler, emulator}: 54 runs
+npm run test:lessons     # 108 programs from the lessons + building lesson 14 with clang (--native: programs also on macOS)
+npm run test:encoding    # 248 instruction forms: encoding matches clang bit for bit
+npm run fuzz             # differential fuzzer: ~1200 random expressions, native and emulator vs. a BigInt reference
+npm run check:web        # open the page in headless Chrome, run the examples for both platforms, take screenshots
+npm run check:pwa        # dist/pages/ over http in headless Chrome: service worker, manifest, reload without network
 npm run typecheck
 
-npm run test:x64         # Windows x64: программы для x64 + переносимые программы уроков в эмуляторе x64 (на Windows — ещё и нативно)
-npm run test:x64-clang   #   … и тот же ассемблер через clang + lld-link
-npm run test:x64-encoding  # 987 форм x86-64: бит-в-бит с clang
-npm run test:coff        # COFF-объект против clang, lld-link, свой линковщик PE
-npm run test:x64-lib     # C ↔ HLA64 на Windows: .lib, .dll + библиотека импорта (clang и lld-link; на Windows — ещё MSVC и SEH)
-npm run test:all         # всё подряд
-npm run test:ci          # то, что гоняет CI на Linux (части, которым нужны macOS или clang, пропускаются сами)
+npm run test:x64         # Windows x64: x64 programs + portable lesson programs in the x64 emulator (on Windows — natively too)
+npm run test:x64-clang   #   … and the same assembly via clang + lld-link
+npm run test:x64-encoding  # 987 x86-64 forms: bit for bit with clang
+npm run test:coff        # COFF object vs. clang, lld-link, own PE linker
+npm run test:x64-lib     # C ↔ HLA64 on Windows: .lib, .dll + import library (clang and lld-link; on Windows — also MSVC and SEH)
+npm run test:all         # everything in a row
+npm run test:ci          # what CI runs on Linux (parts that need macOS or clang skip themselves)
 ```
 
-Каждая программа из `examples/` и `tests/cases/` с файлом `.expected` проверяется трижды:
-собранная `clang`, собранная встроенным ассемблером и запущенная на macOS, и исполненная в эмуляторе.
-`codesign -v` считает подпись бинарников валидной.
+Every program in `examples/` and `tests/cases/` with an `.expected` file is checked three times:
+built with `clang`, built with the built-in assembler and run on macOS, and executed in the emulator.
+`codesign -v` considers the binaries' signatures valid.
 
-### Сборка в GitHub Actions
+### Building in GitHub Actions
 
-- [pages.yml](.github/workflows/pages.yml) — на каждый push в `main`: проверка типов, `test:ci`,
-  сборка, `check:pwa` и публикация `dist/pages/` на GitHub Pages
-  (в настройках репозитория: Settings → Pages → Source: **GitHub Actions**).
-- [release.yml](.github/workflows/release.yml) — на тег `v*`: те же проверки, затем релиз с
-  `hla64-vX.Y.Z.html` и `SHA256SUMS.txt`. Версия берётся только из `package.json`, тег должен
-  с ней совпадать: `npm version 0.2.0 && git push --follow-tags`. Можно запустить и вручную
-  (Run workflow, указать тег) — файлы существующего релиза будут заменены.
+- [pages.yml](.github/workflows/pages.yml) — on every push to `main`: type checking, `test:ci`,
+  build, `check:pwa` and publishing `dist/pages/` to GitHub Pages
+  (in the repository settings: Settings → Pages → Source: **GitHub Actions**).
+- [release.yml](.github/workflows/release.yml) — on a `v*` tag: the same checks, then a release with
+  `hla64-vX.Y.Z.html` and `SHA256SUMS.txt`. The version is taken only from `package.json`, and the tag
+  must match it: `npm version 0.2.0 && git push --follow-tags`. It can also be run manually
+  (Run workflow, specify the tag) — the files of an existing release will be replaced.
 
-## Устройство
+## How it works
 
-### Транслятор (`src/lang`)
-- `lexer.ts`, `parser.ts` → AST (`ast.ts`); операторный приоритет как в Go.
-- `codegen.ts` — генерация с учётом режимов адресации и форм инструкций AArch64:
-  иммедиаты add/sub (12 бит, `lsl #12`), логические bitmask-иммедиаты, `movz/movk/movn`,
-  сдвинутые и расширенные операнды, `madd/msub`, `csel/cset`, `cbz/tbz/tst`, пост-инкремент,
-  масштабированные индексы. Скретч-регистры `x16/x17` (+ свободные callee-saved, затем
-  не названные в функции `x9..x15`), пролог сохраняет ровно те callee-saved регистры, которые
-  встретились в теле функции; `let` сверх свободных регистров вытесняется в кадр.
+### Translator (`src/lang`)
+- `lexer.ts`, `parser.ts` → AST (`ast.ts`); operator precedence as in Go.
+- A line that doesn't parse as sugar is an instruction: it goes into the listing as is, with the
+  names of variables, parameters, constants, data and labels replaced by registers and symbols.
+- `codegen.ts` — code generation aware of AArch64 addressing modes and instruction forms:
+  add/sub immediates (12 bits, `lsl #12`), logical bitmask immediates, `movz/movk/movn`,
+  shifted and extended operands, `madd/msub`, `csel/cset`, `cbz/tbz/tst`, post-increment,
+  scaled indexes. Scratch registers `x16/x17` (+ free callee-saved ones, then
+  `x9..x15` not named in the function); the prologue saves exactly those callee-saved registers
+  that appear in the function body; `let`s beyond the free registers are spilled to the stack frame.
 
-### Ассемблер и линковщик (`src/asm`)
-- `parse.ts` — разбор строк, операндов и выражений (`sym@PAGE`, `sym@GOTPAGEOFF`, `#imm`, `[x1, w2, sxtw #2]`).
-- `encode.ts` — кодировщик инструкций; поля, зависящие от адресов, отдаются линковщику как fixup'ы.
-- `assembler.ts` — секции, символы, директивы (`.section`, `.p2align`, `.asciz`, `.quad`, `.zerofill`, …).
-- `macho-object.ts` — объектные файлы `MH_OBJECT` (релокации `BRANCH26`, `PAGE21`, `PAGEOFF12`, `GOT_LOAD_*`, `UNSIGNED`);
-  `archive.ts` — статические библиотеки (`ar` с оглавлением `__.SYMDEF SORTED`).
-- `macho.ts` — исполняемые файлы и `.dylib` (`LC_ID_DYLIB`, таблица экспорта); раскладка `__PAGEZERO / __TEXT / __DATA / __LINKEDIT`, стабы и GOT для импортов
-  из `libSystem.B.dylib`, rebase/bind-опкоды (`LC_DYLD_INFO_ONLY`), `LC_MAIN`, symtab/dysymtab,
-  export trie, `LC_BUILD_VERSION`, UUID и ad-hoc подпись (`sha256.ts`).
+### Assembler and linker (`src/asm`)
+- `parse.ts` — parsing of lines, operands and expressions (`sym@PAGE`, `sym@GOTPAGEOFF`, `#imm`, `[x1, w2, sxtw #2]`).
+- `encode.ts` — instruction encoder; address-dependent fields are handed to the linker as fixups.
+- `assembler.ts` — sections, symbols, directives (`.section`, `.p2align`, `.asciz`, `.quad`, `.zerofill`, …).
+- `macho-object.ts` — `MH_OBJECT` object files (relocations `BRANCH26`, `PAGE21`, `PAGEOFF12`, `GOT_LOAD_*`, `UNSIGNED`);
+  `archive.ts` — static libraries (`ar` with a `__.SYMDEF SORTED` table of contents).
+- `macho.ts` — executables and `.dylib`s (`LC_ID_DYLIB`, export table); the `__PAGEZERO / __TEXT / __DATA / __LINKEDIT` layout, stubs and GOT for imports
+  from `libSystem.B.dylib`, rebase/bind opcodes (`LC_DYLD_INFO_ONLY`), `LC_MAIN`, symtab/dysymtab,
+  export trie, `LC_BUILD_VERSION`, UUID and the ad-hoc signature (`sha256.ts`).
 
-### Эмулятор (`src/emu`)
-- `cpu.ts` — интерпретатор AArch64 (целочисленные, загрузки/сохранения всех режимов, ветвления,
-  условные операции, FP); декодированные инструкции кэшируются как замыкания. ~8–15 млн инструкций/с.
-- `macho-loader.ts` — загрузчик Mach-O, применение bind-опкодов, «libSystem» на JS, syscalls.
-- `printf.ts` — форматирование `printf` (флаги, ширина, точность, `%d %u %x %s %c %p %f %e %g`).
+### Emulator (`src/emu`)
+- `cpu.ts` — AArch64 interpreter (integer ops, loads/stores in all modes, branches,
+  conditional operations, FP); decoded instructions are cached as closures. ~8–15 million instructions/s.
+- `macho-loader.ts` — Mach-O loader, applying bind opcodes, a JS “libSystem”, syscalls.
+- `printf.ts` — `printf` formatting (flags, width, precision, `%d %u %x %s %c %p %f %e %g`).
 
-## Структура проекта
+## Project structure
 
 ```
-src/lang/      транслятор HLA64 (frontend.ts — общая часть, codegen.ts — AArch64, x64/ — Windows x64)
-src/asm/       ассемблер + линковщик Mach-O; x64/ — ассемблер x86-64; coff/ — COFF, PE, .lib
-src/emu/       эмулятор ARM64; x64/ — эмулятор x86-64 и загрузчик PE
-src/cli.ts     командная строка
-web/           исходники страницы (template.html, main.ts, worker.ts; sw.js — service worker PWA)
-assets/        иконка (icon.svg) и PNG-иконки PWA (npm run build:icons пересобирает их из SVG)
-dist/hla64.html  собранная страница (не коммитится: npm run build:web)
-dist/pages/    PWA для GitHub Pages: index.html, hla64.html, sw.js, манифест, иконки
-examples/      примеры (.hla + .expected)
+src/lang/      HLA64 translator (frontend.ts — shared part, codegen.ts — AArch64, x64/ — Windows x64)
+src/asm/       assembler + Mach-O linker; x64/ — x86-64 assembler; coff/ — COFF, PE, .lib
+src/emu/       ARM64 emulator; x64/ — x86-64 emulator and PE loader
+src/cli.ts     command line
+web/           page sources (template.html, main.ts, worker.ts; sw.js — the PWA service worker)
+assets/        icon (icon.svg) and PWA PNG icons (npm run build:icons regenerates them from the SVG)
+dist/hla64.html  the built page (not committed: npm run build:web)
+dist/pages/    PWA for GitHub Pages: index.html, hla64.html, sw.js, manifest, icons
+examples/      examples (.hla + .expected)
 tests/         run.ts, encoding.ts, fuzz.ts, cases/; x64.ts, x64-lib.ts, encoding-x64.ts, coff-x64.ts, x64/
-docs/          справочник языка, уроки (docs/lessons), Windows x64 (docs/windows.md)
+docs/          language reference, lessons (docs/lessons), Windows x64 (docs/windows.md)
 ```
