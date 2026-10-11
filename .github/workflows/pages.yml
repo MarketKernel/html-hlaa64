@@ -1,5 +1,5 @@
-# Builds dist/hla64.html and publishes it to GitHub Pages (Settings → Pages → Source: GitHub Actions)
-name: Pages
+# Builds the PWA (dist/pages/) and publishes it to GitHub Pages (Settings → Pages → Source: GitHub Actions)
+name: Deploy to GitHub Pages
 
 on:
   push:
@@ -11,27 +11,38 @@ permissions:
   pages: write
   id-token: write
 
+# One deploy at a time; a newer push does not cancel one already under way.
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build:
+    name: Build the PWA
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-node@v4
         with:
+          # Node 24 runs the .ts sources directly
           node-version: 24
           cache: npm
+
       - run: npm ci
+      - run: npm run typecheck
+      # The parts that need macOS or clang/lld-link skip themselves on Linux; the emulators run everything.
+      - run: npm run test:ci
       - run: npm run build:web
-      - run: cp dist/hla64.html dist/index.html
+      # ubuntu-latest ships Chrome at /usr/bin/google-chrome: the service worker, the manifest, an offline reload.
+      - run: npm run check:pwa
+
+      - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: dist
+          path: dist/pages
 
   deploy:
+    name: Deploy
     needs: build
     runs-on: ubuntu-latest
     environment:

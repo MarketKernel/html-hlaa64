@@ -38,9 +38,13 @@ node src/cli.ts obj app.hla                    # объектный файл, ч
 node src/cli.ts run examples/hello.hla --target x64-windows    # Windows x64 (вне Windows — в эмуляторе x64)
 node src/cli.ts build examples/hello.hla --target x64-windows  # hello.exe
 
-npm run build:web                              # собрать dist/hla64.html
+npm run build:web                              # собрать dist/hla64.html и PWA в dist/pages/
 open dist/hla64.html                           # работает с file://, без сети
 ```
+
+Онлайн страница живёт на GitHub Pages как устанавливаемое приложение (PWA): после первого
+открытия service worker держит её в кэше, и она работает без сети. Готовый файл `hla64-vX.Y.Z.html`
+прикладывается к каждому [релизу](../../releases).
 
 Нужен Node 24+ (запускает `.ts` напрямую). На странице кнопка **Download executable** отдаёт
 готовый Mach-O; браузер снимает бит исполнения и ставит карантин, поэтому страница показывает
@@ -127,6 +131,7 @@ npm run test:lessons     # 100 программ из уроков + сборка
 npm run test:encoding    # 248 форм инструкций: кодировка бит-в-бит совпадает с clang
 npm run fuzz             # дифференциальный фаззер: ~1200 случайных выражений, натив и эмулятор против BigInt-эталона
 npm run check:web        # открыть страницу в headless Chrome, прогнать примеры обеих платформ, сделать скриншоты
+npm run check:pwa        # dist/pages/ по http в headless Chrome: service worker, манифест, перезагрузка без сети
 npm run typecheck
 
 npm run test:x64         # Windows x64: программы для x64 + переносимые программы уроков в эмуляторе x64
@@ -135,11 +140,22 @@ npm run test:x64-encoding  # 987 форм x86-64: бит-в-бит с clang
 npm run test:coff        # COFF-объект против clang, lld-link, свой линковщик PE
 npm run test:x64-lib     # C ↔ HLA64 на Windows: .lib, .dll + библиотека импорта (через clang и lld-link)
 npm run test:all         # всё подряд
+npm run test:ci          # то, что гоняет CI на Linux (части, которым нужны macOS или clang, пропускаются сами)
 ```
 
 Каждая программа из `examples/` и `tests/cases/` с файлом `.expected` проверяется трижды:
 собранная `clang`, собранная встроенным ассемблером и запущенная на macOS, и исполненная в эмуляторе.
 `codesign -v` считает подпись бинарников валидной.
+
+### Сборка в GitHub Actions
+
+- [pages.yml](.github/workflows/pages.yml) — на каждый push в `main`: проверка типов, `test:ci`,
+  сборка, `check:pwa` и публикация `dist/pages/` на GitHub Pages
+  (в настройках репозитория: Settings → Pages → Source: **GitHub Actions**).
+- [release.yml](.github/workflows/release.yml) — на тег `v*`: те же проверки, затем релиз с
+  `hla64-vX.Y.Z.html` и `SHA256SUMS.txt`. Версия берётся только из `package.json`, тег должен
+  с ней совпадать: `npm version 0.2.0 && git push --follow-tags`. Можно запустить и вручную
+  (Run workflow, указать тег) — файлы существующего релиза будут заменены.
 
 ## Устройство
 
@@ -174,8 +190,10 @@ src/lang/      транслятор HLA64 (frontend.ts — общая часть
 src/asm/       ассемблер + линковщик Mach-O; x64/ — ассемблер x86-64; coff/ — COFF, PE, .lib
 src/emu/       эмулятор ARM64; x64/ — эмулятор x86-64 и загрузчик PE
 src/cli.ts     командная строка
-web/           исходники страницы (template.html, main.ts, worker.ts)
-dist/hla64.html  собранная страница (не коммитится: npm run build:web; онлайн — GitHub Pages)
+web/           исходники страницы (template.html, main.ts, worker.ts; sw.js — service worker PWA)
+assets/        иконка (icon.svg) и PNG-иконки PWA (npm run build:icons пересобирает их из SVG)
+dist/hla64.html  собранная страница (не коммитится: npm run build:web)
+dist/pages/    PWA для GitHub Pages: index.html, hla64.html, sw.js, манифест, иконки
 examples/      примеры (.hla + .expected)
 tests/         run.ts, encoding.ts, fuzz.ts, cases/; x64.ts, x64-lib.ts, encoding-x64.ts, coff-x64.ts, x64/
 docs/          справочник языка, уроки (docs/lessons), Windows x64 (docs/windows.md)

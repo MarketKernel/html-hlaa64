@@ -29,6 +29,8 @@ npm-debug.log*
 
 # the web page is built and published by GitHub Pages (.github/workflows/pages.yml)
 /dist/
+# release files (.github/workflows/release.yml)
+/release/
 
 # examples: only sources and expected outputs are tracked, binaries built from them are not
 /examples/*
