@@ -1,0 +1,80 @@
+// mathlib.hla — a small library written in HLA64 and called from C (x86-64 Windows version)
+
+export const MATHLIB_VERSION = 3
+
+export struct Vec2 {
+    x: f64
+    y: f64
+}
+
+export enum Shape { Circle, Square, Triangle }
+
+// a global variable that C can read and write
+export data call_count: i64 = 0
+
+// greatest common divisor of two 64-bit numbers
+export fn gcd(a: i64, b: i64) -> i64 {
+    call_count++
+    while b != 0 {
+        let r: rax = a % b
+        a = b
+        b = r
+    }
+    return a
+}
+
+// C `int` arguments arrive in the low 32 bits; the i32 type extends them correctly
+export fn clamp(v: i32, lo: i32, hi: i32) -> i32 {
+    call_count++
+    return v < lo ? lo : (v > hi ? hi : v)
+}
+
+// strings: count the occurrences of a character in a C string
+export fn count_char(s: ptr, ch: u8) -> i64 {
+    call_count++
+    let n: rax = 0
+    loop {
+        r8d = u8[s++]
+        if r8d == 0 { break }
+        if r8d == ch { n++ }
+    }
+    return n
+}
+
+// arrays: sum of `count` int64_t values
+export fn sum_i64(values: ptr, count: i64) -> i64 {
+    call_count++
+    let total: rax = 0
+    for i: r8 in 0..count {
+        total += i64[values + i * 8]
+    }
+    return total
+}
+
+// structs: the length of a Vec2 passed by pointer
+export fn vec2_length(v: ptr) -> f64 {
+    call_count++
+    xmm0 = f64[v + Vec2.x]
+    xmm1 = f64[v + Vec2.y]
+    return sqrt(xmm0 * xmm0 + xmm1 * xmm1)
+}
+
+// callbacks: replace every element with f(element), where f is a C function
+export fn map_i64(values: ptr, count: i64, f: ptr) {
+    call_count++
+    let p = values               // callee-saved copies: f() may clobber rax, rcx, rdx, r8-r11
+    let n = count
+    let func = f
+    for i in 0..n {
+        let r = func(i64[p + i * 8])
+        i64[p + i * 8] = r
+    }
+}
+
+// an area by shape kind, using the exported enum
+export fn area(kind: i32, size: f64) -> f64 {
+    call_count++
+    if kind == Shape.Circle { return 3.141592653589793 * size * size }
+    if kind == Shape.Square { return size * size }
+    return size * size * 0.4330127018922193      // equilateral triangle: sqrt(3)/4
+}

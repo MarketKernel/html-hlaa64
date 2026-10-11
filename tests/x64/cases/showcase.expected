@@ -1,0 +1,45 @@
+Hello, HLA64!
+expr: (7+5)*(7-5)/2 + (7<<3) - (5>>1) = 66
+add3(1,2,3) = 6
+10! = 3628800
+fib(20) = 6765
+gcd(1071, 462) = 21
+min/max/abs: 5 7 42
+bits: 5 7 2
+mask & ~0xFF..: ff00ff00ff00, clz(1) = 63
+popcount(0xF0F0) = 8
+twice(21) = 42
+apply(square, 12) = 144
+Color.Blue = 5, Color.Purple = 6, Color.count = 7
+sizeof(Point) = 16, Particle.mass at 16, sizeof(Particle) = 24
+points[2] = (20, 21)
+strlen(greeting) = 13, my_strlen = 13, len() = 13
+reversed: !46ALH ,olleH
+names[0] = zero
+names[1] = one
+names[2] = two
+names[3] = three
+numbers: 42 -7 19 3 88 0 -15 61 5 27
+sum = 223
+sorted : -15 -7 0 3 5 19 27 42 61 88
+qsorted: -7 0 3 5 19 27 42 61 88 1000
+primes below 100: 25
+primes_count (global) = 25
+-12 is negative
+ -8 is small negative
+ -4 is small negative
+  0 is zero
+  4 is even or seven
+  8 is even or seven
+find_pair(91):
+  7 * 13 = 91
+counter = 11
+area(r=2) = 12.5664
+hypot(3, 4) = 5.0
+2.25 * 7 = 15.75, int = 15
+written with WriteFile
+-90210
+0
+big = 7, flag = 1
+after pop: a = 7, b = 5, ticks = 1
+goto loop ran 3 times

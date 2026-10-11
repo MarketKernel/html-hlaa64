@@ -1,0 +1,130 @@
+// Self-checking arithmetic: runtime results vs compile-time folded constants
+extern printf(fmt, ...)
+
+data fails: i64 = 0
+data checks: i64 = 0
+
+fn check(got, want, id) {
+    checks++
+    if got != want {
+        printf("FAIL #%lld: got %lld (0x%llx), want %lld (0x%llx)\n", id, got, got, want, want)
+        fails++
+    }
+}
+
+fn main() {
+    let a = 7, b = -3, c = 100, d = 0x123456789ABCDEF
+    let unsigned u = 0xFFFFFFFFFFFFFFF0
+    check(a + b, 4, 1)
+    check(a - b, 10, 2)
+    check(a * b, -21, 3)
+    check(c / a, 14, 4)
+    check(c % a, 2, 5)
+    check(b / 2, -1, 6)
+    check(b % 2, -1, 7)
+    check(c / b, -33, 8)
+    check(a << 4, 112, 9)
+    check(b >> 1, -2, 10)
+    check(b >>> 60, 15, 11)
+    check(a & 3, 3, 12)
+    check(a | 8, 15, 13)
+    check(a ^ 0xFF, 0xF8, 14)
+    check(~a, -8, 15)
+    check(-a, -7, 16)
+    check(d, 0x123456789ABCDEF, 17)
+    check(d + 1, 0x123456789ABCDF0, 18)
+    check(c + 5000, 5100, 19)
+    check(c - 4096, -3996, 20)
+    check(c + 0x123000, 0x123064, 21)
+    check(c * 1024, 102400, 22)
+    check((a + c) * (c - a) - a * a, (107 * 93) - 49, 23)
+    check(a + b * c, 7 - 300, 24)
+    check(c - a * b, 100 + 21, 25)
+    check(c + (a << 2), 128, 26)
+    check(c - (b >> 1), 102, 27)
+    check(c & ~a, 100 & ~7, 28)
+    check(u >> 4, 0x0FFFFFFFFFFFFFFF, 29)
+    check(u / 16, 0x0FFFFFFFFFFFFFFF, 30)
+    check(u % 16, 0, 31)
+    check(a < c, 1, 32)
+    check(a > c, 0, 33)
+    check(a == 7 && c == 100, 1, 34)
+    check(a == 7 && c == 99, 0, 35)
+    check(a == 6 || c == 100, 1, 36)
+    check(!a, 0, 37)
+    check(!(a - 7), 1, 38)
+    check(a > b ? a : b, 7, 39)
+    check(a < b ? a : b, -3, 40)
+    check(a > 0 ? 1 : 0, 1, 41)
+    check(a > 0 ? 42 : 13, 42, 42)
+    check(a < 0 ? 42 : 13, 13, 43)
+    check(u > 5, 1, 44)          // unsigned compare: huge value
+    check(b < 5, 1, 45)          // signed compare: -3 < 5
+    check(min(a, b), -3, 46)
+    check(max(a, b), 7, 47)
+    check(abs(b), 3, 48)
+    check(umin(a, u), 7, 49)
+    check(clz(a), 61, 50)
+    check(rev(0x0102030405060708), 0x0807060504030201, 52)
+    check(sext8(0xFF), -1, 53)
+    check(sext16(0x8000), -32768, 54)
+    check(sext32(0x80000000), -2147483648, 55)
+    check(zext8(-1), 255, 56)
+    check(zext16(-1), 65535, 57)
+    check(zext32(-1), 0xFFFFFFFF, 58)
+    check(0x7FFFFFFFFFFFFFFF + 0, 0x7FFFFFFFFFFFFFFF, 59)
+    check(-1, -1, 60)
+    check(-0x10000, -0x10000, 61)
+    check(0xFFFF0000FFFF, 0xFFFF0000FFFF, 62)
+
+    // 32-bit registers
+    eax = 0xFFFFFFFF
+    eax = eax + 2
+    check(rax, 1, 63)
+    r8d = -5
+    r8d = r8d / 2
+    check(sext32(r8d), -2, 64)
+    r9d = 0x80000000
+    r9d = r9d >> 4                  // arithmetic shift on w
+    check(r9, 0xF8000000, 65)
+
+    // compound assignment
+    let v = 10
+    v += 5
+    v -= 3
+    v *= 4
+    v /= 6
+    v %= 5
+    v <<= 3
+    v |= 1
+    v ^= 0xF0
+    v &= 0xFF
+    v >>= 1
+    check(v, (((((((10 + 5 - 3) * 4 / 6) % 5) << 3) | 1) ^ 0xF0) & 0xFF) >> 1, 66)
+    v++
+    v--
+    v--
+    check(v, ((((((((10 + 5 - 3) * 4 / 6) % 5) << 3) | 1) ^ 0xF0) & 0xFF) >> 1) - 1, 67)
+
+    // operand clobber cases: target appears on the right
+    let p = 3, q = 4
+    p = q - p
+    check(p, 1, 68)
+    p = 3
+    p = (q + 1) * (p + 2) - p
+    check(p, 22, 69)
+    p = 3
+    p = 10 - p
+    check(p, 7, 70)
+    p = 3
+    p = 100 / p
+    check(p, 33, 71)
+    p = 17
+    p = p % q
+    check(p, 1, 72)
+    p = 5
+    p = q % p
+    check(p, 4, 73)
+
+    printf("arith: %lld checks, %lld failures\n", checks, fails)
+}

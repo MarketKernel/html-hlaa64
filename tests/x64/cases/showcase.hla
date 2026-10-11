@@ -1,0 +1,362 @@
+// =====================================================================
+//  HLA64 showcase for x86-64 Windows: a tour through the language.
+//  Registers are still registers — but with names, operators,
+//  structured control flow, and the boring prologue/epilogue done for you.
+// =====================================================================
+
+extern printf(fmt, ...)
+extern puts, putchar, strlen, malloc, free, qsort, fflush
+extern GetStdHandle, WriteFile
+
+// ---------------------------------------------------------------- constants
+const N = 10
+const BUF_SIZE = 64
+const MASK = 0xFF00FF00FF00FF00
+
+enum Color { Red, Green, Blue = 5, Purple }
+
+struct Point {
+    x: i64
+    y: i64
+}
+
+struct Particle {
+    pos: Point
+    mass: i32
+    flags: u8
+}
+
+// ---------------------------------------------------------------- data
+data counter: i64 = 0
+data numbers: i32[N] = [42, -7, 19, 3, 88, 0, -15, 61, 5, 27]
+data primes_count: u32 = 0
+data greeting = "Hello, HLA64!"
+rodata names: ptr = ["zero", "one", "two", "three"]
+data points: Point[3]
+data sieve: u8[100]          // zero-filled (bss)
+data pi: f64 = 3.141592653589793
+data scale: f64[3] = [0.5, 1.5, 2.25]
+
+// a global register variable: shared by every function, never saved/restored
+alias ticks = r15
+
+// ---------------------------------------------------------------- functions
+
+// parameters without a register live in their ABI registers (rcx, rdx, r8, r9)
+fn add3(a, b, c) {
+    return a + b + c
+}
+
+// recursion: n is moved into a callee-saved register so it survives the call
+fn factorial(n: auto) {
+    if n <= 1 {
+        return 1
+    }
+    rax = factorial(n - 1)
+    return rax * n
+}
+
+fn fib(n: rbx) {
+    if n < 2 { return n }
+    let a = fib(n - 1)
+    rax = fib(n - 2)
+    return a + rax
+}
+
+// greatest common divisor with a classic loop
+fn gcd(a, b) {
+    while b != 0 {
+        let t: rax = a % b
+        a = b
+        b = t
+    }
+    return a
+}
+
+// my own strlen: byte loads with post-increment addressing
+fn my_strlen(s) {
+    let p: rax = s
+    loop {
+        r8d = u8[p++]
+        if r8d == 0 { break }
+    }
+    return p - s - 1
+}
+
+// reverse a string into a buffer; auto parameters survive the call to my_strlen
+fn reverse2(dst: auto, src: auto) {
+    let len = my_strlen(src)
+    let i = 0
+    while i < len {
+        u8[dst + i] = u8[src + len - i - 1]
+        i++
+    }
+    u8[dst + len] = 0
+    return dst
+}
+
+// sum of an array of i32 using indexed access with scaling
+fn sum_numbers() {
+    let s: rax = 0
+    for i: r8 in 0..N {
+        s += numbers[i]
+    }
+    return s
+}
+
+// insertion sort on the global array
+fn sort_numbers() {
+    for i: r8 in 1..N {
+        let key: r9d = numbers[i]
+        let j: rax = i - 1
+        while j >= 0 && numbers[j] > key {
+            edx = numbers[j]
+            numbers[j + 1] = edx
+            j--
+        }
+        numbers[j + 1] = key
+    }
+}
+
+fn print_numbers(title) {
+    printf("%s:", title)
+    for i in 0..N {
+        eax = numbers[i]
+        printf(" %d", eax)
+    }
+    putchar('\n')
+}
+
+// sieve of Eratosthenes on a byte array
+fn count_primes() {
+    let unsigned count = 0
+    for i in 2..100 {
+        if sieve[i] == 0 {
+            count++
+            let j = i * i
+            while j < 100 {
+                sieve[j] = 1
+                j += i
+            }
+        }
+    }
+    primes_count = count
+    return count
+}
+
+// classify a number: if / elif / else and logical operators
+fn classify(v) {
+    if v == 0 {
+        return "zero"
+    } elif v < 0 && v > -10 {
+        return "small negative"
+    } elif v < 0 {
+        return "negative"
+    } else if v & 1 == 0 || v == 7 {
+        return "even or seven"
+    }
+    return "odd"
+}
+
+// nested loops with a labelled break and continue
+fn find_pair(target) {
+    outer: for a in 1..20 {
+        for b in a..20 {
+            if a * b == target {
+                printf("  %lld * %lld = %lld\n", a, b, target)
+                break outer
+            }
+            if b > a + 10 { continue outer }
+        }
+    }
+}
+
+// floating point: xmm registers with operators
+fn circle_area(r: xmm0) {
+    let pi_val: xmm1 = pi
+    xmm0 = pi_val * r * r
+    return xmm0
+}
+
+fn hypot(a: xmm0, b: xmm1) {
+    return sqrt(a * a + b * b)
+}
+
+// writing to stdout through the Windows API (five arguments: the fifth goes on the stack)
+const STD_OUTPUT_HANDLE = -11
+fn write_str(s: auto) {
+    local written: u32
+    fflush(0)                     // flush printf's buffer first
+    let n = strlen(s)
+    let h = GetStdHandle(STD_OUTPUT_HANDLE)
+    WriteFile(h, s, n, &written, 0)
+}
+
+// raw assembler is always available; aliases work inside it
+fn popcount(v) {
+    let count: rax = 0
+    while v != 0 {
+        mov r8, v           // raw instructions using the aliases 'v' and 'count'
+        and r8, 1
+        add count, r8
+        v = v >>> 1
+    }
+    return count
+}
+
+// naked function: no prologue, you are in charge
+naked fn twice(v) {
+    lea rax, [rcx + rcx]
+    ret
+}
+
+// a function that takes a function pointer
+fn apply(f: rax, v) {
+    rcx = v
+    f(rcx)
+    return rax
+}
+
+fn square(v) { return v * v }
+
+// stack-allocated buffer
+fn int_to_str(v: auto) {
+    local buf: u8[32]
+    let p = &buf[31]
+    u8[p] = 0
+    let neg = v < 0
+    if neg { v = -v }
+    do {
+        p--
+        let d: rax = v % 10
+        u8[p] = d + '0'
+        v = v / 10
+    } while v != 0
+    if neg {
+        p--
+        u8[p] = '-'
+    }
+    puts(p)
+}
+
+// comparator for qsort: called from C!
+fn cmp_i32(a, b) {
+    eax = i32[a]
+    r8d = i32[b]
+    return eax < r8d ? -1 : (eax > r8d ? 1 : 0)
+}
+
+// ---------------------------------------------------------------- main
+fn main() {
+    puts(greeting)
+    ticks = 0
+
+    // arithmetic & expressions
+    let a = 7, b = 5
+    let c = (a + b) * (a - b) / 2 + (a << 3) - (b >> 1)
+    printf("expr: (7+5)*(7-5)/2 + (7<<3) - (5>>1) = %lld\n", c)
+    printf("add3(1,2,3) = %lld\n", add3(1, 2, 3))
+    printf("10! = %lld\n", factorial(10))
+    printf("fib(20) = %lld\n", fib(20))
+    printf("gcd(1071, 462) = %lld\n", gcd(1071, 462))
+    printf("min/max/abs: %lld %lld %lld\n", min(a, b), max(a, b), abs(-42))
+    printf("bits: %llx %llx %llx\n", a & b, a | b, a ^ b)
+    let m = MASK
+    printf("mask & ~0xFF..: %llx, clz(1) = %lld\n", m & ~0xFF00000000000000, clz(1))
+    printf("popcount(0xF0F0) = %lld\n", popcount(0xF0F0))
+    printf("twice(21) = %lld\n", twice(21))
+    printf("apply(square, 12) = %lld\n", apply(square, 12))
+
+    // enums & structs
+    printf("Color.Blue = %lld, Color.Purple = %lld, Color.count = %lld\n", Color.Blue, Color.Purple, Color.count)
+    printf("sizeof(Point) = %lld, Particle.mass at %lld, sizeof(Particle) = %lld\n", sizeof(Point), Particle.mass, Particle.size)
+    for i in 0..3 {
+        let p = &points[i]
+        [p + Point.x] = i * 10
+        [p + Point.y] = i * 10 + 1
+    }
+    let p2 = &points[2]
+    printf("points[2] = (%lld, %lld)\n", [p2 + Point.x], [p2 + Point.y])
+
+    // strings
+    printf("strlen(greeting) = %lld, my_strlen = %lld, len() = %lld\n", strlen(greeting), my_strlen(greeting), len(greeting))
+    let buf = malloc(64)
+    reverse2(buf, greeting)
+    printf("reversed: %s\n", buf)
+    free(buf)
+    for i in 0..4 {
+        rax = names[i]
+        printf("names[%lld] = %s\n", i, rax)
+    }
+
+    // arrays
+    print_numbers("numbers")
+    printf("sum = %lld\n", sum_numbers())
+    sort_numbers()
+    print_numbers("sorted ")
+    numbers[0] = 1000
+    qsort(&numbers, N, 4, cmp_i32)
+    print_numbers("qsorted")
+
+    // sieve
+    printf("primes below 100: %d\n", count_primes())
+    eax = primes_count
+    printf("primes_count (global) = %d\n", eax)
+
+    // classification with if/elif/else
+    for v in -12..=8 step 4 {
+        printf("%3lld is %s\n", v, classify(v))
+    }
+
+    // labelled loops
+    puts("find_pair(91):")
+    find_pair(91)
+
+    // global variables
+    for i in 0..5 { counter += i }
+    counter++
+    printf("counter = %lld\n", counter)
+
+    // floating point
+    let r: xmm6 = 2.0
+    xmm0 = circle_area(r)
+    printf("area(r=2) = %.4f\n", xmm0)
+    xmm0 = hypot(3.0, 4.0)
+    printf("hypot(3, 4) = %.1f\n", xmm0)
+    xmm1 = scale[2]
+    xmm1 = xmm1 * float(a)
+    printf("2.25 * 7 = %.2f, int = %lld\n", xmm1, int(xmm1))
+
+    // Windows API
+    write_str("written with WriteFile\n")
+
+    // stack buffers
+    int_to_str(-90210)
+    int_to_str(0)
+
+    // ternary & comparison values
+    // (x64 has 8 callee-saved registers for let, ARM has 10: reuse c and m here)
+    c = a > b ? a : b
+    m = a == 7
+    printf("big = %lld, flag = %lld\n", c, m)
+
+    // push / pop and an asm block
+    push a, b
+    a = 100
+    b = 200
+    pop a, b
+    asm {
+        add ticks, 1
+        mov rax, a
+    }
+    printf("after pop: a = %lld, b = %lld, ticks = %lld\n", a, b, ticks)
+
+    // goto
+    c = 0
+again:
+    c++
+    if c < 3 { goto again }
+    printf("goto loop ran %lld times\n", c)
+
+    return 0
+}

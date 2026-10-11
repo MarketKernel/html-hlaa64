@@ -1,0 +1,30 @@
+// Inline assembly name substitution: mnemonics and numeric label references stay intact
+extern printf(fmt, ...)
+
+// parameters named like mnemonics / label suffixes: b, f
+fn count_down(b, f) {
+    asm {
+        mov x9, #0
+    1:
+        cbz b, 2f            // 'b' the alias -> x0, '2f' the label stays
+        add x9, x9, f        // 'f' the alias -> x1
+        sub b, b, #1
+        b 1b                 // 'b' the mnemonic stays, '1b' stays
+    2:
+        mov x0, x9
+    }
+}
+
+naked fn cmp_eq(b, x) {      // naked: our own ret
+    cmp b, x
+    b.eq 1f
+    mov x0, #0
+    ret
+1:  mov x0, #1
+    ret
+}
+
+fn main() {
+    printf("%ld\n", count_down(4, 10))
+    printf("%ld %ld\n", cmp_eq(3, 3), cmp_eq(3, 4))
+}

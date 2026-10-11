@@ -1,0 +1,211 @@
+// Memory access, control flow and calling conventions
+extern printf(fmt, ...)
+
+data fails: i64 = 0
+data checks: i64 = 0
+data bytes: u8[8] = [1, 2, 3, 250, 251, 252, 253, 254]
+data sbytes: i8[4] = [-1, -2, 3, 4]
+data halves: u16[4] = [1000, 2000, 65535, 4]
+data shalves: i16[2] = [-1000, 1000]
+data words: u32[3] = [0xFFFFFFFF, 2, 3]
+data quads: i64[4] = [10, 20, 30, 40]
+data msg = "tab\there \"quoted\" \\ end\n"
+data fl: f32 = 1.5
+data fls: f32[2] = [0.25, 4.0]
+data matrix: i32[9] = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+data big: u8[5000]
+rodata table: i64[3] = 7
+
+struct Node {
+    value: i64
+    next: ptr
+}
+data nodes: Node[4]
+
+fn check(got, want, id) {
+    checks++
+    if got != want {
+        printf("FAIL #%ld: got %ld (0x%lx), want %ld\n", id, got, got, want)
+        fails++
+    }
+}
+
+fn sub2(a, b) { return a - b }
+fn many(a, b, c, d, e, f, g, h) {
+    return a + b * 2 + c * 3 + d * 4 + e * 5 + f * 6 + g * 7 + h * 8
+}
+
+fn locals_test() {
+    local small: i64
+    local arr: i32[100]
+    local huge: u8[1000]
+    small = 42
+    for i in 0..100 {
+        arr[i] = i * 3
+    }
+    huge[999] = 77
+    huge[0] = 11
+    let s = 0
+    for i in 0..100 { s += arr[i] }
+    check(s, 3 * 4950, 100)
+    check(small, 42, 101)
+    check(huge[999], 77, 102)
+    check(huge[0], 11, 103)
+    small += 8
+    check(small, 50, 104)
+    let p = &huge
+    u8[p + 500] = 5
+    check(huge[500], 5, 105)
+}
+
+fn main() {
+    // typed loads
+    check(bytes[3], 250, 1)
+    check(sbytes[0], -1, 2)
+    check(sbytes[1], -2, 3)
+    check(halves[2], 65535, 4)
+    check(shalves[0], -1000, 5)
+    check(words[0], 0xFFFFFFFF, 6)
+    check(quads[3], 40, 7)
+    let i = 2
+    check(quads[i], 30, 8)
+    check(bytes[i], 3, 9)
+    check(halves[i], 65535, 10)
+    w9 = 1
+    check(quads[w9], 20, 11)          // 32-bit index register (sxtw)
+    check(table[2], 7, 12)
+    check(len(msg), 24, 13)
+    check(sizeof(quads), 32, 14)
+    check(len(quads), 4, 15)
+
+    // stores
+    quads[i] = 33
+    check(quads[2], 33, 16)
+    bytes[0] = 0x1FF                  // truncated to a byte
+    check(bytes[0], 0xFF, 17)
+    halves[i + 1] = 7
+    check(halves[3], 7, 18)
+    let base = &quads
+    [base + 8] = 99
+    check(quads[1], 99, 19)
+    check([base + 8], 99, 20)
+    check(i64[base + i * 8], 33, 21)
+    check(i64[base + (i << 3)], 33, 22)
+    x9 = 3
+    check(i64[base + x9 * 8], 40, 23)
+    let pb = &bytes
+    check(u8[pb + 3], 250, 24)
+    check(i8[pb + 3], -6, 25)
+    check(u16[pb + 2], 250 * 256 + 3, 26)
+    big[4999] = 9
+    check(big[4999], 9, 27)
+    check(big[4998], 0, 28)
+    check(matrix[2 * 3 + 1], 8, 29)
+
+    // pointer walking with post increment
+    let q = &quads
+    let sum = 0
+    for k in 0..4 {
+        x9 = i64[q++]
+        sum += x9
+    }
+    check(sum, 10 + 99 + 33 + 40, 30)
+
+    // linked list in a struct array
+    for k in 0..4 {
+        let n = &nodes[k]
+        [n + Node.value] = k * 100
+        if k < 3 {
+            let nx = &nodes[k + 1]
+            [n + Node.next] = nx
+        } else {
+            [n + Node.next] = 0
+        }
+    }
+    let node = &nodes
+    let total = 0
+    while node != 0 {
+        x9 = [node + Node.value]
+        total += x9
+        node = [node + Node.next]
+    }
+    check(total, 600, 31)
+
+    // floats in memory
+    s0 = fl
+    d1 = float(3)
+    d2 = d1 * 2.5
+    check(int(d2), 7, 32)
+    s3 = fls[1]
+    s3 = s3 * s0
+    check(int(s3), 6, 33)
+    fls[0] = s3
+    s4 = fls[0]
+    check(int(s4), 6, 34)
+    d5 = 0.1
+    d6 = d5 + d5 + d5
+    check(int(d6 * 10.0), 3, 35)
+    d7 = -2.5
+    check(int(fabs(d7) * 2.0), 5, 36)
+    if d7 < 0.0 { check(1, 1, 37) } else { check(0, 1, 37) }
+    if d6 > d5 && d5 >= 0.1 { check(1, 1, 38) } else { check(0, 1, 38) }
+
+    // argument permutations (needs a parallel move)
+    x0 = 10
+    x1 = 3
+    x0 = sub2(x1, x0)
+    check(x0, -7, 39)
+    x0 = many(1, 2, 3, 4, 5, 6, 7, 8)
+    check(x0, 1 + 4 + 9 + 16 + 25 + 36 + 49 + 64, 40)
+
+    // more than eight variadic arguments
+    printf("%d %d %d %d %d %d %d %d %d %d %s\n", 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, "variadic ok")
+
+    // control flow
+    let n = 0
+    for k in 10..0 step -2 { n += k }          // 10 8 6 4 2
+    check(n, 30, 41)
+    n = 0
+    for k in 0..=10 step 5 { n += k }          // 0 5 10
+    check(n, 15, 42)
+    n = 0
+    for (let k = 0; k < 10; k++) {
+        if k & 1 { continue }
+        n += k
+    }
+    check(n, 20, 43)
+    n = 0
+    do { n++ } while n < 5
+    check(n, 5, 44)
+    n = 0
+    loop {
+        n += 3
+        if n > 10 { break }
+    }
+    check(n, 12, 45)
+    n = 0
+    rows: for r in 0..5 {
+        for col in 0..5 {
+            if col > r { continue rows }
+            if r == 4 { break rows }
+            n++
+        }
+    }
+    check(n, 1 + 2 + 3 + 4, 46)
+    n = 0
+    let m = 0
+    while n < 100 && m != 7 {
+        n += 10
+        m++
+    }
+    check(n * 1000 + m, 70007, 47)
+    // if chains
+    for k in 0..4 {
+        if k == 0 { n = 10 } elif k == 1 { n = 11 } elif k == 2 { n = 12 } else { n = 13 }
+        check(n, 10 + k, 48)
+    }
+
+    locals_test()
+    printf("%s", msg)
+    printf("memory: %ld checks, %ld failures\n", checks, fails)
+}

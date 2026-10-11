@@ -1,0 +1,28 @@
+{
+  "name": "html-hlaa64",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "HLA64: a high-level assembly language for ARM64 macOS and x86-64 Windows, its translator and a browser-side assembler/linker, all in TypeScript",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node tests/run.ts",
+    "build:web": "node tools/build-web.ts",
+    "fuzz": "node tests/fuzz.ts 1 8",
+    "test:encoding": "node tests/encoding.ts",
+    "check:web": "node tools/check-web.ts",
+    "test:lessons": "node tests/lessons.ts",
+    "test:x64": "node tests/x64.ts",
+    "test:x64-clang": "node tests/x64.ts --clang",
+    "test:x64-encoding": "node tests/encoding-x64.ts",
+    "test:coff": "node tests/coff-x64.ts",
+    "test:x64-lib": "node tests/x64-lib.ts",
+    "test:all": "node tests/run.ts && node tests/lessons.ts && node tests/x64.ts && node tests/fuzz.ts 1 4 && node tests/encoding.ts && node tests/encoding-x64.ts && node tests/coff-x64.ts && node tests/x64-lib.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "esbuild": "^0.28.2",
+    "puppeteer-core": "^25.13.0",
+    "typescript": "^7.0.2"
+  }
+}

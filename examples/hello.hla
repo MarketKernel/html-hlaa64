@@ -1,0 +1,11 @@
+// Hello world in HLA64
+extern puts, printf(fmt, ...)
+
+fn main() {
+    puts("Hello from HLA64!")
+    let i = 0
+    while i < 3 {
+        printf("i = %ld\n", i)
+        i++
+    }
+}

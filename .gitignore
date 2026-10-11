@@ -1,0 +1,48 @@
+# dependencies
+node_modules/
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+*~
+
+# logs
+npm-debug.log*
+*.log
+
+# build products of src/cli.ts (written next to the source or into the current directory)
+*.o
+*.a
+*.dylib
+*.obj
+*.lib
+*.dll
+*.exe
+*.zip
+/*.h
+/*.s
+/out/
+
+# the web page is built and published by GitHub Pages (.github/workflows/pages.yml)
+/dist/
+
+# examples: only sources and expected outputs are tracked, binaries built from them are not
+/examples/*
+!/examples/*.hla
+!/examples/*.s
+!/examples/*.expected
+
+# lesson 14 build products (build.sh runs in place)
+/docs/lessons/14-library/mathlib.h
+/docs/lessons/14-library/demo_*
+/docs/lessons/14-library/app
+
+# screenshots from `npm run check:web` (saved to the current directory by default)
+/web-*.png
+
+# private notes and task descriptions (not part of the project)
+/private/

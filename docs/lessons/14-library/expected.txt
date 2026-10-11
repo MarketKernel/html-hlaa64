@@ -1,0 +1,14 @@
+mathlib version 3
+gcd(1071, 462) = 21
+clamp(150, 0, 100) = 100, clamp(-5, 0, 100) = 0
+count_char("hello, world", 'o') = 2
+sum_i64 = 15
+after map_i64(square): 1 4 9 16 25
+vec2_length({3, 4}) = 5.0
+area(Shape_Square, 2) = 4.00, area(Shape_Circle, 1) = 3.14159
+functions called: 9
+after reset: 1
+after reset: 1
+Hello from C, HLA64!
+c_fib(20) = 6765
+c_average = 4.00

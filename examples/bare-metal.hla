@@ -1,0 +1,44 @@
+// No libc at all: the kernel is reached with svc #0x80,
+// numbers are converted to text by hand in a stack buffer.
+
+data banner = "Talking to the kernel directly.\n"
+
+// print an unsigned number in any base (2..16) with a raw write(2)
+fn print_num(value: auto, base: auto) {
+    local buf: u8[72]
+    let unsigned v = value
+    let p = &buf[71]
+    u8[p] = '\n'
+    do {
+        p--
+        let unsigned d: x9 = v % base
+        if d < 10 { w9 = w9 + '0' } else { w9 = w9 + 'a' - 10 }
+        u8[p] = w9
+        v = v / base
+    } while v != 0
+    let n = &buf[72]
+    syscall(SYS_write, 1, p, n - p)
+}
+
+fn main() {
+    syscall(SYS_write, 1, banner, len(banner))
+    print_num(2026, 10)
+    print_num(2026, 16)
+    print_num(2026, 2)
+
+    // raw assembler with aliases: count the set bits of 0xDEADBEEF
+    let value: x20 = 0xDEADBEEF
+    let bits: x21 = 0
+    asm {
+        mov x9, value
+    1:
+        cbz x9, 2f
+        sub x10, x9, #1
+        and x9, x9, x10        // clear the lowest set bit
+        add bits, bits, #1
+        b 1b
+    2:
+    }
+    print_num(bits, 10)
+    syscall(SYS_exit, 0)
+}

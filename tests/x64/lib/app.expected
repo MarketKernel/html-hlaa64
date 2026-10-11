@@ -1,0 +1,3 @@
+Hello from C, HLA64!
+c_fib(20) = 6765
+c_average = 4.00

@@ -1,0 +1,10 @@
+# Keep LF everywhere: expected outputs are compared byte for byte (Windows checkouts too)
+* text=auto eol=lf
+*.png binary
+*.zip binary
+*.exe binary
+*.obj binary
+*.lib binary
+*.o binary
+*.a binary
+*.dylib binary

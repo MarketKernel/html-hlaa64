@@ -1,0 +1,24 @@
+// Large stack frames: the prologue probes every 4 KB page before moving rsp (Windows guard page)
+extern printf(fmt, ...)
+
+fn fill(n) {
+    local buf: u8[20000]
+    for i in 0..n { buf[i] = i & 0xFF }
+    let s = 0
+    for i in 0..n { s += buf[i] }
+    return s
+}
+
+fn deep(level) {
+    local pad: i64[700]          // 5600 bytes per call
+    pad[0] = level
+    pad[699] = level * 2
+    if level == 0 { return 0 }
+    rax = deep(level - 1)
+    return rax + pad[0] + pad[699]
+}
+
+fn main() {
+    printf("fill: %lld\n", fill(20000))
+    printf("deep: %lld\n", deep(20))
+}

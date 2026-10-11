@@ -1,0 +1,365 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>HLA64 Workbench</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;600;700&display=swap">
+<style>
+:root {
+  --ground: #eef1f4;
+  --panel: #ffffff;
+  --panel-2: #f5f7f9;
+  --ink: #15202b;
+  --muted: #5a6878;
+  --line: #d6dde4;
+  --line-strong: #bcc7d2;
+  --accent: #2456c8;
+  --accent-soft: #e3ebfb;
+  --accent-ink: #ffffff;
+  --addr: #965a0c;
+  --ok: #1b7f55;
+  --ok-soft: #dff2e8;
+  --err: #be3426;
+  --err-soft: #fbe5e2;
+  --sel: #d9e4fb;
+  --s-kw: #7a3eb1;
+  --s-reg: #156a86;
+  --s-num: #965a0c;
+  --s-str: #2b7a2b;
+  --s-com: #7c8895;
+  --s-type: #b03668;
+  --s-label: #2456c8;
+  --s-dir: #8a6a12;
+  --code: "JetBrains Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  --ui: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --radius: 6px;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground: #0d1217; --panel: #141b22; --panel-2: #10161c; --ink: #dce4eb; --muted: #8b99a7;
+    --line: #24303b; --line-strong: #33424f; --accent: #7fa6ff; --accent-soft: #1b2944; --accent-ink: #0d1217;
+    --addr: #e0a44e; --ok: #49c08a; --ok-soft: #12291f; --err: #ff7a6b; --err-soft: #34181a; --sel: #1d2c48;
+    --s-kw: #c79bff; --s-reg: #5fc6e0; --s-num: #e0a44e; --s-str: #8fd18f; --s-com: #6e7d8b; --s-type: #ff8fb8;
+    --s-label: #7fa6ff; --s-dir: #d8b45a;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --ground: #0d1217; --panel: #141b22; --panel-2: #10161c; --ink: #dce4eb; --muted: #8b99a7;
+  --line: #24303b; --line-strong: #33424f; --accent: #7fa6ff; --accent-soft: #1b2944; --accent-ink: #0d1217;
+  --addr: #e0a44e; --ok: #49c08a; --ok-soft: #12291f; --err: #ff7a6b; --err-soft: #34181a; --sel: #1d2c48;
+  --s-kw: #c79bff; --s-reg: #5fc6e0; --s-num: #e0a44e; --s-str: #8fd18f; --s-com: #6e7d8b; --s-type: #ff8fb8;
+  --s-label: #7fa6ff; --s-dir: #d8b45a;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+code, pre, textarea, kbd, .mark, .stage .st-val, table { font-variant-ligatures: none; font-feature-settings: "liga" 0, "calt" 0; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font: 14px/1.45 var(--ui);
+  display: flex;
+  flex-direction: column;
+  padding: env(safe-area-inset-top, 0px) 16px env(safe-area-inset-bottom, 0px);
+}
+[hidden] { display: none !important; }
+button, select, input { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ------------------------------------------------------------------ platform strip */
+.platforms {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px;
+  padding-block: 10px 0; font-size: 12px; color: var(--muted);
+}
+.platforms .seg span { display: flex; align-items: center; gap: 7px; padding: 5px 12px; }
+.platforms .seg b { font-weight: 600; color: inherit; }
+.platforms .seg small { font: 11px var(--code); }
+.platforms .hint { font-size: 12px; }
+@media (max-width: 560px) {
+  .platforms .seg small, .platforms .seg-label { display: none; }
+  .platforms .hint { flex-basis: 100%; }
+}
+
+/* ------------------------------------------------------------------ top bar */
+.bar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px;
+  padding-block: 14px 10px;
+}
+.brand { display: flex; align-items: baseline; gap: 10px; margin-right: auto; }
+.mark { font: 700 20px/1 var(--code); letter-spacing: 0.04em; }
+.mark b { color: var(--accent); font-weight: 700; }
+.sub { font-size: 12px; color: var(--muted); letter-spacing: 0.06em; text-transform: uppercase; }
+.field { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+select {
+  background: var(--panel); border: 1px solid var(--line-strong); border-radius: var(--radius);
+  padding: 6px 28px 6px 10px; appearance: none; color: var(--ink);
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position: calc(100% - 14px) 52%, calc(100% - 9px) 52%;
+  background-size: 5px 5px; background-repeat: no-repeat;
+}
+.actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.btn {
+  border: 1px solid var(--line-strong); background: var(--panel); border-radius: var(--radius);
+  padding: 7px 14px; cursor: pointer; display: inline-flex; align-items: center; gap: 8px; font-weight: 500;
+}
+.btn:hover { border-color: var(--accent); }
+.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.btn.primary:hover { filter: brightness(1.08); }
+.btn:disabled { opacity: 0.55; cursor: default; filter: none; }
+kbd { font: 11px var(--code); opacity: 0.75; }
+
+/* ------------------------------------------------------------------ pipeline */
+.pipeline-wrap { overflow-x: auto; padding-bottom: 10px; }
+.pipeline { display: flex; align-items: stretch; gap: 0; min-width: max-content; }
+.stage {
+  display: grid; gap: 1px; padding: 8px 14px 8px 12px; background: var(--panel);
+  border: 1px solid var(--line); border-left: 3px solid var(--line-strong);
+  border-radius: var(--radius); cursor: pointer; text-align: left; min-width: 150px;
+}
+.stage:hover { border-color: var(--line-strong); border-left-color: var(--accent); }
+.stage[data-state="ok"] { border-left-color: var(--ok); }
+.stage[data-state="err"] { border-left-color: var(--err); background: var(--err-soft); }
+.stage[data-state="busy"] { border-left-color: var(--accent); }
+.stage .st-name { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); font-weight: 600; }
+.stage .st-val { font: 600 13px var(--code); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.stage .st-note { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.arrow { align-self: center; width: 22px; height: 2px; background: var(--line-strong); position: relative; flex: none; }
+.arrow::after {
+  content: ""; position: absolute; right: -1px; top: -4px; border: 5px solid transparent;
+  border-left: 6px solid var(--line-strong); border-right: 0;
+}
+
+/* ------------------------------------------------------------------ work area */
+.work {
+  flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px;
+  padding-bottom: 12px;
+}
+.pane {
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  display: flex; flex-direction: column; min-height: 0; min-width: 0; overflow: hidden;
+}
+.pane-head {
+  display: flex; align-items: center; gap: 12px; padding: 0 12px; height: 38px; border-bottom: 1px solid var(--line);
+  background: var(--panel-2); font-size: 12px; color: var(--muted); flex: none;
+}
+.pane-head .file { font: 600 12px var(--code); color: var(--ink); }
+.pane-head .spacer { margin-left: auto; }
+
+/* editor */
+.editor { position: relative; flex: 1; min-height: 0; display: flex; font: 13px/20px var(--code); }
+.gutter {
+  flex: none; width: 48px; overflow: hidden; background: var(--panel-2); border-right: 1px solid var(--line);
+  color: var(--muted); text-align: right; user-select: none; font-variant-numeric: tabular-nums;
+}
+.gutter-inner { padding: 10px 8px 10px 0; }
+.gutter-inner > div { height: 20px; }
+.gutter .bad { color: var(--err); font-weight: 700; background: var(--err-soft); }
+.code { position: relative; flex: 1; min-width: 0; }
+.code pre, .code textarea {
+  position: absolute; inset: 0; margin: 0; padding: 10px 12px; border: 0;
+  font: inherit; white-space: pre; tab-size: 4; overflow: auto; letter-spacing: 0;
+}
+.code pre { pointer-events: none; color: var(--ink); overflow: hidden; }
+.code textarea {
+  resize: none; background: transparent; color: transparent; caret-color: var(--ink); outline: none;
+}
+.code textarea::selection { background: var(--sel); color: transparent; }
+.errline { background: var(--err-soft); display: inline-block; min-width: 100%; }
+.diag {
+  flex: none; border-top: 1px solid var(--err); background: var(--err-soft); color: var(--ink);
+  padding: 8px 12px; font: 12.5px/1.5 var(--code); white-space: pre-wrap; max-height: 30%; overflow: auto;
+}
+.diag strong { color: var(--err); }
+.warn { color: var(--muted); }
+
+/* syntax colors */
+.t-kw { color: var(--s-kw); font-weight: 600; }
+.t-reg { color: var(--s-reg); }
+.t-num { color: var(--s-num); }
+.t-str { color: var(--s-str); }
+.t-com { color: var(--s-com); font-style: italic; }
+.t-type { color: var(--s-type); }
+.t-label { color: var(--s-label); font-weight: 600; }
+.t-dir { color: var(--s-dir); }
+.t-mn { color: var(--ink); font-weight: 600; }
+
+/* tabs */
+.tabs { display: flex; gap: 2px; height: 38px; align-items: flex-end; padding: 0 8px; }
+.tab {
+  border: 0; background: transparent; padding: 8px 12px 9px; cursor: pointer; color: var(--muted);
+  border-bottom: 2px solid transparent; font-weight: 500; font-size: 13px;
+}
+.tab[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); }
+.tab:hover { color: var(--ink); }
+.panel { flex: 1; min-height: 0; overflow: auto; }
+.view {
+  margin: 0; padding: 10px 12px; font: 12.5px/19px var(--code); white-space: pre; tab-size: 8; min-width: max-content;
+}
+.view .hl { background: var(--err-soft); display: inline-block; min-width: 100%; }
+
+/* listing */
+.lst .addr { color: var(--addr); }
+.lst .word { color: var(--ink); font-weight: 600; }
+.lst .lbl { color: var(--s-label); font-weight: 600; }
+.lst .row { cursor: pointer; display: inline-block; min-width: 100%; }
+.lst .row:hover { background: var(--panel-2); }
+.lst .row.on { background: var(--accent-soft); }
+.bits {
+  position: sticky; top: 0; background: var(--panel); border-bottom: 1px solid var(--line); padding: 8px 12px;
+  font: 12px/1.5 var(--code); display: grid; gap: 4px; z-index: 1;
+}
+.bits .cells { display: flex; flex-wrap: wrap; gap: 2px; }
+.bits .cell { width: 15px; text-align: center; border-radius: 2px; background: var(--panel-2); border: 1px solid var(--line); }
+.bits .cell.one { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 700; }
+.bits .cell.gap { margin-left: 6px; }
+.bits .idx { color: var(--muted); font-size: 11px; }
+
+/* mach-o tables */
+.mach { padding: 12px; display: grid; gap: 18px; }
+.mach h3 { margin: 0 0 6px; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.tbl-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); }
+table { border-collapse: collapse; width: 100%; font: 12px/1.4 var(--code); font-variant-numeric: tabular-nums; }
+th, td { padding: 5px 10px; text-align: left; white-space: nowrap; border-bottom: 1px solid var(--line); }
+th { background: var(--panel-2); color: var(--muted); font: 600 11px var(--ui); letter-spacing: 0.04em; }
+tr:last-child td { border-bottom: 0; }
+td.num { text-align: right; }
+td.a { color: var(--addr); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { font: 12px var(--code); padding: 2px 8px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--line); }
+.hex { font: 12px/18px var(--code); white-space: pre; margin: 0; }
+
+/* console */
+.console { padding: 10px 12px; font: 12.5px/18px var(--code); white-space: pre; margin: 0; min-width: max-content; }
+.console .e { color: var(--err); }
+.run-status {
+  flex: none; display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; padding: 6px 12px;
+  border-top: 1px solid var(--line); background: var(--panel-2); font: 12px var(--code); color: var(--muted);
+}
+.pill { padding: 1px 8px; border-radius: 999px; font-weight: 600; }
+.pill.ok { background: var(--ok-soft); color: var(--ok); }
+.pill.err { background: var(--err-soft); color: var(--err); }
+.pill.busy { background: var(--accent-soft); color: var(--accent); }
+
+/* build mode */
+.seg { display: flex; align-items: center; gap: 2px; padding: 2px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); }
+.seg-label { font-size: 12px; color: var(--muted); padding: 0 8px 0 6px; }
+.seg label { position: relative; }
+.seg input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
+.seg span { display: block; padding: 4px 10px; border-radius: 4px; font-size: 13px; font-weight: 500; color: var(--muted); white-space: nowrap; }
+.seg small { font: 11px var(--code); opacity: 0.8; }
+.seg input:checked + span { background: var(--accent-soft); color: var(--accent); }
+.seg input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 1px; }
+.seg label:hover span { color: var(--ink); }
+.c-view { font: 12.5px/19px var(--code); white-space: pre; margin: 0; padding: 10px 12px; }
+.note { margin: 0; color: var(--muted); max-width: 75ch; }
+
+/* download sheet */
+.sheet {
+  flex: none; margin-bottom: 12px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 12px 14px; display: grid; gap: 8px;
+}
+.sheet p { margin: 0; color: var(--muted); max-width: 75ch; }
+.cmd { display: flex; gap: 8px; align-items: flex-start; flex-wrap: wrap; }
+.cmd code {
+  flex: 1; min-width: 0; font: 12.5px/1.5 var(--code); background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 7px 10px; overflow: auto; white-space: pre; max-height: 14em;
+}
+.sheet .close { justify-self: start; }
+
+@media (max-width: 860px) {
+  .work { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(380px, 55vh) minmax(380px, 1fr); }
+  body { height: auto; min-height: 100%; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .stage, .btn { transition: border-color 120ms, background-color 120ms; }
+}
+</style>
+</head>
+<body>
+<div class="platforms">
+  <div class="seg" role="radiogroup" aria-label="Target platform">
+    <span class="seg-label">Platform</span>
+    <label><input type="radio" name="platform" id="plat-mac" value="mac" checked><span><b>macOS</b> <small>ARM64 · Mach-O</small></span></label>
+    <label><input type="radio" name="platform" id="plat-win" value="win"><span><b>Windows</b> <small>x64 · PE</small></span></label>
+  </div>
+  <span class="hint" id="plat-hint">Everything runs in this page: translator, assembler, linker and an emulator of the target CPU.</span>
+</div>
+<header class="bar">
+  <div class="brand"><span class="mark">HLA<b>64</b></span><span class="sub" id="brand-sub">AArch64 · macOS · offline workbench</span></div>
+  <label class="field" for="example">Example <select id="example"></select></label>
+  <div class="seg" role="radiogroup" aria-label="Build as">
+    <span class="seg-label">Build as</span>
+    <label><input type="radio" name="mode" id="mode-exe" value="exe" checked><span>Program</span></label>
+    <label><input type="radio" name="mode" id="mode-static" value="static"><span>Static lib <small id="lib-static">.a</small></span></label>
+    <label><input type="radio" name="mode" id="mode-dynamic" value="dynamic"><span><span id="dyn-name" style="display:inline;padding:0">Dynamic lib</span> <small id="lib-dynamic">.dylib</small></span></label>
+  </div>
+  <div class="actions">
+    <button class="btn primary" id="run" type="button">Run <kbd>⌘↵</kbd></button>
+    <button class="btn" id="copycmd" type="button" title="Copies a shell command that recreates and runs the executable">Copy Terminal command</button>
+    <button class="btn" id="download" type="button">Download executable</button>
+  </div>
+</header>
+
+<div class="pipeline-wrap">
+  <nav class="pipeline" aria-label="Build pipeline">
+    <button class="stage" id="st-src" data-tab="asm" type="button"><span class="st-name">HLA64 source</span><span class="st-val" id="v-src">—</span><span class="st-note" id="n-src">&nbsp;</span></button>
+    <span class="arrow" aria-hidden="true"></span>
+    <button class="stage" id="st-asm" data-tab="asm" type="button"><span class="st-name">Assembly</span><span class="st-val" id="v-asm">—</span><span class="st-note" id="n-asm">&nbsp;</span></button>
+    <span class="arrow" aria-hidden="true"></span>
+    <button class="stage" id="st-bin" data-tab="bin" type="button"><span class="st-name">Machine code</span><span class="st-val" id="v-bin">—</span><span class="st-note" id="n-bin">&nbsp;</span></button>
+    <span class="arrow" aria-hidden="true"></span>
+    <button class="stage" id="st-macho" data-tab="macho" type="button"><span class="st-name">Mach-O executable</span><span class="st-val" id="v-macho">—</span><span class="st-note" id="n-macho">&nbsp;</span></button>
+    <span class="arrow" aria-hidden="true"></span>
+    <button class="stage" id="st-run" data-tab="run" type="button"><span class="st-name">ARM64 emulator</span><span class="st-val" id="v-run">—</span><span class="st-note" id="n-run">&nbsp;</span></button>
+  </nav>
+</div>
+
+<section class="sheet" id="sheet" hidden>
+  <p id="sheet-text">Downloaded <b>program</b>. Browsers drop the executable bit and add a quarantine flag, so run it from Terminal like this:</p>
+  <div class="cmd"><code id="cmd"></code><button class="btn" id="copy" type="button">Copy</button></div>
+  <button class="btn close" id="sheet-close" type="button">Done</button>
+</section>
+
+<main class="work">
+  <section class="pane">
+    <div class="pane-head"><span class="file" id="filename">program.hla</span><span id="cursor">Ln 1, Col 1</span><span class="spacer" id="saved"></span></div>
+    <div class="editor">
+      <div class="gutter"><div class="gutter-inner" id="gutter"></div></div>
+      <div class="code">
+        <pre id="hl" aria-hidden="true"></pre>
+        <textarea id="src" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="HLA64 source code"></textarea>
+      </div>
+    </div>
+    <div class="diag" id="diag" hidden></div>
+  </section>
+
+  <section class="pane">
+    <div class="pane-head" style="padding:0">
+      <div class="tabs" role="tablist">
+        <button class="tab" role="tab" data-tab="asm" aria-selected="false" type="button">Assembly</button>
+        <button class="tab" role="tab" data-tab="bin" aria-selected="false" type="button">Machine code</button>
+        <button class="tab" role="tab" data-tab="macho" aria-selected="false" type="button" id="tab-btn-macho">Mach-O</button>
+        <button class="tab" role="tab" data-tab="header" aria-selected="false" type="button" id="tab-btn-header" hidden>C header</button>
+        <button class="tab" role="tab" data-tab="run" aria-selected="true" type="button" id="tab-btn-run">Console</button>
+      </div>
+    </div>
+    <div class="panel" id="tab-asm" hidden><pre class="view" id="asmView"></pre></div>
+    <div class="panel" id="tab-bin" hidden>
+      <div class="bits" id="bits"></div>
+      <pre class="view lst" id="binView"></pre>
+    </div>
+    <div class="panel" id="tab-macho" hidden><div class="mach" id="machoView"></div></div>
+    <div class="panel" id="tab-header" hidden><div class="mach" id="headerView"></div></div>
+    <div class="panel" id="tab-run"><pre class="console" id="console"></pre></div>
+    <div class="run-status" id="runStatus"><span>Press Run to execute the program in the built-in ARM64 emulator.</span></div>
+  </section>
+</main>
+<script>/*__APP__*/</script>
+</body>
+</html>

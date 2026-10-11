@@ -1,0 +1,12 @@
+// app.hla — an HLA64 program that calls functions written in C
+extern printf(fmt, ...)
+extern c_fib, c_greet, c_average
+
+data samples: f64[4] = [2.5, 3.5, 4.0, 6.0]
+
+fn main() {
+    c_greet("HLA64")
+    printf("c_fib(20) = %lld\n", c_fib(20))
+    xmm6 = c_average(samples, len(samples))      // a double comes back in xmm0
+    printf("c_average = %.2f\n", xmm6)
+}

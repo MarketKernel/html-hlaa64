@@ -1,0 +1,34 @@
+// ASCII Mandelbrot set: floating point in xmm registers
+extern putchar
+
+const W = 64
+const H = 24
+const MAX_ITER = 100
+
+rodata shades = " .:-=+*#%"
+
+fn main() {
+    for row in 0..H {
+        for col in 0..W {
+            // map the character cell to a point c = cr + ci*i
+            let cr: xmm6 = float(col) * (3.0 / 64.0) - 2.2
+            let ci: xmm7 = float(row) * (2.4 / 24.0) - 1.2
+            let zr: xmm8 = 0.0, zi: xmm9 = 0.0
+            let n = 0
+            while n < MAX_ITER {
+                xmm10 = zr * zr
+                xmm11 = zi * zi
+                if xmm10 + xmm11 > 4.0 { break }
+                zi = 2.0 * zr * zi + ci
+                zr = xmm10 - xmm11 + cr
+                n++
+            }
+            if n == MAX_ITER {
+                putchar('@')            // inside the set
+            } else {
+                putchar(shades[n % 9])
+            }
+        }
+        putchar('\n')
+    }
+}

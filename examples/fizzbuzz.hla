@@ -1,0 +1,16 @@
+// FizzBuzz: for-in ranges, if/elif/else, modulo
+extern printf(fmt, ...)
+
+fn main() {
+    for i in 1..=20 {
+        if i % 15 == 0 {
+            printf("FizzBuzz\n")
+        } elif i % 3 == 0 {
+            printf("Fizz\n")
+        } elif i % 5 == 0 {
+            printf("Buzz\n")
+        } else {
+            printf("%ld\n", i)
+        }
+    }
+}
