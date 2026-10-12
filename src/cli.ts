@@ -11,17 +11,21 @@
 // --target arm64-macos (default on macOS/Linux) or --target x64-windows (default on Windows):
 //   x64-windows builds prog.exe / prog.obj, and lib gives name.h, name.obj, name_static.lib,
 //   name.dll and its import library name.lib; run uses the x64 emulator outside Windows.
+// --target wasm32: compile gives WebAssembly text (.wat), build gives prog.wasm with prog.html (a console
+//   page that runs it) and prog.mjs (runs it in Node); run and emu run it here, in Node's WebAssembly;
+//   asm assembles a .wat file.
 import { readFileSync, writeFileSync, chmodSync, mkdtempSync, mkdirSync } from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, basename, dirname } from 'node:path';
 import { compile, compileLibrary } from './lang/codegen.ts';
 import { compileX64, compileLibraryX64 } from './lang/x64/codegen.ts';
+import { compileWasm } from './lang/wasm/codegen.ts';
 import { CompileError } from './lang/lexer.ts';
 import { combineSources, errorOrigin, type Combined } from './lang/include.ts';
 
 function usage(): never {
-  console.error('usage: hla <compile|build|run|asm|obj|lib|emu> <file> [-o out] [--target arm64-macos|x64-windows] [--clang] [--zip] [-- program arguments]');
+  console.error('usage: hla <compile|build|run|asm|obj|lib|emu> <file> [-o out] [--target arm64-macos|x64-windows|wasm32] [--clang] [--zip] [-- program arguments]');
   process.exit(2);
 }
 
@@ -38,9 +42,10 @@ const out = oi >= 0 ? args[oi + 1] : null;
 const useClang = args.includes('--clang');
 const ti = args.indexOf('--target');
 const targetArg = ti >= 0 ? args[ti + 1] : process.platform === 'win32' ? 'x64-windows' : 'arm64-macos';
-// a Windows program (.exe) is x86-64 whatever the target says
-const x64 = /^(x64|x86[-_]64|win|windows|amd64)/i.test(targetArg ?? '') || /\.exe$/i.test(file);
-if (!x64 && !/^(arm64|aarch64|mac)/i.test(targetArg ?? '')) { console.error(`unknown target '${targetArg}' (arm64-macos or x64-windows)`); process.exit(2); }
+// a Windows program (.exe) is x86-64 and a module (.wasm, .wat) WebAssembly whatever the target says
+const wasm = /^(wasm|webassembly|web)/i.test(targetArg ?? '') || /\.(wasm|wat)$/i.test(file);
+const x64 = !wasm && (/^(x64|x86[-_]64|win|windows|amd64)/i.test(targetArg ?? '') || /\.exe$/i.test(file));
+if (!x64 && !wasm && !/^(arm64|aarch64|mac)/i.test(targetArg ?? '')) { console.error(`unknown target '${targetArg}' (arm64-macos, x64-windows or wasm32)`); process.exit(2); }
 
 function translate(path: string, lib = false): string {
   // the main file and everything it includes (paths relative to the including file)
@@ -50,7 +55,7 @@ function translate(path: string, lib = false): string {
   try {
     c = combineSources(main, (f) => { try { return readFileSync(join(dir, f), 'utf8'); } catch { return null; } });
     const name = main.replace(/\.hla$/, '');
-    const r = lib ? (x64 ? compileLibraryX64(c.text, name) : compileLibrary(c.text, name)) : x64 ? compileX64(c.text) : compile(c.text);
+    const r = lib ? (x64 ? compileLibraryX64(c.text, name) : compileLibrary(c.text, name)) : wasm ? compileWasm(c.text) : x64 ? compileX64(c.text) : compile(c.text);
     if (lib) libHeader = (r as unknown as { header: string }).header;
     for (const w of r.warnings) console.error(`warning: ${c.files.length > 1 ? c.warning(w) : w}`);
     return r.asm;
@@ -218,6 +223,50 @@ async function windows(): Promise<void> {
   }
 }
 
+/** WebAssembly: a module and the page that runs it; run here in Node's engine with the JavaScript runtime */
+async function webassembly(): Promise<void> {
+  const { assembleWasm, AsmError } = await import('./asm/wasm/assembler.ts');
+  const stem = (f: string) => f.replace(/\.(hla|wat|wasm)$/, '');
+  const text = () => (file.endsWith('.hla') ? translate(file) : readFileSync(file, 'utf8'));
+  const assemble = (wat: string): Uint8Array => {
+    try { return assembleWasm(wat).bytes; } catch (e) { if (e instanceof AsmError) asmFail(wat, e); throw e; }
+  };
+  const run = async (bytes: Uint8Array) => {
+    const { runWasm } = await import('./wasm/runtime.ts');
+    const r = runWasm(bytes, { name: basename(stem(file)), args: progArgs, files: diskFiles, onOutput: (t, s) => (s === 1 ? process.stdout : process.stderr).write(t) });
+    if (r.error) console.error(`\nerror: ${r.error}`);
+    process.exit(r.exitCode ?? 1);
+  };
+  switch (cmd) {
+    case 'compile': { const wat = translate(file); if (out) writeFileSync(out, wat); else process.stdout.write(wat); return; }
+    case 'run': case 'emu': return run(/\.wasm$/i.test(file) ? new Uint8Array(readFileSync(file)) : assemble(text()));
+    case 'build': case 'asm': {
+      const bytes = assemble(text());
+      const target = out ?? stem(file) + '.wasm';
+      const name = basename(target).replace(/\.wasm$/, '');
+      const dir = dirname(target);
+      const { runtimeSource } = await import('./wasm/bundle.ts');
+      const { wasmPage, wasmNodeRunner, wasmProgramFiles } = await import('./wasm/page.ts');
+      const runtime = await runtimeSource();
+      writeFileSync(target, bytes);
+      writeFileSync(join(dir, name + '.html'), wasmPage(name, runtime));
+      writeFileSync(join(dir, name + '.mjs'), wasmNodeRunner(name, runtime));
+      console.error(`wrote ${target} (${bytes.length} bytes), ${join(dir, name + '.html')} (open it in a browser), ${join(dir, name + '.mjs')} (node ${name}.mjs)`);
+      if (args.includes('--zip')) {
+        const { zipFiles } = await import('../web/zip.ts');
+        writeFileSync(join(dir, name + '.zip'), zipFiles(wasmProgramFiles(name, bytes, runtime)));
+        console.error(`wrote ${join(dir, name + '.zip')}`);
+      }
+      return;
+    }
+    case 'obj': case 'lib':
+      console.error(`${cmd} is not available for wasm32: a WebAssembly module is a whole program (build gives prog.wasm)`);
+      process.exit(2);
+    default: usage();
+  }
+}
+
+if (wasm) { await webassembly(); process.exit(0); }
 if (x64) { await windows(); process.exit(0); }
 
 switch (cmd) {

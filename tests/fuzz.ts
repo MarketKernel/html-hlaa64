@@ -2,7 +2,8 @@
 // Random 64-bit integer expressions over register variables are compiled, assembled
 // with the built-in assembler and executed natively and in the emulator; every
 // result is compared with an independent BigInt evaluator. The same programs are also
-// compiled for x86-64 Windows and executed in the x64 emulator.
+// compiled for x86-64 Windows and executed in the x64 emulator, and for wasm32 and executed
+// by Node's WebAssembly engine.
 //   node tests/fuzz.ts [seed] [programs]
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, chmodSync } from 'node:fs';
@@ -15,6 +16,9 @@ import { compileX64 } from '../src/lang/x64/codegen.ts';
 import { assembleX } from '../src/asm/x64/assembler.ts';
 import { linkPE } from '../src/asm/coff/pe.ts';
 import { runPE } from '../src/emu/x64/pe-loader.ts';
+import { compileWasm } from '../src/lang/wasm/codegen.ts';
+import { assembleWasm } from '../src/asm/wasm/assembler.ts';
+import { runWasm } from '../src/wasm/runtime.ts';
 
 const S64 = (v: bigint) => BigInt.asIntN(64, v);
 let seed = Number(process.argv[2] ?? 12345);
@@ -116,6 +120,7 @@ for (let p = 0; p < programs; p++) {
       const probe = ['fn check(got, want, id) {}', 'fn main() {', ...VARS.map((v) => `let ${v} = 1`), `check(${e.s}, 0, 0)`, '}'].join('\n');
       compile(probe);
       compileX64(probe);
+      compileWasm(probe);
     } catch (err) {
       if (/too complex/.test((err as Error).message)) tooComplex++; else { console.log('compile error:', (err as Error).message, '\n  ', e.s); compileErrors++; }
       continue;
@@ -146,6 +151,8 @@ for (let p = 0; p < programs; p++) {
   report('emu', emu);
   report('x64', x64.stdout + (x64.error ? `\nx64 emulator: ${x64.error}\n` : ''));
   if (x64.error) console.log(`p${p}: x64 emulator: ${x64.error}`);
+  const wasm = runWasm(assembleWasm(compileWasm(src).asm).bytes);
+  report('wasm', wasm.stdout + (wasm.error ? `\nwasm: ${wasm.error}\n` : ''));
   if (native !== emu) console.log(`p${p}: native and emulator outputs differ`);
 }
 console.log(`${total} random expressions, ${failures} failures, ${compileErrors} unexpected compile errors, ${tooComplex} rejected as too complex (programs in ${dir})`);

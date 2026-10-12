@@ -1,0 +1,41 @@
+// ASCII Mandelbrot set: floating point in f registers (f64 locals),
+// sugar and plain WebAssembly instructions side by side
+extern putchar
+
+const W = 64
+const H = 24
+const MAX_ITER = 100
+
+rodata shades = " .:-=+*#%"
+
+fn main() {
+    for row in 0..H {
+        for col in 0..W {
+            // map the character cell to a point c = cr + ci*i
+            let cr: f6 = float(col) * (3.0 / 64.0) - 2.2
+            let ci: f7 = float(row) * (2.4 / 24.0) - 1.2
+            let zr: f8 = 0.0, zi: f9 = 0.0
+            let n = 0
+            while n < MAX_ITER {
+                local.get zr            // instructions: zr^2 and zi^2
+                local.get zr
+                f64.mul
+                local.set f10
+                local.get zi
+                local.get zi
+                f64.mul
+                local.set f11
+                if f10 + f11 > 4.0 { break }
+                zi = 2.0 * zr * zi + ci
+                zr = f10 - f11 + cr
+                n++
+            }
+            if n == MAX_ITER {
+                putchar('@')            // inside the set
+            } else {
+                putchar(shades[n % 9])
+            }
+        }
+        putchar('\n')
+    }
+}

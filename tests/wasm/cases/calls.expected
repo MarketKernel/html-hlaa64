@@ -1,0 +1,14 @@
+apply: 5 -1 6
+ops[0](6, 7) = 13
+ops[1](6, 7) = -1
+ops[2](6, 7) = 42
+calls = 6
+zero one two 
+-500 -7 0 3 8 19 42 1000 
+fib(20) = 6765
+hypot = 5.000, mean = 70.625, 2^10 = 1024, ratio = 0.25
+int(hypot(6, 8)) = 10
+swap: 21
+(2,4) has 5 chars
+heap: 123 456
+ratio = 0.50

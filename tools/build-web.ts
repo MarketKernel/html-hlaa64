@@ -3,18 +3,21 @@
 import { build } from 'esbuild';
 import { readFileSync, writeFileSync, mkdirSync, rmSync, copyFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { runtimeSource } from '../src/wasm/bundle.ts';
 
 const common = { bundle: true, write: false, minify: true, target: 'es2022', loader: { '.hla': 'text' as const, '.c': 'text' as const, '.s': 'text' as const }, legalComments: 'none' as const };
 
 const worker = await build({ ...common, entryPoints: ['web/worker.ts'], format: 'iife' });
 const workerSrc = worker.outputFiles![0].text;
+// the runtime that goes into the page of a downloaded WebAssembly program
+const wasmRuntime = await runtimeSource();
 
 async function bundle(artifact: boolean): Promise<string> {
   const app = await build({
     ...common,
     entryPoints: ['web/main.ts'],
     format: 'iife',
-    define: { __WORKER_SRC__: JSON.stringify(workerSrc), __ARTIFACT__: String(artifact) },
+    define: { __WORKER_SRC__: JSON.stringify(workerSrc), __WASM_RUNTIME__: JSON.stringify(wasmRuntime), __ARTIFACT__: String(artifact) },
   });
   return app.outputFiles![0].text.replace(/<\/script/gi, '<\\/script');
 }
@@ -26,7 +29,7 @@ const mainJs = await bundle(false);
 const html = template.replace('/*__APP__*/', () => mainJs);
 mkdirSync('dist', { recursive: true });
 writeFileSync('dist/hla64.html', html);
-console.log(`dist/hla64.html: ${(html.length / 1024).toFixed(0)} KB (worker ${(workerSrc.length / 1024).toFixed(0)} KB)`);
+console.log(`dist/hla64.html: ${(html.length / 1024).toFixed(0)} KB (worker ${(workerSrc.length / 1024).toFixed(0)} KB, wasm runtime ${(wasmRuntime.length / 1024).toFixed(0)} KB)`);
 
 // dist/pages/: the page plus a manifest, icons and a service worker. Every path is relative,
 // so it works under a project site's /<repo>/ prefix.
@@ -41,13 +44,16 @@ const pwaHead = [
   '<meta name="apple-mobile-web-app-title" content="HLA64">',
 ].join('\n');
 const register = `<script>if ('serviceWorker' in navigator) addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));</script>`;
-const page = html.replace('</head>', () => `${pwaHead}\n</head>`).replace('</body>', () => `${register}\n</body>`);
+// the app's own strings hold whole pages (the page of a downloaded WebAssembly program): the document's
+// </head> is the first one, its </body> the last one
+const end = html.lastIndexOf('</body>');
+const page = (html.slice(0, end) + `${register}\n` + html.slice(end)).replace('</head>', () => `${pwaHead}\n</head>`);
 // a deploy between two releases changes the page, not the version: the hash tells them apart
 const cache = `${version}-${createHash('sha256').update(page).digest('hex').slice(0, 12)}`;
 const manifest = {
   name: 'HLA64 Workbench',
   short_name: 'HLA64',
-  description: 'HLA64 translator, ARM64/x64 assembler, linker and emulator that run offline in the browser',
+  description: 'HLA64 translator, ARM64/x64/WebAssembly assembler, linker and emulator that run offline in the browser',
   id: './',
   start_url: './',
   scope: './',

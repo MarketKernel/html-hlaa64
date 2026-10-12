@@ -1,4 +1,4 @@
-# HLA64 — ассемблер с синтаксическим сахаром для Apple Silicon и Windows x64, целиком на TypeScript
+# HLA64 — ассемблер с синтаксическим сахаром для Apple Silicon, Windows x64 и WebAssembly, целиком на TypeScript
 
 <!-- languages -->
 <h3 align="center">
@@ -8,8 +8,8 @@
 <!-- /languages -->
 
 **HLA64 — это ассемблер, а не новый язык программирования.** Программа на HLA64 — обычный
-ассемблерный листинг: `ldr`, `bfi`, `csel`, `umulh`, `b.lt` (на x64 — `mov`, `cmovg`, `mul`, `jl`)
-пишутся прямо в коде, как есть. Сахар — `for`, `if`, `a = b + c * 4`, `numbers[i]`, `printf(...)` —
+ассемблерный листинг: `ldr`, `bfi`, `csel`, `umulh`, `b.lt` (на x64 — `mov`, `cmovg`, `mul`, `jl`, в
+WebAssembly — `local.get`, `i64.add`, `br_if`) пишутся прямо в коде, как есть. Сахар — `for`, `if`, `a = b + c * 4`, `numbers[i]`, `printf(...)` —
 добавлен поверх, чтобы не набирать вручную десятки строк `stp/adrp/ldr/b.lt` там, где они
 очевидны. Каждая строка сахара раскрывается в несколько инструкций, которые видно в листинге,
 а в любом месте функции можно вернуться к инструкциям.
@@ -26,7 +26,8 @@
    **Assembler in HLA64 (s → executable)** — транслятор и ассемблер, написанные на самом HLA64
    ([selfhost/](../../selfhost/README.ru.md)). TypeScript-тулчейн собирает из них нативные исполняемые
    файлы (Mach-O для macOS или `.exe` для Windows), а те, в свою очередь, пересобирают сами себя
-   из тех же исходников — побайтно.
+   из тех же исходников — побайтно. Собранные в WebAssembly, те же инструменты работают прямо на
+   странице и выдают те же файлы.
 3. **Курс из 14 уроков** — от «Hello, world» до игры «Жизнь» и вызова HLA64 из C. В каждом уроке есть
    программы, которые можно запустить, и упражнения, а инструкции процессора появляются с первого
    урока, рядом с сахаром, поэтому курс подходит для обучения ассемблеру.
@@ -70,9 +71,9 @@ Llength.body2:
     ret
 ```
 
-Инструкции пишутся в синтаксисе платформы (Apple-диалект AArch64, Intel/LLVM для x86-64).
-Встроенный ассемблер понимает ≈140 мнемоник AArch64 и основные целочисленные и SSE-инструкции
-x86-64 (пока без SIMD-векторов); с `--clang` сборку делает `clang`, и тогда доступно всё, что
+Инструкции пишутся в синтаксисе платформы (Apple-диалект AArch64, Intel/LLVM для x86-64, текстовый
+формат WebAssembly). Встроенный ассемблер понимает ≈140 мнемоник AArch64, основные целочисленные и
+SSE-инструкции x86-64 (пока без SIMD-векторов) и инструкции WebAssembly без SIMD; с `--clang` сборку делает `clang`, и тогда доступно всё, что
 знает он. Полный пример — [examples/mixed.hla](../../examples/mixed.hla).
 
 Переосмысление hlaa64, [высокоуровневого ассемблера](https://en.wikipedia.org/wiki/High-level_assembler), на TypeScript.
@@ -92,6 +93,7 @@ x86-64 (пока без SIMD-векторов); с `--clang` сборку дел
 | `src/emu` | эмулятор ARM64: загружает получившийся Mach-O, применяет bind-опкоды, подставляет libSystem на JS (`printf`, `puts`, `malloc`, `qsort` с обратным вызовом и т. д.) и исполняет машинный код |
 | `web/` → `dist/hla64.html` | один самодостаточный HTML-файл: редактор с подсветкой, живая трансляция, листинг машинного кода с разбором битов, инспектор Mach-O / PE, консоль эмулятора, сборка программы или библиотеки для C (`.a` / `.dylib` или `.lib` / `.dll` + `.h`) и скачивание результата; платформа переключается в самом верху |
 | `src/lang/x64`, `src/asm/x64`, `src/asm/coff`, `src/emu/x64` | вторая платформа — **Windows x64**: генератор кода Win64, ассемблер x86-64 (Intel, диалект LLVM), объектные файлы COFF, линковщик PE (`.exe`/`.dll`), статические библиотеки и библиотеки импорта `.lib`, эмулятор x64 с загрузчиком PE. Подробно — [docs/windows.md](windows.md) |
+| `src/lang/wasm`, `src/asm/wasm`, `src/wasm` | третья платформа — **WebAssembly (wasm32)**: генератор кода для стековой машины (регистры — локальные переменные, циклы — блоки), ассемблер WAT с проверкой типов, рантайм на JavaScript как система (`printf`, `malloc`, `fopen`… — импорты); программы исполняются нативно в браузере и в Node и скачиваются как `.wasm` + страница с консолью. Подробно — [docs/wasm.md](wasm.md) |
 
 ## Быстрый старт
 
@@ -110,6 +112,8 @@ node src/cli.ts obj app.hla                    # объектный файл, ч
 
 node src/cli.ts run examples/hello.hla --target x64-windows    # Windows x64 (вне Windows — в эмуляторе x64)
 node src/cli.ts build examples/hello.hla --target x64-windows  # hello.exe
+node src/cli.ts run examples/hello.hla --target wasm32         # WebAssembly: запуск в движке Node
+node src/cli.ts build examples/hello.hla --target wasm32       # hello.wasm + hello.html (страница с консолью) + hello.mjs (Node)
 
 npm run build:web                              # собрать dist/hla64.html и PWA в dist/pages/
 open dist/hla64.html                           # работает с file://, без сети
@@ -225,7 +229,7 @@ Lsort_numbers.next5:
 
 | Файл | О чём |
 |---|---|
-| [mixed.hla](../../examples/mixed.hla) | инструкции и сахар в одних функциях: `ldrb` с пост-инкрементом внутри `do … while`, `bfi`/`ubfx`, `cmp`+`csel` без переходов, `umulh` после xorshift на сахаре, цикл на метке и `b.lt` (для Windows — [tests/x64/cases/mixed.hla](../../tests/x64/cases/mixed.hla) с `cmovg`, `mul`, `jl`) |
+| [mixed.hla](../../examples/mixed.hla) | инструкции и сахар в одних функциях: `ldrb` с пост-инкрементом внутри `do … while`, `bfi`/`ubfx`, `cmp`+`csel` без переходов, `umulh` после xorshift на сахаре, цикл на метке и `b.lt` (для Windows — [tests/x64/cases/mixed.hla](../../tests/x64/cases/mixed.hla) с `cmovg`, `mul`, `jl`; для WebAssembly — [tests/wasm/cases/mixed.hla](../../tests/wasm/cases/mixed.hla) с `local.get`, `select`, `br_if`) |
 | [hello.hla](../../examples/hello.hla) | минимальная программа |
 | [showcase.hla](../../examples/showcase.hla) | тур по языку: структуры, enum, массивы, строки, рекурсия, qsort с колбэком, FP, syscall, naked-функции, push/pop, goto |
 | [mandelbrot.hla](../../examples/mandelbrot.hla) | множество Мандельброта на d-регистрах: выражения с плавающей точкой рядом с `fmul` |
@@ -238,7 +242,8 @@ Lsort_numbers.next5:
 `hlc-arm`/`hlc-x64` переводят HLA64 (без регистров) в ассемблер AArch64 или x86-64,
 `hlas-arm`/`hlas-x64` собирают из него подписанный Mach-O или `.exe`. После раскрутки
 TypeScript-версией они пересобирают сами себя побайтно, а их исполняемые файлы совпадают
-с результатом линковщиков из `src/asm`. Проверка — `selfhost/test.sh`.
+с результатом линковщиков из `src/asm`. Проверка — `selfhost/test.sh`. Собранные под wasm32, все четыре
+инструмента работают в браузере и выдают те же файлы (это проверяет `npm run test:wasm`).
 
 ## Тесты
 
@@ -247,7 +252,7 @@ npm test                 # все примеры и tests/cases × {clang, св�
 npm run test:lessons     # 108 программ из уроков + сборка урока 14 с clang (--native: программы ещё и на macOS)
 npm run test:encoding    # 248 форм инструкций: кодировка бит-в-бит совпадает с clang
 npm run fuzz             # дифференциальный фаззер: ~1200 случайных выражений, натив и эмулятор против BigInt-эталона
-npm run check:web        # открыть страницу в headless Chrome, прогнать примеры обеих платформ, сделать скриншоты
+npm run check:web        # открыть страницу в headless Chrome, прогнать примеры всех платформ, сделать скриншоты
 npm run check:pwa        # dist/pages/ по http в headless Chrome: service worker, манифест, перезагрузка без сети
 npm run typecheck
 
@@ -256,6 +261,8 @@ npm run test:x64-clang   #   … и тот же ассемблер через cl
 npm run test:x64-encoding  # 987 форм x86-64: бит-в-бит с clang
 npm run test:coff        # COFF-объект против clang, lld-link, свой линковщик PE
 npm run test:x64-lib     # C ↔ HLA64 на Windows: .lib, .dll + библиотека импорта (clang и lld-link; на Windows — ещё MSVC и SEH)
+npm run test:wasm        # WebAssembly: программы для wasm32 + переносимые программы и уроки в движке Node (+ binaryen wasm-as, если установлен)
+npm run check:wasm-page  # страница скачанной программы в headless Chrome: по http и с диска
 npm run test:all         # всё подряд
 npm run test:ci          # то, что гоняет CI на Linux (части, которым нужны macOS или clang, пропускаются сами)
 ```
@@ -306,15 +313,16 @@ npm run test:ci          # то, что гоняет CI на Linux (части, 
 ## Структура проекта
 
 ```
-src/lang/      транслятор HLA64 (frontend.ts — общая часть, codegen.ts — AArch64, x64/ — Windows x64)
-src/asm/       ассемблер + линковщик Mach-O; x64/ — ассемблер x86-64; coff/ — COFF, PE, .lib
+src/lang/      транслятор HLA64 (frontend.ts — общая часть, codegen.ts — AArch64, x64/ — Windows x64, wasm/ — WebAssembly)
+src/asm/       ассемблер + линковщик Mach-O; x64/ — ассемблер x86-64; coff/ — COFF, PE, .lib; wasm/ — WAT → .wasm
 src/emu/       эмулятор ARM64; x64/ — эмулятор x86-64 и загрузчик PE
+src/wasm/      система программ WebAssembly: рантайм на JavaScript, его функции C, страница скачанной программы
 src/cli.ts     командная строка
 web/           исходники страницы (template.html, main.ts, worker.ts; sw.js — service worker PWA)
 assets/        иконка (icon.svg) и PNG-иконки PWA (npm run build:icons пересобирает их из SVG)
 dist/hla64.html  собранная страница (не коммитится: npm run build:web)
 dist/pages/    PWA для GitHub Pages: index.html, hla64.html, sw.js, манифест, иконки
 examples/      примеры (.hla + .expected)
-tests/         run.ts, encoding.ts, fuzz.ts, cases/; x64.ts, x64-lib.ts, encoding-x64.ts, coff-x64.ts, x64/
-docs/          справочник языка, уроки (docs/lessons), Windows x64 (docs/windows.md)
+tests/         run.ts, encoding.ts, fuzz.ts, cases/; x64.ts, x64-lib.ts, encoding-x64.ts, coff-x64.ts, x64/; wasm.ts, wasm/
+docs/          справочник языка, уроки (docs/lessons), Windows x64 (docs/windows.md), WebAssembly (docs/wasm.md)
 ```

@@ -1,5 +1,6 @@
 // HLA64 Workbench: editor + translator + assembler/linker + emulator, all in the page.
-// Two platforms: macOS on ARM64 (Mach-O) and Windows on x86-64 (PE/COFF).
+// Three platforms: macOS on ARM64 (Mach-O), Windows on x86-64 (PE/COFF) and WebAssembly (wasm32),
+// which the browser runs natively with a JavaScript runtime as its system.
 import { compile, compileLibrary } from '../src/lang/codegen.ts';
 import { compileX64, compileLibraryX64 } from '../src/lang/x64/codegen.ts';
 import { CompileError } from '../src/lang/lexer.ts';
@@ -7,6 +8,10 @@ import { assemble, assembleAndLink, link, writeObject, writeArchive, AsmError, t
 import { assembleAndLinkX, assembleX, writeCoffObject, buildWindowsLibrary, linkPE, type PeResult, type WindowsLibrary } from '../src/asm/x64/index.ts';
 import { runMachO } from '../src/emu/macho-loader.ts';
 import { runPE } from '../src/emu/x64/pe-loader.ts';
+import { compileWasm } from '../src/lang/wasm/codegen.ts';
+import { assembleWasm, WASM_MNEMONICS, type WasmModule } from '../src/asm/wasm/assembler.ts';
+import { runWasmAsync } from '../src/wasm/runtime.ts';
+import { wasmProgramFiles } from '../src/wasm/page.ts';
 import { zipFiles, type ZipEntry } from './zip.ts';
 import { memoryFiles, writtenFiles } from '../src/emu/files.ts';
 import { combineSources, errorOrigin, normalizePath, type Combined } from '../src/lang/include.ts';
@@ -29,8 +34,15 @@ import wxArith from '../tests/x64/cases/arith.hla';
 import wxMemory from '../tests/x64/cases/memory.hla';
 import wxMixed from '../tests/x64/cases/mixed.hla';
 import wxMathlib from '../tests/x64/lib/mathlib.hla';
+import waMixed from '../tests/wasm/cases/mixed.hla';
+import waMandelbrot from '../tests/wasm/cases/mandelbrot.hla';
+import waCalls from '../tests/wasm/cases/calls.hla';
+import waGoto from '../tests/wasm/cases/goto.hla';
+import exFiles from '../tests/cases/files.hla';
+import exSwitch from '../tests/cases/switch.hla';
 
 declare const __WORKER_SRC__: string;
+declare const __WASM_RUNTIME__: string;
 declare const __ARTIFACT__: boolean;
 
 interface Example {
@@ -75,9 +87,24 @@ const WIN_EXAMPLES: Example[] = [
   { id: 'memory', title: 'Self-test: memory & calls', src: wxMemory },
 ];
 
+// WebAssembly: r/f registers and wasm instructions; the self-hosted toolchain runs here as it is
+const WASM_EXAMPLES: Example[] = [
+  { id: 'mixed', title: 'Assembler + sugar in one function', src: waMixed },
+  { id: 'mandelbrot', title: 'Mandelbrot set (floating point)', src: waMandelbrot },
+  { id: 'calls', title: 'Calls: function pointers, qsort, doubles', src: waCalls },
+  hlc('hlc-arm.hla'),
+  hlas('hlas-arm.hla', 'hello.s'),
+  { id: 'hello', title: 'Hello, world', src: exHello },
+  { id: 'fizzbuzz', title: 'FizzBuzz', src: exFizz },
+  { id: 'goto', title: 'goto as blocks and loops', src: waGoto },
+  { id: 'switch', title: 'switch', src: exSwitch },
+  { id: 'files', title: 'Files: std/file.hla', src: exFiles },
+];
+
 const PLATFORMS: Record<Platform, { examples: Example[]; sub: string; emulator: string; image: string; tab: string; lib: { static: string; dynamic: string } }> = {
   mac: { examples: MAC_EXAMPLES, sub: 'AArch64 · macOS · offline workbench', emulator: 'ARM64 emulator', image: 'Mach-O executable', tab: 'Mach-O', lib: { static: '.a', dynamic: '.dylib' } },
   win: { examples: WIN_EXAMPLES, sub: 'x86-64 · Windows · offline workbench', emulator: 'x64 emulator', image: 'PE executable', tab: 'PE / COFF', lib: { static: '.lib', dynamic: '.dll' } },
+  wasm: { examples: WASM_EXAMPLES, sub: 'wasm32 · WebAssembly · offline workbench', emulator: 'WebAssembly engine', image: 'WebAssembly module', tab: 'Module', lib: { static: '—', dynamic: '—' } },
 };
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -102,7 +129,8 @@ const KW = new Set(['fn', 'function', 'export', 'naked', 'extern', 'const', 'dat
 const TYPES = new Set(['i8', 'u8', 'i16', 'u16', 'i32', 'u32', 'i64', 'u64', 'ptr', 'f32', 'f64', 'string']);
 const REG_ARM = /^(?:[xw](?:[12]?\d|30)|[dsqhb](?:[12]?\d|3[01])|sp|wsp|xzr|wzr|fp|lr)$/i;
 const REG_X64 = /^(?:[re]?(?:ax|bx|cx|dx|si|di|sp|bp)|[abcd][lh]|(?:si|di|sp|bp)l|r(?:[89]|1[0-5])[dwb]?|xmm(?:\d|1[0-5])|rip)$/i;
-const REG = { test: (w: string) => (platform === 'win' ? REG_X64 : REG_ARM).test(w) };
+const REG_WASM = /^\$?[rf](?:[12]?\d|3[01])$/;
+const REG = { test: (w: string) => (platform === 'win' ? REG_X64 : platform === 'wasm' ? REG_WASM : REG_ARM).test(w) };
 
 function hlHla(text: string): string {
   let out = '';
@@ -145,6 +173,24 @@ function hlAsmLine(line: string): string {
   return m[1] + head + rest + com;
 }
 
+/** a line of WebAssembly text: instructions, $names (registers r0..r31/f0..f31), module keywords, ;; comments */
+const WAT_KW = /^(module|func|param|result|local|import|export|memory|global|data|table|elem|type|mut|funcref|start)$/;
+function hlWatLine(line: string): string {
+  const ci = line.indexOf(';;');
+  const code = ci >= 0 ? line.slice(0, ci) : line;
+  const com = ci >= 0 ? `<span class="t-com">${esc(line.slice(ci))}</span>` : '';
+  return code.replace(/("(?:\\.|[^"\\])*")|(\$[\w.$:]+)|((?:offset|align)=\S+)|([A-Za-z_][\w.]*)|(-?(?:0x[\da-fA-F]+|\d[\d.]*(?:e[+-]?\d+)?))|([^"$A-Za-z_\d-]+|-)/g,
+    (t, str, id, mem, word, num) => {
+      if (str) return `<span class="t-str">${esc(str)}</span>`;
+      if (id) return `<span class="${REG_WASM.test(id) ? 't-reg' : 't-label'}">${esc(id)}</span>`;
+      if (mem) return `<span class="t-dir">${esc(mem)}</span>`;
+      if (word) return WASM_MNEMONICS.has(word) ? `<span class="t-mn">${word}</span>` : WAT_KW.test(word) ? `<span class="t-dir">${word}</span>`
+        : TYPES.has(word) ? `<span class="t-type">${word}</span>` : esc(word);
+      if (num) return `<span class="t-num">${num}</span>`;
+      return esc(t);
+    }) + com;
+}
+
 // ---------------------------------------------------------------------------
 // editor
 // ---------------------------------------------------------------------------
@@ -152,7 +198,8 @@ let errLine = 0;
 
 function renderEditor(): void {
   const text = src.value;
-  let html = /\.[ch]$/i.test(project.open) ? hlC(text) : /\.s$/i.test(project.open) ? text.split('\n').map(hlAsmLine).join('\n') : hlHla(text);
+  let html = /\.[ch]$/i.test(project.open) ? hlC(text) : /\.s$/i.test(project.open) ? text.split('\n').map(hlAsmLine).join('\n')
+    : /\.wat$/i.test(project.open) ? text.split('\n').map(hlWatLine).join('\n') : hlHla(text);
   const lines = text.split('\n').length;
   if (errLine > 0 && errLine <= lines) {
     const parts = html.split('\n');
@@ -215,6 +262,7 @@ interface Build {
   object: ReturnType<typeof writeObject> | null;             // macOS static library: the object inside the archive
   archive: Uint8Array | null;
   pe: (PeResult & { instructions: number }) | null;          // Windows: .exe or .dll
+  wasm: WasmModule | null;                                   // WebAssembly: the module
   coff: ReturnType<typeof writeCoffObject> | null;           // Windows static library: the .obj inside the .lib
   winlib: WindowsLibrary | null;
   header: string | null;
@@ -246,10 +294,10 @@ const cMain = (): string | null => fileText('main.c');
 
 function build(): Build {
   const b: Build = {
-    platform, mode, asm: null, link: null, object: null, archive: null, pe: null, coff: null, winlib: null,
+    platform, mode, asm: null, link: null, object: null, archive: null, pe: null, wasm: null, coff: null, winlib: null,
     header: null, listing: [], instructions: 0, warnings: [], error: null, tCompile: 0, tAsm: 0, combined: null,
   };
-  const win = platform === 'win';
+  const win = platform === 'win', wa = platform === 'wasm';
   const t0 = performance.now();
   let c: Combined | null = null;
   try {
@@ -257,7 +305,7 @@ function build(): Build {
     c = combineSources(project.main, fileText);
     b.combined = c;
     if (mode === 'exe') {
-      const r = win ? compileX64(c.text) : compile(c.text);
+      const r = wa ? compileWasm(c.text) : win ? compileX64(c.text) : compile(c.text);
       b.asm = r.asm;
       b.warnings = r.warnings.map(c.warning);
     } else {
@@ -277,7 +325,11 @@ function build(): Build {
   if (b.asm) {
     const t1 = performance.now();
     try {
-      if (win) {
+      if (wa) {
+        b.wasm = assembleWasm(b.asm);
+        b.listing = b.wasm.listing;
+        b.instructions = b.wasm.instructions;
+      } else if (win) {
         if (mode === 'exe') {
           b.pe = assembleAndLinkX(b.asm);
           b.listing = b.pe.listing;
@@ -325,12 +377,14 @@ function build(): Build {
 
 /** Bytes of the main output for the current mode. */
 const outputBytes = (b: Build): Uint8Array | null => {
+  if (b.platform === 'wasm') return b.wasm?.bytes ?? null;
   if (b.platform === 'win') return b.mode === 'exe' ? b.pe?.bytes ?? null : b.mode === 'static' ? b.winlib?.staticLib ?? null : b.winlib?.dll ?? null;
   return b.mode === 'static' ? b.archive : b.link?.bytes ?? null;
 };
 /** file names of the outputs */
 const outName = (b: Build): string => {
   const n = libName();
+  if (b.platform === 'wasm') return `${progName()}.wasm`;
   if (b.platform === 'win') return b.mode === 'exe' ? `${progName()}.exe` : b.mode === 'static' ? `${n}_static.lib` : `${n}.dll`;
   return b.mode === 'exe' ? progName() : b.mode === 'static' ? `lib${n}.a` : `lib${n}.dylib`;
 };
@@ -375,8 +429,10 @@ function rebuild(): void {
   if (out) {
     const code = b.listing.filter((l) => l.line > 0);
     const textBytes = code.reduce((a, l) => a + l.bytes.length, 0);
-    setStage('bin', 'ok', `${fmtN(b.instructions)} instructions`, `${fmtB(textBytes)} of ${win ? '.text' : '__text'}`);
-    if (win) {
+    setStage('bin', 'ok', `${fmtN(b.instructions)} instructions`, `${fmtB(textBytes)} of ${b.platform === 'wasm' ? 'code' : win ? '.text' : '__text'}`);
+    if (b.platform === 'wasm') {
+      setStage('macho', 'ok', `${outName(b)} · ${fmtB(out.length)}`, `${b.wasm!.imports.length} imports · ${b.wasm!.functions.length} functions · ${b.tAsm.toFixed(1)} ms`);
+    } else if (win) {
       if (b.mode === 'exe') setStage('macho', 'ok', `${outName(b)} · ${fmtB(out.length)}`, `${b.pe!.imports.reduce((a, d) => a + d.names.length, 0)} imports · ${b.tAsm.toFixed(1)} ms`);
       else if (b.mode === 'static') setStage('macho', 'ok', `${outName(b)} · ${fmtB(out.length)}`, `${b.coff!.exports.length} exports · ${b.coff!.sections.reduce((a, x) => a + x.relocs, 0)} relocations`);
       else setStage('macho', 'ok', `${outName(b)} · ${fmtB(out.length)}`, `${b.winlib!.exports.length} exports · import lib ${libName()}.lib`);
@@ -395,9 +451,10 @@ function rebuild(): void {
   ($<HTMLButtonElement>('run')).disabled = !out || b.mode !== 'exe';
   $('run').title = b.mode === 'exe' ? '' : 'A library has no main: download it and link it from C';
   ($<HTMLButtonElement>('download')).disabled = !out;
-  if (!__ARTIFACT__) $('download').textContent = b.mode === 'exe' ? (win ? 'Download .exe' : 'Download executable') : 'Download .zip';
+  if (!__ARTIFACT__) $('download').textContent = b.mode === 'exe' && b.platform !== 'wasm' ? (win ? 'Download .exe' : 'Download executable') : 'Download .zip';
+  $('download').title = b.platform === 'wasm' ? 'A .zip with the module, a page that runs it in the browser, and a script that runs it in Node' : '';
   const zb = document.getElementById('zipbtn');
-  if (zb) zb.hidden = b.mode !== 'exe' || __ARTIFACT__ || win;
+  if (zb) zb.hidden = b.mode !== 'exe' || __ARTIFACT__ || b.platform !== 'mac';
   ($<HTMLButtonElement>('copycmd')).disabled = !out;
   $('tab-btn-header').hidden = b.mode === 'exe';
   $('tab-btn-run').hidden = b.mode !== 'exe';
@@ -443,7 +500,8 @@ function renderAsm(b: Build): void {
   const v = $('asmView');
   if (!b.asm) { v.innerHTML = `<span class="t-com">// fix the error in the source to see the generated assembly</span>`; return; }
   const errAt = b.error?.stage === 'asm' ? b.error.line : 0;
-  v.innerHTML = b.asm.split('\n').map((l, i) => (i + 1 === errAt ? `<span class="hl">${hlAsmLine(l) || ' '}</span>` : hlAsmLine(l))).join('\n');
+  const hl = b.platform === 'wasm' ? hlWatLine : hlAsmLine;
+  v.innerHTML = b.asm.split('\n').map((l, i) => (i + 1 === errAt ? `<span class="hl">${hl(l) || ' '}</span>` : hl(l))).join('\n');
 }
 
 let selectedRow = -1;
@@ -453,7 +511,9 @@ function renderListing(b: Build): void {
   const asmLines = b.asm.split('\n');
   const out: string[] = [];
   let prev = 0;
-  const win = b.platform === 'win';
+  const win = b.platform !== 'mac';     // x64 and WebAssembly: instructions of 1..n bytes
+  const wa = b.platform === 'wasm';
+  const hl = wa ? hlWatLine : hlAsmLine;
   if (b.mode === 'static') out.push(`<span class="t-com">// object file: addresses are offsets; fields the linker fills in (${win ? 'calls, rip-relative addresses' : 'calls, adrp, @PAGEOFF'}) are still zero</span>`);
   // ARM: one 32-bit word per instruction; x64: 1..15 bytes
   const width = win ? Math.min(15, Math.max(...b.listing.map((l) => l.bytes.length))) * 3 - 1 : 8;
@@ -463,11 +523,13 @@ function renderListing(b: Build): void {
       for (let k = prev + 1; k < ins.line; k++) {
         const t = asmLines[k - 1]?.trim() ?? '';
         if (/^[\w.$]+:$/.test(t)) out.push(`<span class="lbl">${esc(t)}</span>`);
+        const fm = wa ? /^\(func (\$\S+)/.exec(t) : null;
+        if (fm) out.push(`<span class="lbl">${esc(fm[1])}:</span>${i === 0 ? '   <span class="t-com">;; addresses are offsets in the .wasm file</span>' : ''}`);
       }
       prev = ins.line;
     } else if (!win && (i === 0 || b.listing[i - 1].sect !== '__stubs')) out.push(`<span class="lbl">__stubs:</span>   <span class="t-com">// trampolines into libSystem through the GOT</span>`);
     else if (win && (i === 0 || b.listing[i - 1].line !== 0)) out.push(`<span class="lbl">import thunks:</span>   <span class="t-com">// jmp qword ptr [rip + __imp_name]: through the import address table</span>`);
-    const text = ins.line ? hlAsmLine(asmLines[ins.line - 1].trim()) : win ? `<span class="t-com">jmp [__imp_${esc(ins.sect.replace(/^stub /, ''))}]</span>` : '<span class="t-com">stub</span>';
+    const text = ins.line ? hl(asmLines[ins.line - 1].trim()) : win ? `<span class="t-com">jmp [__imp_${esc(ins.sect.replace(/^stub /, ''))}]</span>` : '<span class="t-com">stub</span>';
     out.push(`<span class="row${i === selectedRow ? ' on' : ''}" data-i="${i}">  <span class="addr">${hex(ins.addr, 9)}</span>  <span class="word">${code(ins)}</span>  ${text}</span>`);
   });
   v.innerHTML = out.join('\n');
@@ -479,7 +541,8 @@ function showBits(i: number): void {
   if (!ins) return;
   selectedRow = i;
   const bits = $('bits');
-  const win = current?.platform === 'win';
+  const win = current?.platform !== 'mac';
+  const wa = current?.platform === 'wasm';
   let cells = '';
   let shown: string;
   let idx: string;
@@ -492,7 +555,8 @@ function showBits(i: number): void {
       }
     });
     shown = ins.bytes.map((x) => hex(x, 2)).join(' ');
-    idx = `${ins.bytes.length} bytes in memory order (prefixes · REX · opcode · ModRM · SIB · displacement · immediate) · click any row to inspect its encoding`;
+    idx = wa ? `${ins.bytes.length} byte${ins.bytes.length > 1 ? 's' : ''}: the opcode, then its immediates (LEB128 numbers: a local, a label depth, align and offset of a memory access) · click any row to inspect its encoding`
+      : `${ins.bytes.length} bytes in memory order (prefixes · REX · opcode · ModRM · SIB · displacement · immediate) · click any row to inspect its encoding`;
   } else {
     const word = (ins.bytes[0] | (ins.bytes[1] << 8) | (ins.bytes[2] << 16) | (ins.bytes[3] << 24)) >>> 0;
     for (let k = 31; k >= 0; k--) {
@@ -503,7 +567,7 @@ function showBits(i: number): void {
     idx = 'bit 31 ← → bit 0 · click any row to inspect its encoding';
   }
   const text = ins.line && current?.asm ? current.asm.split('\n')[ins.line - 1].trim() : win ? 'import thunk' : 'libSystem stub';
-  bits.innerHTML = `<div><span class="addr" style="color:var(--addr)">0x${hex(ins.addr)}</span>  <b>${shown}</b>  ${hlAsmLine(text)}</div>`
+  bits.innerHTML = `<div><span class="addr" style="color:var(--addr)">0x${hex(ins.addr)}</span>  <b>${shown}</b>  ${(wa ? hlWatLine : hlAsmLine)(text)}</div>`
     + `<div class="cells">${cells}</div><div class="idx">${idx}</div>`;
   for (const el of document.querySelectorAll('#binView .row.on')) el.classList.remove('on');
   document.querySelector(`#binView .row[data-i="${i}"]`)?.classList.add('on');
@@ -574,7 +638,42 @@ function renderPE(b: Build): void {
     <p class="note">The file is not signed: Windows SmartScreen may ask before the first start of a downloaded copy.</p>`;
 }
 
+function renderWasm(b: Build): void {
+  const v = $('machoView');
+  const m = b.wasm;
+  if (!m) { v.innerHTML = '<p class="warn">No output yet.</p>'; return; }
+  const sig = (t: { params: string[]; results: string[] }) => `(${t.params.join(', ')}) → ${t.results.join(', ') || 'nothing'}`;
+  const mapLine = /^;; memory: data (\d+)\.\.(\d+), stack (\d+)\.\.(\d+) .*heap from (\d+)/m.exec(b.asm ?? '');
+  const a = (n: number) => `0x${hex(n)}`;
+  const pages = m.memory?.pages ?? 0;
+  v.innerHTML = `
+    <section><h3>Module</h3>${table(['', ''], [
+      ['format', 'WebAssembly binary module, version 1 (wasm32: 32-bit linear memory)'],
+      ['file size', fmtB(m.bytes.length)],
+      ['entry point', 'hla_start(argc, argv) → main; the runtime exits with its result'],
+      ['memory', `${pages} pages × 64 KB = ${fmtN(pages * 64)} KB at the start; malloc grows it`],
+    ])}</section>
+    ${mapLine ? `<section><h3>Linear memory</h3>${table(['region', 'from', 'to', ''], [
+      ['NULL area', '0x0', a(Number(mapLine[1])), 'never used: address 0 is NULL'],
+      ['data', a(Number(mapLine[1])), a(Number(mapLine[2])), 'strings, data, rodata; zero-filled data'],
+      ['stack', a(Number(mapLine[3])), a(Number(mapLine[4])), 'frames of local arrays and variadic arguments; grows down from the top ($sp)'],
+      ['heap', a(Number(mapLine[5])), '…', 'malloc of the runtime'],
+    ])}</section>` : ''}
+    <section><h3>Imports: the system (JavaScript runtime)</h3>${m.imports.length ? table(['module', 'name', 'signature'],
+      m.imports.map((i) => [esc(i.module), esc(i.name), sig(i.type)])) : chips([])}
+      <p class="note">"env" functions get their arguments directly; "va" ones (declared with <code>...</code>) get the address of the variadic arguments, 8 bytes each, in the caller's frame.</p></section>
+    <section><h3>Exports</h3>${chips(m.exports.map((e) => `${e.name} (${e.kind})`))}</section>
+    <section><h3>Functions</h3>${table(['function', 'signature', 'locals', 'instructions', 'bytes'],
+      m.functions.map((f) => [esc(f.name), sig(f.type), fmtN(f.locals), fmtN(f.instructions), fmtN(f.size)]), [2, 3, 4])}</section>
+    ${m.table ? `<section><h3>Table</h3><p class="note">${m.table - 1} function(s) whose address is taken: a function pointer is an index into this table, called with <code>call_indirect</code>.</p></section>` : ''}
+    <section><h3>Sections</h3>${table(['section', 'offset', 'size'], m.sections.map((x) => [esc(x.name), a(x.offset), fmtN(x.size)]), [2])}</section>
+    ${m.data.length ? `<section><h3>Data segments</h3>${table(['address', 'size'], m.data.map((d) => [a(d.addr), fmtN(d.size)]), [1])}</section>` : ''}
+    <section><h3>Header bytes</h3><div class="tbl-wrap" style="padding:8px 10px"><pre class="hex">${headerDump(m.bytes, 64)}</pre></div></section>
+    <p class="note">The browser checks the module and compiles it to the machine code of your processor when it loads it: Run executes it natively, no emulator in between.</p>`;
+}
+
 function renderMacho(b: Build): void {
+  if (b.platform === 'wasm') { renderWasm(b); return; }
   if (b.platform === 'win') { renderPE(b); return; }
   const v = $('machoView');
   const a = (n: number) => `0x${hex(n)}`;
@@ -696,7 +795,7 @@ let workerUrl: string | null = null;
 
 function runStatus(html: string): void { $('runStatus').innerHTML = html; }
 
-type Format = 'macho' | 'pe';
+type Format = 'macho' | 'pe' | 'wasm';
 /** an executable a program wrote, run as it is (with no arguments) */
 interface Given { bytes: Uint8Array; format: Format; name: string }
 
@@ -706,6 +805,7 @@ const argsText = () => project.args?.[project.main] ?? '';
 function renderArgs(): void {
   $<HTMLInputElement>('args').value = argsText();
   $('argv0').textContent = stem(project.main) + (platform === 'win' ? '.exe' : '');
+  $('argv0').title = platform === 'wasm' ? 'argv[0]: the module gets its command line from the runtime' : '';
 }
 $('args').addEventListener('input', () => {
   project.args = { ...project.args, [project.main]: $<HTMLInputElement>('args').value };
@@ -714,7 +814,10 @@ $('args').addEventListener('input', () => {
 $('args').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); run(); } });
 
 const imageFormat = (d: Uint8Array): Format | null =>
-  d[0] === 0xcf && d[1] === 0xfa && d[2] === 0xed && d[3] === 0xfe ? 'macho' : d[0] === 0x4d && d[1] === 0x5a ? 'pe' : null;
+  d[0] === 0xcf && d[1] === 0xfa && d[2] === 0xed && d[3] === 0xfe ? 'macho' : d[0] === 0x4d && d[1] === 0x5a ? 'pe'
+    : d[0] === 0 && d[1] === 0x61 && d[2] === 0x73 && d[3] === 0x6d ? 'wasm' : null;
+const formatName: Record<Format, string> = { macho: 'Mach-O executable', pe: 'PE executable', wasm: 'WebAssembly module' };
+const runnerName: Record<Format, string> = { macho: 'ARM64 emulator', pe: 'x64 emulator', wasm: 'WebAssembly engine' };
 
 /** a file the program wrote that is not text (an executable...): download it, run it when it is one */
 function binaryRow(name: string, data: Uint8Array): HTMLElement {
@@ -722,7 +825,7 @@ function binaryRow(name: string, data: Uint8Array): HTMLElement {
   box.className = 'out';
   const format = imageFormat(data);
   const label = document.createElement('span');
-  label.textContent = `${name} · ${format === 'macho' ? 'Mach-O executable' : format === 'pe' ? 'PE executable' : 'binary file'} · ${fmtN(data.length)} bytes`;
+  label.textContent = `${name} · ${format ? formatName[format] : 'binary file'} · ${fmtN(data.length)} bytes`;
   box.appendChild(label);
   const button = (text: string, title: string, f: () => void) => {
     const b = document.createElement('button');
@@ -733,17 +836,18 @@ function binaryRow(name: string, data: Uint8Array): HTMLElement {
     b.addEventListener('click', f);
     box.appendChild(b);
   };
-  if (format) button('Run', `run ${name} in the ${format === 'pe' ? 'x64' : 'ARM64'} emulator`, () => run({ bytes: data, format, name }));
+  if (format) button('Run', `run ${name} in the ${runnerName[format]}`, () => run({ bytes: data, format, name }));
   button('Download', format === 'macho' ? `save ${name}; then in Terminal: chmod +x ${name}` : `save ${name}`, () => save(name, data));
   return box;
 }
 
 function run(given?: Given): void {
   if (!given && mode !== 'exe') { showTab('header'); return; }
-  const image = (b: Build | null) => (b?.platform === 'win' ? b.pe : b?.link)?.bytes ?? null;
+  const image = (b: Build | null) => (b?.platform === 'wasm' ? b.wasm : b?.platform === 'win' ? b.pe : b?.link)?.bytes ?? null;
   if (!given && !image(current)) { rebuild(); if (!image(current)) return; }
   const bytes = given?.bytes ?? image(current)!;
-  const format: Format = given?.format ?? (current!.platform === 'win' ? 'pe' : 'macho');
+  const format: Format = given?.format ?? (current!.platform === 'wasm' ? 'wasm' : current!.platform === 'win' ? 'pe' : 'macho');
+  const argv0 = given ? given.name.replace(/\.wasm$/, '') : stem(project.main);
   const args = given ? [] : splitArgs(argsText());
   const out = $('console');
   out.textContent = '';
@@ -791,8 +895,11 @@ function run(given?: Given): void {
     const ok = r.exitCode === 0 && !r.error;
     const pill = r.error ? `<span class="pill err">${r.error === 'stopped by user' ? 'stopped' : 'crashed'}</span>`
       : `<span class="pill ${ok ? 'ok' : 'err'}">exit ${r.exitCode}</span>`;
-    runStatus(`${pill}<span>${fmtN(r.steps)} instructions</span><span>${r.ms.toFixed(0)} ms</span>${r.ms > 0 ? `<span>${(r.steps / r.ms / 1000).toFixed(1)} M instr/s</span>` : ''}`);
-    setStage('run', r.error ? 'err' : ok ? 'ok' : 'err', r.error ? (r.error === 'stopped by user' ? 'stopped' : 'crashed') : `exit ${r.exitCode}`, `${fmtN(r.steps)} instructions`);
+    // WebAssembly runs natively: no instruction count, only the time
+    const native = format === 'wasm';
+    runStatus(native ? `${pill}<span>native WebAssembly</span><span>${r.ms.toFixed(0)} ms</span>`
+      : `${pill}<span>${fmtN(r.steps)} instructions</span><span>${r.ms.toFixed(0)} ms</span>${r.ms > 0 ? `<span>${(r.steps / r.ms / 1000).toFixed(1)} M instr/s</span>` : ''}`);
+    setStage('run', r.error ? 'err' : ok ? 'ok' : 'err', r.error ? (r.error === 'stopped by user' ? 'stopped' : 'crashed') : `exit ${r.exitCode}`, native ? `${r.ms.toFixed(0)} ms, native` : `${fmtN(r.steps)} instructions`);
   };
   if (worker) worker.terminate();
   try {
@@ -808,15 +915,16 @@ function run(given?: Given): void {
     };
     worker.onerror = (ev) => { ev.preventDefault(); worker = null; runInPage(); };
     const copy = bytes.slice();
-    worker.postMessage({ bytes: copy.buffer, limit: LIMIT, format, files: snapshot, args }, [copy.buffer]);
-  } else runInPage();
+    worker.postMessage({ bytes: copy.buffer, limit: LIMIT, format, files: snapshot, args, name: argv0 }, [copy.buffer]);
+  } else void runInPage();
 
-  function runInPage() {
+  async function runInPage() {
     // no worker available (some file:// setups): run synchronously with a smaller budget
+    // (a WebAssembly module asynchronously: the main thread may only compile small ones synchronously)
     const t0 = performance.now();
     const files = memoryFiles(snapshot);
     const opts = { limit: 50_000_000, files, args, onOutput: (t: string) => { text += t; } };
-    const r = format === 'pe' ? runPE(bytes, opts) : runMachO(bytes, opts);
+    const r = format === 'wasm' ? await runWasmAsync(bytes, { ...opts, name: argv0 }) : format === 'pe' ? runPE(bytes, opts) : runMachO(bytes, opts);
     body.data = text;
     const w = writtenFiles(files);
     finish({ exitCode: r.exitCode, steps: r.steps, error: r.error, ms: performance.now() - t0, written: w.text, binary: w.binary });
@@ -955,6 +1063,21 @@ function bundle(b: Build): Bundle | null {
   const cm = cMain();
   const out = outputBytes(b);
   if (!out) return null;
+  if (b.platform === 'wasm') {
+    // the module with a page that runs it (console, arguments, files) and a script for Node
+    const name = progName();
+    const cmd = isWindowsHost
+      ? `cd $HOME\\Downloads; Expand-Archive -Force ${name}.zip .; cd ${name}; node ${name}.mjs`
+      : `cd ~/Downloads && unzip -o ${name}.zip && cd ${name} && node ${name}.mjs`;
+    return {
+      zipName: `${name}.zip`,
+      entries: wasmProgramFiles(name, out, __WASM_RUNTIME__),
+      single: null,
+      shell: '',
+      zipHelp: `Saved <b>${esc(name)}.zip</b> with <code>${esc(name)}.wasm</code>, <code>${esc(name)}.html</code> and <code>${esc(name)}.mjs</code>. Unpack it and open <b>${esc(name)}.html</b>: the page runs the module in your browser, with a console, arguments and files (opened from disk, it may ask you to choose ${esc(name)}.wasm once). Or run it in a terminal with Node:`
+        + `\u0000${cmd}`,
+    };
+  }
   if (b.platform === 'win') return windowsBundle(b, out);
   if (b.mode === 'exe') {
     const name = progName();
@@ -1023,7 +1146,7 @@ $('copycmd').addEventListener('click', () => {
   const cm = cMain();
   if (!current) return;
   const bu = bundle(current);
-  if (!bu) return;
+  if (!bu || !bu.shell) return;
   const btn = $('copycmd');
   const win = current.platform === 'win';
   const label = copyLabel();
@@ -1420,7 +1543,7 @@ function openProject(p: Project, remember = true): void {
   project = p;
   runNote = '';
   if (remember) store.set(key('project'), p.id);
-  mode = p.mode;
+  mode = p.platform === 'wasm' ? 'exe' : p.mode;   // a WebAssembly module is a whole program
   ($<HTMLInputElement>(`mode-${mode}`)).checked = true;
   if (!p.files.some((f) => f.name === p.open)) p.open = p.main;
   const f = p.files.find((x) => x.name === p.open)!;
@@ -1431,7 +1554,8 @@ function openProject(p: Project, remember = true): void {
   selectedRow = -1;
   setStage('run', '', '—', '');
   $('console').textContent = '';
-  runStatus(`<span>Press Run to execute the program in the built-in ${PLATFORMS[platform].emulator}.</span>`);
+  runStatus(platform === 'wasm' ? '<span>Press Run to run the module in the WebAssembly engine of this browser.</span>'
+    : `<span>Press Run to execute the program in the built-in ${PLATFORMS[platform].emulator}.</span>`);
   renderArgs();
   rebuild();
   renderProjects();
@@ -1480,12 +1604,18 @@ function setPlatform(p: Platform): void {
   document.documentElement.dataset.platform = p;
   const P = PLATFORMS[p];
   $('brand-sub').textContent = P.sub;
+  $('plat-hint').textContent = p === 'wasm'
+    ? 'Everything runs in this page: translator and assembler build a module, the browser runs it natively with a JavaScript runtime as its system.'
+    : 'Everything runs in this page: translator, assembler, linker and an emulator of the target CPU.';
   $('tab-btn-macho').textContent = P.tab;
   $('lib-static').textContent = P.lib.static;
   $('lib-dynamic').textContent = P.lib.dynamic;
   $('dyn-name').textContent = p === 'win' ? 'DLL' : 'Dynamic lib';
   $('copycmd').textContent = copyLabel();
   $('copycmd').title = p === 'win' ? 'Copies a PowerShell command that recreates the files (no download, no Mark of the Web)' : 'Copies a shell command that recreates and runs the executable';
+  // WebAssembly: programs only (a module is a whole program), downloaded as a .zip with a page that runs it
+  $('copycmd').hidden = p === 'wasm';
+  for (const m of ['static', 'dynamic']) $(`mode-${m}`).closest('label')!.hidden = p === 'wasm';
   $('sheet').hidden = true;
 }
 
@@ -1519,7 +1649,7 @@ if (__ARTIFACT__) {
   }, () => {});
 }
 
-for (const p of ['mac', 'win'] as Platform[]) {
+for (const p of ['mac', 'win', 'wasm'] as Platform[]) {
   $(`plat-${p}`).addEventListener('change', () => {
     if (worker) { worker.terminate(); worker = null; }
     setPlatform(p);

@@ -1,0 +1,88 @@
+// calls on wasm32: function pointers (indexes into the table), callbacks from the system (qsort),
+// recursion, functions returning doubles, a global register, push/pop and local arrays in the frame
+extern printf(fmt, ...), qsort, malloc, realloc, free, sprintf(buf, fmt, ...), strlen, sqrt, pow
+
+alias calls: r30                // a global register: a wasm global shared by all functions
+
+data values: i64 = [42, -7, 19, 0, 1000, 3, -500, 8]
+rodata names: ptr = ["zero", "one", "two"]
+data ops: ptr = [&add, &sub, &mul]
+data ratio: f32 = 0.25
+
+struct Point { x: i64, y: i64 }
+
+fn add(a, b) { calls += 1; return a + b }
+fn sub(a, b) { calls += 1; return a - b }
+fn mul(a, b) { calls += 1; return a * b }
+
+fn compare(pa, pb) {
+    let a = i64[pa], b = i64[pb]
+    return a < b ? -1 : a > b ? 1 : 0
+}
+
+fn fib(n) {
+    if n < 2 { return n }
+    return fib(n - 1) + fib(n - 2)
+}
+
+fn hypot(x: f64, y: f64) {
+    return sqrt(x * x + y * y)
+}
+
+fn mean(p, n) {
+    let sum: f2 = 0.0
+    for i in 0..n { sum = sum + float(i64[p + i * 8]) }
+    return sum / float(n)
+}
+
+fn apply(f, a, b) {
+    return f(a, b)              // f is a register: call_indirect
+}
+
+fn swap_with_stack(a, b) {
+    push a, b
+    pop b, a                    // pops in reverse: a gets b, b gets a
+    return a * 10 + b
+}
+
+fn main() {
+    calls = 0
+    printf("apply: %ld %ld %ld\n", apply(&add, 2, 3), apply(&sub, 2, 3), apply(mul, 2, 3))
+    for i in 0..3 {
+        let f = i64[ops + i * 8]
+        printf("ops[%ld](6, 7) = %ld\n", i, f(6, 7))
+    }
+    printf("calls = %ld\n", calls)
+    for i in 0..3 { printf("%s ", ptr[names + i * 8]) }
+    printf("\n")
+
+    qsort(values, len(values), 8, compare)
+    for i in 0..len(values) { printf("%ld ", values[i]) }
+    printf("\n")
+
+    printf("fib(20) = %ld\n", fib(20))
+    let h: f1 = hypot(3.0, 4.0)
+    printf("hypot = %.3f, mean = %.3f, 2^10 = %.0f, ratio = %.2f\n", h, mean(values, len(values)), pow(2.0, 10.0), ratio)
+    let r = hypot(6.0, 8.0)     // a double in an integer register: converted like int(...)
+    printf("int(hypot(6, 8)) = %ld\n", r)
+    printf("swap: %ld\n", swap_with_stack(1, 2))
+
+    local pts: Point[3]
+    local buf: u8[32]
+    for i in 0..3 {
+        let p = &pts[i]
+        i64[p + Point.x] = i
+        i64[p + Point.y] = i * i
+    }
+    sprintf(&buf, "(%ld,%ld)", i64[&pts[2] + Point.x], i64[&pts[2] + Point.y])
+    printf("%s has %ld chars\n", &buf, strlen(&buf))
+
+    let a = malloc(16)
+    i64[a] = 123
+    a = realloc(a, 4096)
+    i64[a + 4088] = 456
+    printf("heap: %ld %ld\n", i64[a], i64[a + 4088])
+    free(a)
+    f32[&ratio] = 0.5
+    printf("ratio = %.2f\n", ratio)
+}

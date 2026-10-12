@@ -67,7 +67,7 @@ export interface FnState {
 }
 
 /** statements that may change the variable `name`: assignments, a loop over it, inline assembly */
-function changes(body: Stmt[], name: string): boolean {
+export function changes(body: Stmt[], name: string): boolean {
   const walk = (x: unknown): boolean => {
     if (!x || typeof x !== 'object') return false;
     if (Array.isArray(x)) return x.some(walk);

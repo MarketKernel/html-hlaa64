@@ -23,6 +23,8 @@ npm-debug.log*
 *.dll
 *.exe
 *.zip
+*.wasm
+*.mjs
 /*.h
 /*.s
 /out/
@@ -45,6 +47,7 @@ npm-debug.log*
 
 # screenshots from `npm run check:web` (saved to the current directory by default)
 /web-*.png
+/wasm-page-*.png
 
 # private notes and task descriptions (not part of the project)
 /private/

@@ -308,6 +308,8 @@ class Parser {
     // numeric local label of the assembler: `1:  mov x0, #1`
     if (t.kind === 'num' && this.isOp(':', this.peek()) && this.peek().start === t.end) return this.rawLine();
     if (t.kind !== 'ident') this.err(`unexpected '${t.text}'`);
+    // a WebAssembly instruction that starts with a keyword: local.get x, local.set x
+    if (t.text === 'local' && this.isOp('.', this.peek()) && this.peek().start === t.end) return this.rawLine();
 
     // label:  (optionally naming the loop that follows)
     if (this.isOp(':', this.peek()) && !KEYWORDS.has(t.text) && !this.isReg(t.text)) {

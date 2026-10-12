@@ -1,0 +1,37 @@
+// goto on wasm32: forward (a block that ends at the label) and backward (a loop that starts at it)
+extern printf(fmt, ...)
+
+fn find(n) {
+    let i = 0, j = 0
+    while i < 100 {
+        j = 0
+        while j < 100 {
+            if i * j == n { goto found }
+            j++
+        }
+        i++
+    }
+    printf("%ld: not found\n", n)
+    return -1
+found:
+    printf("%ld = %ld * %ld\n", n, i, j)
+    return i
+}
+
+fn main() {
+    let k = 0
+again:
+    k++
+    if k < 3 { goto again }
+    printf("k = %ld\n", k)
+    find(391)
+    find(10007)
+    // backward and forward together
+    let n = 0
+top:
+    n += 1
+    if n == 5 { goto done }
+    if n < 10 { goto top }
+done:
+    printf("n = %ld\n", n)
+}

@@ -1,11 +1,12 @@
-// Web Worker: runs a Mach-O image in the ARM64 emulator or a PE image in the x64 emulator,
-// streaming its output. The program sees the project's files and its command line arguments; the files
+// Web Worker: runs a Mach-O image in the ARM64 emulator, a PE image in the x64 emulator or a
+// WebAssembly module natively (with the JavaScript runtime as its system), streaming its output. The program sees the project's files and its command line arguments; the files
 // it writes come back in `written` (text) and `binary`.
 import { runMachO } from '../src/emu/macho-loader.ts';
 import { runPE } from '../src/emu/x64/pe-loader.ts';
+import { runWasm } from '../src/wasm/runtime.ts';
 import { memoryFiles, writtenFiles } from '../src/emu/files.ts';
 
-self.onmessage = (ev: MessageEvent<{ bytes: ArrayBuffer; limit: number; format?: 'macho' | 'pe'; files?: Record<string, string>; args?: string[] }>) => {
+self.onmessage = (ev: MessageEvent<{ bytes: ArrayBuffer; limit: number; format?: 'macho' | 'pe' | 'wasm'; name?: string; files?: Record<string, string>; args?: string[] }>) => {
   let buf = '';
   let last = performance.now();
   const flush = () => { if (buf) { postMessage({ type: 'out', text: buf }); buf = ''; } last = performance.now(); };
@@ -26,7 +27,7 @@ self.onmessage = (ev: MessageEvent<{ bytes: ArrayBuffer; limit: number; format?:
       onOutput: (t: string) => { buf += t; if (buf.length > 4096 || performance.now() - last > 40) flush(); },
     };
     const bytes = new Uint8Array(ev.data.bytes);
-    const r = ev.data.format === 'pe' ? runPE(bytes, opts) : runMachO(bytes, opts);
+    const r = ev.data.format === 'wasm' ? runWasm(bytes, { ...opts, name: ev.data.name }) : ev.data.format === 'pe' ? runPE(bytes, opts) : runMachO(bytes, opts);
     done({ exitCode: r.exitCode, steps: r.steps, error: r.error });
   } catch (e) {
     done({ exitCode: null, steps: 0, error: (e as Error).message });

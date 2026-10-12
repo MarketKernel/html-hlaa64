@@ -1,12 +1,15 @@
 // C printf formatting over emulator memory. `next()` yields the raw 64-bit
 // argument slots in order (Apple arm64 passes variadic arguments on the stack).
-import { bitsToF64, type Memory } from './cpu.ts';
+import { bitsToF64 } from './cpu.ts';
+
+/** what printf needs of memory: the bytes of a C string */
+export interface CStringMemory { cstring(addr: number): Uint8Array }
 
 /**
  * `llp64`: Windows data model — `long` is 32 bits (`%ld` prints 32 bits; use `%lld` or `%I64d`).
  * Default is LP64 (macOS/Linux): `long` is 64 bits.
  */
-export function formatPrintf(mem: Memory, fmtAddr: number, next: () => bigint, opts: { llp64?: boolean } = {}): number[] {
+export function formatPrintf(mem: CStringMemory, fmtAddr: number, next: () => bigint, opts: { llp64?: boolean } = {}): number[] {
   const fmt = mem.cstring(fmtAddr);
   const out: number[] = [];
   const pushStr = (s: string) => { for (const b of new TextEncoder().encode(s)) out.push(b); };

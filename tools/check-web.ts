@@ -1,7 +1,10 @@
-// Opens dist/hla64.html in headless Chrome, waits for the auto-run, reports errors, saves screenshots.
+// Opens dist/hla64.html in headless Chrome, waits for the auto-run, reports errors, saves screenshots;
+// runs the examples of every platform and the program a WebAssembly download contains.
 import puppeteer from 'puppeteer-core';
-import { resolve } from 'node:path';
-import { existsSync } from 'node:fs';
+import { resolve, join, dirname } from 'node:path';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 
 const out = process.argv[2] ?? '.';
@@ -77,6 +80,54 @@ for (const id of ids) {
   const st = await page.$eval('#runStatus', (e) => (e as HTMLElement).innerText.replace(/\n/g, ' '));
   const first = (await page.$eval('#console', (e) => e.textContent ?? '')).split('\n').slice(-2).join(' / ');
   console.log(`${id}: ${st} :: ${first}`);
+}
+// ---------------------------------------------------------------- WebAssembly platform
+await page.click('#plat-wasm');
+await new Promise((r) => setTimeout(r, 1000));
+await waitRun();
+console.log('--- WebAssembly');
+console.log((await page.$$eval('.stage', (els) => els.map((e) => (e as HTMLElement).innerText.replace(/\n/g, ' | ')))).join('\n'));
+await page.screenshot({ path: `${out}/web-wasm-console.png` });
+for (const tab of ['asm', 'bin', 'macho']) {
+  await page.click(`.tab[data-tab="${tab}"]`);
+  await page.screenshot({ path: `${out}/web-wasm-${tab}.png` });
+}
+const wasmIds = await page.$$eval('#ex-list li[data-example]', (os) => os.map((o) => (o as HTMLElement).dataset.example!));
+for (const id of wasmIds) {
+  await page.click(`#ex-list li[data-example="${id}"]`);
+  await new Promise((r) => setTimeout(r, 300));
+  await waitRun();
+  const st = await page.$eval('#runStatus', (e) => (e as HTMLElement).innerText.replace(/\n/g, ' '));
+  const last = (await page.$eval('#console', (e) => e.textContent ?? '')).trim().split('\n').slice(-2).join(' / ');
+  console.log(`${id}: ${st} :: ${last}`);
+  if (!/exit 0/.test(st)) errors.push(`wasm example ${id}: ${st}`);
+}
+// Download .zip: NAME.html + NAME.wasm + NAME.mjs; the Node script runs the module and prints the same
+{
+  const dl = mkdtempSync(join(tmpdir(), 'hla-web-dl-'));
+  const cdp = await page.createCDPSession();
+  await cdp.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: dl });
+  await page.click('#ex-list li[data-example="calls"]');
+  await new Promise((r) => setTimeout(r, 300));
+  await waitRun();
+  await page.click('#download');
+  const zip = join(dl, 'calls.zip');
+  for (let i = 0; i < 100 && !existsSync(zip); i++) await new Promise((r) => setTimeout(r, 100));
+  // a stored zip: local headers one after another
+  const z = readFileSync(zip);
+  const names: string[] = [];
+  for (let o = 0; z.readUInt32LE(o) === 0x04034b50;) {
+    const size = z.readUInt32LE(o + 18), nl = z.readUInt16LE(o + 26), xl = z.readUInt16LE(o + 28);
+    const name = z.subarray(o + 30, o + 30 + nl).toString();
+    mkdirSync(dirname(join(dl, name)), { recursive: true });
+    writeFileSync(join(dl, name), z.subarray(o + 30 + nl + xl, o + 30 + nl + xl + size));
+    names.push(name);
+    o += 30 + nl + xl + size;
+  }
+  const r = spawnSync(process.execPath, ['calls.mjs'], { cwd: join(dl, 'calls'), encoding: 'utf8' });
+  const same = r.stdout === readFileSync('tests/wasm/cases/calls.expected', 'utf8');
+  console.log(`download: ${names.join(', ')}; node calls.mjs: ${same ? 'same output' : 'DIFFERENT'} (exit ${r.status})`);
+  if (!same) errors.push(`downloaded calls.mjs printed:\n${r.stdout}${r.stderr}`);
 }
 await page.click('#plat-mac');
 await new Promise((r) => setTimeout(r, 1000));

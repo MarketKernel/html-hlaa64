@@ -1,4 +1,4 @@
-# HLA64 — an assembler with syntactic sugar for Apple Silicon and Windows x64, written entirely in TypeScript
+# HLA64 — an assembler with syntactic sugar for Apple Silicon, Windows x64 and WebAssembly, written entirely in TypeScript
 
 <!-- languages -->
 <h3 align="center">
@@ -8,8 +8,8 @@
 <!-- /languages -->
 
 **HLA64 is an assembler, not a new programming language.** An HLA64 program is an ordinary
-assembly listing: `ldr`, `bfi`, `csel`, `umulh`, `b.lt` (on x64 — `mov`, `cmovg`, `mul`, `jl`)
-are written right in the code, as they are. The sugar — `for`, `if`, `a = b + c * 4`, `numbers[i]`,
+assembly listing: `ldr`, `bfi`, `csel`, `umulh`, `b.lt` (on x64 — `mov`, `cmovg`, `mul`, `jl`, on
+WebAssembly — `local.get`, `i64.add`, `br_if`) are written right in the code, as they are. The sugar — `for`, `if`, `a = b + c * 4`, `numbers[i]`,
 `printf(...)` — is added on top so you don't have to type dozens of `stp/adrp/ldr/b.lt` lines by
 hand where they are obvious. Each line of sugar expands into a few instructions that you can see in
 the listing, and anywhere in a function you can go back to plain instructions.
@@ -26,7 +26,8 @@ What makes it different:
    **Assembler in HLA64 (s → executable)**: a translator and an assembler written in HLA64 itself
    ([selfhost/](selfhost/README.md)). The TypeScript toolchain builds them into native executables
    (Mach-O for macOS or `.exe` for Windows), and those executables can in turn rebuild themselves
-   from the same sources, byte for byte.
+   from the same sources, byte for byte. Compiled to WebAssembly, the same tools run right in the
+   page and make the same files.
 3. **A course of 14 lessons** — from “Hello, world” to the Game of Life and calling HLA64 from C.
    Every lesson has programs you can run and exercises, and processor instructions appear right from
    the first one, next to the sugar, so the course works well for teaching assembly.
@@ -72,9 +73,10 @@ Llength.body2:
 ```
 
 Instructions are written in the platform's syntax (the Apple dialect of AArch64, Intel/LLVM for
-x86-64). The built-in assembler understands ≈140 AArch64 mnemonics and the main integer and SSE
-instructions of x86-64 (no SIMD vectors yet); with `--clang` the build is done by `clang`, and then
-everything it knows is available. A complete example — [examples/mixed.hla](examples/mixed.hla).
+x86-64, the text format of WebAssembly). The built-in assembler understands ≈140 AArch64 mnemonics,
+the main integer and SSE instructions of x86-64 (no SIMD vectors yet) and the WebAssembly
+instructions without SIMD; with `--clang` the build is done by `clang`, and then everything it knows
+is available. A complete example — [examples/mixed.hla](examples/mixed.hla).
 
 A rethinking of hlaa64, a [high-level assembler](https://en.wikipedia.org/wiki/High-level_assembler), in TypeScript.
 
@@ -93,6 +95,7 @@ both in Node and **in the browser, offline**:
 | `src/emu` | ARM64 emulator: loads the resulting Mach-O, applies the bind opcodes, substitutes a JS libSystem (`printf`, `puts`, `malloc`, `qsort` with a callback, etc.) and executes the machine code |
 | `web/` → `dist/hla64.html` | a single self-contained HTML file: an editor with syntax highlighting, live translation, a machine-code listing with bit-level breakdown, a Mach-O / PE inspector, the emulator console, building a program or a library for C (`.a` / `.dylib` or `.lib` / `.dll` + `.h`) and downloading the result; the platform is switched at the very top |
 | `src/lang/x64`, `src/asm/x64`, `src/asm/coff`, `src/emu/x64` | the second platform — **Windows x64**: Win64 code generator, x86-64 assembler (Intel, LLVM dialect), COFF object files, PE linker (`.exe`/`.dll`), static libraries and `.lib` import libraries, x64 emulator with a PE loader. Details — [docs/windows.md](docs/windows.md) |
+| `src/lang/wasm`, `src/asm/wasm`, `src/wasm` | the third platform — **WebAssembly (wasm32)**: code generator for the stack machine (registers are locals, loops are blocks), WAT assembler with type checking, a JavaScript runtime as the system (`printf`, `malloc`, `fopen`… as imports); programs run natively in the browser and in Node and download as `.wasm` + a page with a console. Details — [docs/wasm.md](docs/wasm.md) |
 
 ## Quick start
 
@@ -111,6 +114,8 @@ node src/cli.ts obj app.hla                    # an object file to link with C c
 
 node src/cli.ts run examples/hello.hla --target x64-windows    # Windows x64 (outside Windows — in the x64 emulator)
 node src/cli.ts build examples/hello.hla --target x64-windows  # hello.exe
+node src/cli.ts run examples/hello.hla --target wasm32         # WebAssembly: run in Node's engine
+node src/cli.ts build examples/hello.hla --target wasm32       # hello.wasm + hello.html (console page) + hello.mjs (Node)
 
 npm run build:web                              # build dist/hla64.html and the PWA in dist/pages/
 open dist/hla64.html                           # works over file://, no network needed
@@ -228,7 +233,7 @@ the header is on the **C header** tab, plus a zip with the `.h`, the library and
 
 | File | What it's about |
 |---|---|
-| [mixed.hla](examples/mixed.hla) | instructions and sugar in the same functions: `ldrb` with post-increment inside `do … while`, `bfi`/`ubfx`, `cmp`+`csel` without branches, `umulh` after a sugar xorshift, a loop on a label with `b.lt` (for Windows — [tests/x64/cases/mixed.hla](tests/x64/cases/mixed.hla) with `cmovg`, `mul`, `jl`) |
+| [mixed.hla](examples/mixed.hla) | instructions and sugar in the same functions: `ldrb` with post-increment inside `do … while`, `bfi`/`ubfx`, `cmp`+`csel` without branches, `umulh` after a sugar xorshift, a loop on a label with `b.lt` (for Windows — [tests/x64/cases/mixed.hla](tests/x64/cases/mixed.hla) with `cmovg`, `mul`, `jl`; for WebAssembly — [tests/wasm/cases/mixed.hla](tests/wasm/cases/mixed.hla) with `local.get`, `select`, `br_if`) |
 | [hello.hla](examples/hello.hla) | a minimal program |
 | [showcase.hla](examples/showcase.hla) | a tour of the language: structs, enums, arrays, strings, recursion, qsort with a callback, FP, syscall, naked functions, push/pop, goto |
 | [mandelbrot.hla](examples/mandelbrot.hla) | the Mandelbrot set on d registers: floating-point expressions next to `fmul` |
@@ -241,7 +246,8 @@ the header is on the **C header** tab, plus a zip with the `.h`, the library and
 `hlc-arm`/`hlc-x64` translate HLA64 (without registers) into AArch64 or x86-64 assembly,
 `hlas-arm`/`hlas-x64` build a signed Mach-O or an `.exe` from it. After bootstrapping with
 the TypeScript version they rebuild themselves byte for byte, and their executables match
-the output of the linkers in `src/asm`. To check — `selfhost/test.sh`.
+the output of the linkers in `src/asm`. To check — `selfhost/test.sh`. Built for wasm32, all four
+tools run in the browser and produce the same files (`npm run test:wasm` checks it).
 
 ## Tests
 
@@ -250,7 +256,7 @@ npm test                 # all examples and tests/cases × {clang, own assembler
 npm run test:lessons     # 108 programs from the lessons + building lesson 14 with clang (--native: programs also on macOS)
 npm run test:encoding    # 248 instruction forms: encoding matches clang bit for bit
 npm run fuzz             # differential fuzzer: ~1200 random expressions, native and emulator vs. a BigInt reference
-npm run check:web        # open the page in headless Chrome, run the examples for both platforms, take screenshots
+npm run check:web        # open the page in headless Chrome, run the examples of every platform, take screenshots
 npm run check:pwa        # dist/pages/ over http in headless Chrome: service worker, manifest, reload without network
 npm run typecheck
 
@@ -259,6 +265,8 @@ npm run test:x64-clang   #   … and the same assembly via clang + lld-link
 npm run test:x64-encoding  # 987 x86-64 forms: bit for bit with clang
 npm run test:coff        # COFF object vs. clang, lld-link, own PE linker
 npm run test:x64-lib     # C ↔ HLA64 on Windows: .lib, .dll + import library (clang and lld-link; on Windows — also MSVC and SEH)
+npm run test:wasm        # WebAssembly: wasm32 programs + portable programs and lessons in Node's engine (+ binaryen wasm-as if installed)
+npm run check:wasm-page  # the page of a downloaded program in headless Chrome: over http and from disk
 npm run test:all         # everything in a row
 npm run test:ci          # what CI runs on Linux (parts that need macOS or clang skip themselves)
 ```
@@ -309,15 +317,16 @@ built with `clang`, built with the built-in assembler and run on macOS, and exec
 ## Project structure
 
 ```
-src/lang/      HLA64 translator (frontend.ts — shared part, codegen.ts — AArch64, x64/ — Windows x64)
-src/asm/       assembler + Mach-O linker; x64/ — x86-64 assembler; coff/ — COFF, PE, .lib
+src/lang/      HLA64 translator (frontend.ts — shared part, codegen.ts — AArch64, x64/ — Windows x64, wasm/ — WebAssembly)
+src/asm/       assembler + Mach-O linker; x64/ — x86-64 assembler; coff/ — COFF, PE, .lib; wasm/ — WAT → .wasm
 src/emu/       ARM64 emulator; x64/ — x86-64 emulator and PE loader
+src/wasm/      the system of WebAssembly programs: JavaScript runtime, the C functions it gives, the page of a downloaded program
 src/cli.ts     command line
 web/           page sources (template.html, main.ts, worker.ts; sw.js — the PWA service worker)
 assets/        icon (icon.svg) and PWA PNG icons (npm run build:icons regenerates them from the SVG)
 dist/hla64.html  the built page (not committed: npm run build:web)
 dist/pages/    PWA for GitHub Pages: index.html, hla64.html, sw.js, manifest, icons
 examples/      examples (.hla + .expected)
-tests/         run.ts, encoding.ts, fuzz.ts, cases/; x64.ts, x64-lib.ts, encoding-x64.ts, coff-x64.ts, x64/
-docs/          language reference, lessons (docs/lessons), Windows x64 (docs/windows.md)
+tests/         run.ts, encoding.ts, fuzz.ts, cases/; x64.ts, x64-lib.ts, encoding-x64.ts, coff-x64.ts, x64/; wasm.ts, wasm/
+docs/          language reference, lessons (docs/lessons), Windows x64 (docs/windows.md), WebAssembly (docs/wasm.md)
 ```

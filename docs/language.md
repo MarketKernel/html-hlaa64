@@ -7,7 +7,7 @@
 </h3>
 <!-- /languages -->
 
-HLA64 is an AArch64 (Apple Silicon, macOS) and x86-64 (Windows) assembler with syntactic sugar,
+HLA64 is an AArch64 (Apple Silicon, macOS), x86-64 (Windows) and WebAssembly assembler with syntactic sugar,
 not a separate language. Every line of a function is either a **processor instruction**, which goes
 into the listing as is (`csel x0, a, b, gt`, `ldrb w9, [p], #1`), or **sugar**, which the translator
 expands into instructions: `if`, `while`, `for`, expressions `a = b + c * 4`, memory accesses
@@ -547,11 +547,13 @@ The syntax of the original hlaa64 is accepted too: `alias a = X1;`, `set a = b +
 
 ## Platforms
 
-One language, two code generators: AArch64 for macOS (the default on macOS) and x86-64 for Windows
-(`--target x64-windows`, the default on Windows). Everything that doesn't name registers explicitly
-(`let`, data, structs, loops, C calls) carries over unchanged; register names, the built-in
-assembler and `syscall` are specific to each platform. Registers, the Win64 convention and the
-differences are described in [windows.md](windows.md).
+One language, three code generators: AArch64 for macOS (the default on macOS), x86-64 for Windows
+(`--target x64-windows`, the default on Windows) and WebAssembly (`--target wasm32`), which runs in
+the browser and in Node. Everything that doesn't name registers explicitly (`let`, data, structs,
+loops, C calls) carries over unchanged; register names, the built-in assembler and `syscall` are
+specific to each platform. Registers, the Win64 convention and the differences are described in
+[windows.md](windows.md); the registers `r0`–`r31`/`f0`–`f31`, the stack machine, structured control
+flow and the JavaScript runtime of WebAssembly — in [wasm.md](wasm.md).
 
 ## Limitations
 

@@ -1,0 +1,118 @@
+// HLA64 is an assembler: every line is either a WebAssembly instruction or sugar that
+// expands into instructions. Both mix freely in one function, and instructions see
+// let-variables, parameters and data by name. WebAssembly is a stack machine: an
+// instruction takes its operands from the stack and pushes its result; local.get and
+// local.set move values between the stack and the registers (r0..r31, f0..f31).
+extern puts, printf(fmt, ...)
+
+data state: u64 = 88172645463325252
+data counts: i64[6]
+rodata text = "assembler with sugar"
+
+// string length: a sugar loop around a byte load
+fn length(s) {
+    let p: r8 = s
+    let c: r9 = 0
+    do {
+        local.get p             // push p
+        i32.wrap_i64            // memory addresses are 32-bit (wasm32)
+        i64.load8_u             // the byte at p
+        local.set c
+        p += 1
+    } while c != 0
+    return p - s - 1
+}
+
+// pack 0xRRGGBB with shifts and ors, on the stack
+fn rgb(red, green, blue) {
+    local.get red
+    i64.const 16
+    i64.shl
+    local.get green
+    i64.const 8
+    i64.shl
+    i64.or
+    local.get blue
+    i64.or
+    local.set r0                // r0 is the result: no return needed
+}
+
+// no branches: select keeps one of two values
+fn clamp(v, lo, hi) {
+    local.get lo
+    local.get v
+    local.get v
+    local.get lo
+    i64.lt_s
+    select                      // v < lo ? lo : v
+    local.set v
+    local.get hi
+    local.get v
+    local.get v
+    local.get hi
+    i64.gt_s
+    select
+    local.set r0
+}
+
+// a random number in 0..n-1: xorshift64 in sugar, the rest in instructions
+fn below(n) {
+    let x = state
+    x ^= x << 13
+    x ^= x >>> 7
+    x ^= x << 17
+    state = x
+    local.get x
+    i64.const 32
+    i64.shr_u                   // the high half is the better random
+    local.get n
+    i64.rem_u
+    local.set r0
+}
+
+fn main() {
+    i64.const text              // puts(text), written as instructions
+    call puts
+    drop                        // puts returns a value: the stack must be empty again
+    printf("length(\"%s\") = %ld\n", text, length(text))
+
+    let c = rgb(0x12, 0x34, 0x56)
+    local.get c
+    i64.const 8
+    i64.shr_u
+    i64.const 0xff
+    i64.and
+    local.set r1                // take the green channel back out
+    printf("rgb = 0x%06lx, green = 0x%lx\n", c, r1)
+
+    printf("clamp: %ld %ld %ld\n", clamp(-5, 0, 10), clamp(7, 0, 10), clamp(99, 0, 10))
+
+    for i in 0..6000 {
+        r2 = below(6)
+        counts[r2] += 1
+    }
+    let total: r3 = 0, k: r4 = 0
+    asm {
+        loop $sum                       // total += counts[k] for k in 0..5, in instructions
+            local.get total
+            local.get k
+            i64.const 3
+            i64.shl                     // k * 8
+            i32.wrap_i64
+            i64.load offset=counts      // the address of the data is the offset
+            i64.add
+            local.set total
+            local.get k
+            i64.const 1
+            i64.add
+            local.tee k
+            i64.const 6
+            i64.lt_s
+            br_if $sum                  // a branch to a loop goes back to its start
+        end
+    }
+    for face in 0..6 {
+        printf("%ld: %ld\n", face + 1, counts[face])
+    }
+    printf("total %ld\n", total)
+}

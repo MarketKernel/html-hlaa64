@@ -3,7 +3,7 @@
 // session and `persistent` is false.
 
 export type Mode = 'exe' | 'static' | 'dynamic';
-export type Platform = 'mac' | 'win';
+export type Platform = 'mac' | 'win' | 'wasm';
 
 export interface ProjectFile { name: string; text: string }
 
