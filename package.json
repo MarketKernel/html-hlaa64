@@ -1,6 +1,6 @@
 {
   "name": "html-hlaa64",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "HLA64: ARM64, x86-64 and WebAssembly assembly with syntactic sugar (write instructions directly, use for/if/expressions where convenient) for macOS, Windows and the browser; translator, assembler, linker and emulator, all in TypeScript",
