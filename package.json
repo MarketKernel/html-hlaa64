@@ -6,11 +6,14 @@
   "description": "HLA64: ARM64, x86-64 and WebAssembly assembly with syntactic sugar (write instructions directly, use for/if/expressions where convenient) for macOS, Windows and the browser; translator, assembler, linker and emulator, all in TypeScript",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node tests/run.ts",
+    "test": "node tests/run.ts && node tests/pair-memory.ts",
     "build:web": "node tools/build-web.ts",
     "fuzz": "node tests/fuzz.ts 1 8",
     "test:encoding": "node tests/encoding.ts",
     "check:web": "node tools/check-web.ts",
+    "test:stack-web": "node tests/stack-pointer-web.ts",
+    "test:pair": "node tests/pair-memory.ts",
+    "test:pair-web": "node tests/stack-pointer-web.ts tests/cases/pair-memory.hla",
     "check:selfhost-web": "node tools/check-selfhost-web.ts",
     "check:pwa": "node tools/check-pwa.ts",
     "build:icons": "node tools/build-icons.ts",
@@ -22,8 +25,8 @@
     "test:x64-lib": "node tests/x64-lib.ts",
     "test:wasm": "node tests/wasm.ts",
     "check:wasm-page": "node tools/check-wasm-page.ts",
-    "test:ci": "node tests/run.ts && node tests/lessons.ts && node tests/x64.ts && node tests/wasm.ts && node tests/include.ts && node tests/fuzz.ts 1 4",
-    "test:all": "node tests/run.ts && node tests/lessons.ts && node tests/x64.ts && node tests/wasm.ts && node tests/include.ts && node tests/fuzz.ts 1 4 && node tests/encoding.ts && node tests/encoding-x64.ts && node tests/coff-x64.ts && node tests/x64-lib.ts",
+    "test:ci": "node tests/run.ts && node tests/pair-memory.ts && node tests/lessons.ts && node tests/x64.ts && node tests/wasm.ts && node tests/include.ts && node tests/fuzz.ts 1 4",
+    "test:all": "node tests/run.ts && node tests/pair-memory.ts && node tests/lessons.ts && node tests/x64.ts && node tests/wasm.ts && node tests/include.ts && node tests/fuzz.ts 1 4 && node tests/encoding.ts && node tests/encoding-x64.ts && node tests/coff-x64.ts && node tests/x64-lib.ts",
     "test:include": "node tests/include.ts"
   },
   "devDependencies": {

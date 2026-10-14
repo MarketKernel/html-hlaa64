@@ -304,7 +304,7 @@ class Parser {
   stmt(): Stmt {
     const t = this.cur;
     if (this.isOp('{')) return { k: 'block', body: this.block(), t };
-    if (this.isOp('[')) return this.assignStmt();
+    if (this.isOp('[') || this.isOp('(')) return this.assignStmt();
     // numeric local label of the assembler: `1:  mov x0, #1`
     if (t.kind === 'num' && this.isOp(':', this.peek()) && this.peek().start === t.end) return this.rawLine();
     if (t.kind !== 'ident') this.err(`unexpected '${t.text}'`);
@@ -462,17 +462,55 @@ class Parser {
       this.expect('=');
       return { k: 'let', decls: [{ name: name.text, reg, unsigned, init: this.expr(), t: name }], t: kw };
     }
+    if (this.isPair()) {
+      const regs = this.registerPair();
+      this.expect('=');
+      const memory = this.expr();
+      if (memory.k !== 'mem') this.err('a register pair needs a memory reference', memory.t);
+      const pre = !this.cur.nl && !!this.accept('!');
+      return { k: 'pair', regs, memory, load: true, pre, t };
+    }
     const target = this.unary();
+    const pre = target.k === 'mem' && !this.cur.nl && !!this.accept('!');
+    if (pre && !this.isOp('=')) this.err('pre-index addressing needs a pair assignment');
     if (this.isOp('++') || this.isOp('--')) {
       const op = this.next().text as '++' | '--';
       return { k: 'incdec', target, op, t };
     }
     if (this.cur.kind === 'op' && ASSIGN_OPS.has(this.cur.text)) {
       const op = this.next().text;
+      if (this.isPair()) {
+        if (op !== '=' || target.k !== 'mem') this.err('a register pair needs a simple memory assignment', t);
+        return { k: 'pair', regs: this.registerPair(), memory: target, load: false, pre, t };
+      }
+      if (pre) this.err('pre-index addressing needs a pair assignment', t);
       return { k: 'assign', target, op, value: this.expr(), t };
     }
     if (target.k === 'call') return { k: 'expr', e: target, t };
     return this.err('expected assignment');
+  }
+
+  /** Tuples are statement-only: exactly two register operands, not general values. */
+  isPair(): boolean {
+    if (!this.isOp('(')) return false;
+    let depth = 0;
+    for (let i = this.pos; i < this.toks.length; i++) {
+      const tok = this.toks[i];
+      if (tok.kind !== 'op') continue;
+      if (tok.text === '(' || tok.text === '[') depth++;
+      else if (tok.text === ')' || tok.text === ']') { if (--depth === 0) return false; }
+      else if (tok.text === ',' && depth === 1) return true;
+    }
+    return false;
+  }
+
+  registerPair(): [Expr, Expr] {
+    this.expect('(');
+    const a = this.expr();
+    this.expect(',');
+    const b = this.expr();
+    this.expect(')');
+    return [a, b];
   }
 
   assignStmt(): Stmt {

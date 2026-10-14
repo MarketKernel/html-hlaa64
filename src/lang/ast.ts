@@ -53,6 +53,8 @@ export interface LetDecl {
 export type Stmt =
   | { k: 'let'; decls: LetDecl[]; t: Token }
   | { k: 'assign'; target: Expr; op: string; value: Expr; t: Token }
+  // One native pair transfer, rather than two independent scalar assignments.
+  | { k: 'pair'; regs: [Expr, Expr]; memory: Extract<Expr, { k: 'mem' }>; load: boolean; pre: boolean; t: Token }
   | { k: 'incdec'; target: Expr; op: '++' | '--'; t: Token }
   | { k: 'expr'; e: Expr; t: Token }
   | { k: 'if'; arms: { cond: Expr; body: Stmt[] }[]; els: Stmt[] | null; t: Token }

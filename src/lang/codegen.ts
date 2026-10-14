@@ -230,6 +230,42 @@ class CodeGen extends CodeGenBase {
     }
   }
 
+  genPair(s: Extract<Stmt, { k: 'pair' }>): void {
+    const regs = s.regs.map(e => {
+      const op = this.operand(e);
+      if (op?.k !== 'reg' || op.r === 'sp' || op.r === 'wsp') this.err('a pair transfer needs two registers, excluding SP/WSP', e.t);
+      return op.r;
+    });
+    const [a, b] = regs as [string, string];
+    if (parseReg(a)!.cls !== parseReg(b)!.cls) this.err('pair registers must have the same class and width', s.t);
+    if (s.load && sameReg(a, b)) this.err('pair load destinations must be different registers', s.t);
+    const size = is64(a) ? 8 : 4, fp = isFpReg(a);
+    const ty = s.memory.ty;
+    if (ty && (memSize(ty) !== size || (ty[0] === 'f') !== fp)) this.err('pair element type must match the register class and width', s.t);
+    if (s.pre && s.memory.post) this.err('a pair address cannot be both pre-index and post-index', s.t);
+
+    // Pair modes have a signed scaled imm7. Never allocate scratch registers or
+    // replace the transfer with scalar loads/stores, even for complex addresses.
+    let base: string | null = null, off = 0n;
+    const walk = (e: Expr, negative = false): boolean => {
+      const v = this.constEval(e);
+      if (v !== null) { off += negative ? -v : v; return true; }
+      if (e.k === 'bin' && (e.op === '+' || e.op === '-')) return walk(e.l, negative) && walk(e.r, e.op === '-' ? !negative : negative);
+      const op = this.operand(e);
+      if (negative || base || op?.k !== 'reg' || !/^(?:x(?:[12]?\d|30)|sp)$/.test(op.r)) return false;
+      base = op.r; return true;
+    };
+    if (!walk(s.memory.addr) || !base) this.err('pair address must be a 64-bit base register plus a constant byte offset', s.memory.t);
+    if (s.memory.post) {
+      if (s.memory.addr.k !== 'name' || off !== 0n) this.err('pair post-increment needs a register address: [p++]', s.memory.t);
+      off = BigInt(s.memory.post * 2 * size);
+    }
+    if (off % BigInt(size) !== 0n || off < BigInt(-64 * size) || off > BigInt(63 * size)) this.err(`pair offset must be a multiple of ${size} in ${-64 * size}..${63 * size}`, s.memory.t);
+    if ((s.pre || s.memory.post) && !fp && base !== 'sp' && regs.some(r => sameReg(r, base!))) this.err('pair writeback base must differ from the transferred registers', s.t);
+    const mode = s.memory.post ? `[${base}], #${off}` : `[${base}${off || s.pre ? `, #${off}` : ''}]${s.pre ? '!' : ''}`;
+    this.emit(`${s.load ? 'ldp' : 'stp'} ${a}, ${b}, ${mode}`);
+  }
+
   /** Run f, then release every scratch register it allocated. */
   withTemps<R>(f: () => R): R {
     const saved = new Set(this.temps), savedF = new Set(this.ftemps);

@@ -1,0 +1,60 @@
+// Typed pairs are one native transfer, with no scratch registers or extra frame.
+extern printf(fmt, ...)
+
+naked fn pair_frame() {
+    u64[sp - 0x70]! = (x29, x30)
+    x29 = sp
+    x0 = 123
+    x1 = 456
+    u64[sp + 0x60] = (x0, x1)
+    (x2, x3) = u64[sp + 0x60]
+    x0 = x2 + x3
+    (x29, x30) = u64[sp]
+    sp += 0x70
+    return
+}
+
+fn main() {
+    let frame = pair_frame()
+    printf("frame: %ld\n", frame)
+
+    local values: u64[8]
+    x10 = &values
+    alias first = x0
+    alias second = x1
+    first = 100
+    second = 200
+    u64[x10++] = (first, second)
+    x11 = &values + 16
+    let pointer_ok = x10 == x11
+    x10 = &values
+    (x2, x3) = u64[x10++]
+    let sum = x2 + x3
+    printf("integer: %ld pointer: %ld\n", sum, pointer_ok)
+
+    x10 = &values
+    w0 = 0xffffffff
+    w1 = 0x80000000
+    u32[x10] = (w0, w1)
+    x2 = -1
+    x3 = -1
+    (w2, w3) = u32[x10]
+    let widened = x2 + x3
+    printf("width: %ld\n", widened)
+
+    x10 = &values
+    d0 = 1.25
+    d1 = 2.5
+    f64[x10] = (d0, d1)
+    (d2, d3) = f64[x10]
+    d0 = d2 + d3
+    let fp_result = int(d0 * 4.0)
+    printf("float: %ld\n", fp_result)
+
+    x10 = &values
+    u64[x10] = (xzr, xzr)
+    (x0, x1) = u64[x10]
+    let zeros = x0 + x1
+    printf("zero: %ld\n", zeros)
+    return 0
+}

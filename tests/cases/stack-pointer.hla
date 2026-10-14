@@ -1,0 +1,38 @@
+// SP is an integer register, including as an assignment destination and alias.
+extern printf(fmt, ...)
+
+naked fn stack_roundtrip() {
+    x9 = sp
+    x10 = x29
+    sp = sp - 0x60
+    x29 = sp + 0x50
+    x0 = x29 + 0x10
+    x0 = x0 == x9
+    sp = sp + 0x60
+    x29 = x10
+    return
+}
+
+naked fn stack_alias() {
+    alias saved_stack = sp
+    x0 = saved_stack
+    return
+}
+
+// Compile WSP operations too, but do not truncate the native process's stack.
+naked fn stack32() {
+    wsp = wsp - 0x20
+    w0 = wsp + 0x50
+    wsp = wsp + 0x20
+    return
+}
+
+fn main() {
+    let ok = stack_roundtrip()
+    printf("stack: %ld\n", ok)
+    let from_alias = stack_alias()
+    x9 = sp
+    let same = from_alias == x9
+    printf("alias: %ld\n", same)
+    return 0
+}

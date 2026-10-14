@@ -35,8 +35,8 @@ export function isReg(text: string): boolean {
 }
 
 export function isFpReg(r: string): boolean {
-  const c = r[0];
-  return c === 'd' || c === 's';
+  const info = parseReg(r);
+  return info?.cls === 'd' || info?.cls === 's';
 }
 
 export function is64(r: string): boolean {

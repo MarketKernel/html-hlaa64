@@ -34,8 +34,21 @@ the built-in HLA64 assembler (see the [README](../README.md)).
 
 ## Registers and aliases
 
-Any register can be used by name: `x0..x30`, `w0..w30`, `sp`, `xzr`, `wzr`, `fp` (= x29), `lr` (= x30),
+Any register can be used by name: `x0..x30`, `w0..w30`, `sp`, `wsp`, `xzr`, `wzr`, `fp` (= x29), `lr` (= x30),
 `d0..d31`, `s0..s31`.
+
+`sp` and `wsp` are integer stack-pointer registers. Simple copies and immediate
+addition/subtraction can use them directly:
+
+```hla
+x29 = sp + 0x50       // add x29, sp, #0x50
+sp = sp - 0x60        // sub sp, sp, #0x60
+x0 = sp              // mov x0, sp
+```
+
+These forms obey the processor's operand restrictions; SP is not a substitute for
+a general register in every operation. Manual frame setup normally belongs in a
+`naked fn`, with the stack and saved registers restored before returning.
 
 ```hla
 alias count = x19          // alias — as in hlaa64 (`alias a = X1;` works too)
@@ -116,6 +129,39 @@ w0 = u8[p++]           // post-increment: ldrb w0, [p], #1
 Access types: `i8 u8 i16 u16 i32 u32 i64 u64 ptr f32 f64`.
 The address is mapped onto AArch64 addressing modes (`[base, #imm]`, `[base, idx, lsl #s]`,
 `[base, w, sxtw #s]`); anything more complex is computed into a scratch register.
+
+### Paired memory transfers (AArch64)
+
+```hla
+u64[sp + 0x60] = (x29, x30)   // stp x29, x30, [sp, #96]
+(x29, x30) = u64[sp + 0x60]   // ldp x29, x30, [sp, #96]
+u32[x10] = (w0, w1)           // two 4-byte elements
+(d0, d1) = f64[x10]           // two 8-byte FP elements
+u64[sp - 0x70]! = (x29, x30)  // pre-index: use sp - 112, then write it back to sp
+(x0, x1) = u64[x10++]         // post-index: read the pair, then advance x10 by 16
+f32[x10--] = (s0, s1)         // write the pair, then decrease x10 by 8
+```
+
+Each pair statement emits one `stp` or `ldp`, with no scratch registers or scalar
+replacement. The first register uses the displayed address; the second uses that
+address plus one element size. Without `!`, `++` or `--`, the base does not change.
+Pair `++`/`--` advances by **two** elements; scalar memory `++`/`--` advances by one.
+
+Both registers must have the same class and width, matching the element type.
+Integer elements may use `i32/u32`, `i64/u64/ptr`; FP elements use `f32/f64`.
+Omitting the type infers it from the registers. Register aliases are supported.
+The address must be an X register or SP plus a constant byte offset: a multiple of
+4 in -256..252 for 32-bit elements, or of 8 in -512..504 for 64-bit elements.
+Post-increment/decrement requires a bare base register. `!` is supported only for
+pair assignments and cannot be combined with post-increment/decrement.
+
+SP/WSP cannot be transferred as values. Pair load destinations must differ, and
+integer writeback must not overlap either transferred register. Invalid forms are
+compile errors. These are instruction statements, not general tuple expressions;
+the x86-64 and WebAssembly targets reject them. Other forms can use inline assembly.
+
+For a standard 16-byte stack save/restore, `push x29, x30` and `pop x29, x30` already
+emit `stp x29, x30, [sp, #-16]!` and `ldp x29, x30, [sp], #16`.
 
 ## Data
 

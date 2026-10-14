@@ -74,7 +74,7 @@ export function changes(body: Stmt[], name: string): boolean {
     const n = x as { k?: string; target?: Expr; v?: string };
     if ((n.k === 'assign' || n.k === 'incdec') && n.target?.k === 'name' && n.target.name === name) return true;
     if (n.k === 'forin' && n.v === name) return true;
-    if (n.k === 'asm' || n.k === 'asmtext' || n.k === 'pop') return true;
+    if (n.k === 'asm' || n.k === 'asmtext' || n.k === 'pop' || n.k === 'pair') return true;
     return Object.values(x).some(walk);
   };
   return walk(body);
@@ -146,6 +146,9 @@ export abstract class CodeGenBase {
   abstract genCall(e: Extract<Expr, { k: 'call' }>): void;
   abstract isFloat(e: Expr): boolean;
   abstract genPushPop(s: Extract<Stmt, { k: 'push' | 'pop' }>): void;
+  genPair(s: Extract<Stmt, { k: 'pair' }>): void {
+    this.err('paired memory assignment is supported only by the AArch64 target', s.t);
+  }
   /** assemble the final text from text/data lists */
   abstract finish(): string;
 
@@ -811,6 +814,7 @@ export abstract class CodeGenBase {
         break;
       }
       case 'local': this.genLocal(s); break;
+      case 'pair': this.genPair(s); break;
       case 'assign':
         this.withCallsLowered(() => this.genAssign(s.target, s.op, s.value, s.t), () => {
           const target = this.lowerTarget(s.target, this.hasCall(s.value));
