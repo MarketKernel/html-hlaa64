@@ -81,6 +81,59 @@ for (const id of ids) {
   const first = (await page.$eval('#console', (e) => e.textContent ?? '')).split('\n').slice(-2).join(' / ');
   console.log(`${id}: ${st} :: ${first}`);
 }
+// ---------------------------------------------------------------- Linux platform
+await page.click('#plat-linux');
+await new Promise((r) => setTimeout(r, 1000));
+await waitRun();
+console.log('--- Linux');
+console.log((await page.$$eval('.stage', (els) => els.map((e) => (e as HTMLElement).innerText.replace(/\n/g, ' | ')))).join('\n'));
+await page.screenshot({ path: `${out}/web-linux-console.png` });
+for (const tab of ['bin', 'macho']) {
+  await page.click(`.tab[data-tab="${tab}"]`);
+  await page.screenshot({ path: `${out}/web-linux-${tab}.png` });
+}
+const linuxIds = await page.$$eval('#ex-list li[data-example]', (os) => os.map((o) => (o as HTMLElement).dataset.example!));
+for (const id of linuxIds) {
+  await page.click(`#ex-list li[data-example="${id}"]`);
+  await new Promise((r) => setTimeout(r, 150));
+  const lib = await page.$eval('#mode-exe', (e) => !(e as HTMLInputElement).checked);
+  if (lib) {
+    console.log(`${id}: library: ${await page.$eval('#st-macho', (e) => (e as HTMLElement).innerText.replace(/\n/g, ' | '))}`);
+    await page.click('.tab[data-tab="header"]');
+    await page.screenshot({ path: `${out}/web-linux-${id}-header.png` });
+    await page.click('#mode-dynamic');
+    console.log(`${id}: shared library: ${await page.$eval('#st-macho', (e) => (e as HTMLElement).innerText.replace(/\n/g, ' | '))}`);
+    await page.click('.tab[data-tab="macho"]');
+    await page.screenshot({ path: `${out}/web-linux-${id}-so.png` });
+    await page.click('#mode-static');
+    continue;
+  }
+  await waitRun();
+  const st = await page.$eval('#runStatus', (e) => (e as HTMLElement).innerText.replace(/\n/g, ' '));
+  const last = (await page.$eval('#console', (e) => e.textContent ?? '')).trim().split('\n').slice(-2).join(' / ');
+  console.log(`${id}: ${st} :: ${last}`);
+  // syscall.hla ends with exit_group(3)
+  if (!new RegExp(`exit ${id === 'syscall' ? 3 : 0}`).test(st)) errors.push(`linux example ${id}: ${st}`);
+}
+// Download executable: an ELF file that the emulator runs with the same output as the page
+{
+  const dl = mkdtempSync(join(tmpdir(), 'hla-web-dl-'));
+  const cdp = await page.createCDPSession();
+  await cdp.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: dl });
+  await page.click('#ex-list li[data-example="sysv"]');
+  await new Promise((r) => setTimeout(r, 300));
+  await waitRun();
+  const shown = await page.$eval('#console', (e) => e.textContent ?? '');
+  await page.click('#download');
+  const exe = join(dl, 'sysv');
+  for (let i = 0; i < 100 && !existsSync(exe); i++) await new Promise((r) => setTimeout(r, 100));
+  await new Promise((r) => setTimeout(r, 300));
+  const { runElf } = await import('../src/emu/x64/elf-loader.ts');
+  const r = runElf(new Uint8Array(readFileSync(exe)));
+  console.log(`download: sysv (${readFileSync(exe).length} bytes): ${r.stdout === shown ? 'same output in the emulator' : 'DIFFERENT'}`);
+  if (r.stdout !== shown) errors.push(`downloaded sysv printed:\n${r.stdout}${r.error ?? ''}`);
+  await page.click('#sheet-close');
+}
 // ---------------------------------------------------------------- WebAssembly platform
 await page.click('#plat-wasm');
 await new Promise((r) => setTimeout(r, 1000));

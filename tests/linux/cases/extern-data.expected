@@ -1,0 +1,4 @@
+fputs to stdout
+fprintf to stdout: 42
+called through a register
+an extern used as a value is its address too

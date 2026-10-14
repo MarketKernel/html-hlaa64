@@ -1,0 +1,72 @@
+// HLA64 is an assembler: every line is either a CPU instruction or sugar that
+// expands into instructions. Both mix freely in one function, and instructions
+// see let-variables, parameters, data and labels by name.
+extern puts, printf(fmt, ...)
+
+data state: u64 = 88172645463325252
+data counts: i64[6]
+rodata text = "assembler with sugar"
+
+// string length: a sugar loop around a byte load
+fn length(s) {
+    let p: r8 = s
+    do {
+        movzx eax, byte ptr [p] // eax = byte at p
+        inc p
+    } while eax != 0
+    return p - s - 1
+}
+
+// pack 0xRRGGBB with shifts and ors
+fn rgb(red, green, blue) {
+    shl red, 16
+    shl green, 8
+    or red, green
+    or red, blue
+    return red
+}
+
+// no branches: cmp sets the flags, cmov picks a register
+fn clamp(v, lo, hi) {
+    mov rax, v
+    cmp rax, lo
+    cmovl rax, lo
+    cmp rax, hi
+    cmovg rax, hi               // the result is already in rax, no return needed
+}
+
+// a random number in 0..n-1: xorshift64 in sugar, then the high half
+// of the 128-bit product x * n, which has no operator, only an instruction
+fn below(n) {
+    let x: rax = state
+    x ^= x << 13
+    x ^= x >>> 7
+    x ^= x << 17
+    state = x
+    mul n                       // rdx:rax = rax * n
+    mov rax, rdx
+}
+
+fn main() {
+    lea rdi, [rip + text]       // puts(text), written as instructions (System V: first argument in rdi)
+    call puts
+    printf("length(\"%s\") = %lld\n", text, length(text))
+
+    let c = rgb(0x12, 0x34, 0x56)
+    mov rax, c
+    movzx eax, ah               // take the green channel back out
+    printf("rgb = 0x%06llx, green = 0x%llx\n", c, rax)
+
+    printf("clamp: %lld %lld %lld\n", clamp(-5, 0, 10), clamp(7, 0, 10), clamp(99, 0, 10))
+
+    for i in 0..6000 {
+        rax = below(6)
+        counts[rax] += 1
+    }
+    let face = 0
+again:                          // a label for the instructions below
+    printf("%lld: %lld\n", face + 1, counts[face])
+    inc face
+    cmp face, 6
+    jl again
+}

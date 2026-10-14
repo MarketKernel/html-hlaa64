@@ -28,6 +28,7 @@ export function writeCoffObject(asmb: XAssembly): CoffObjectResult {
     const list: Rel[] = [];
     relocs.set(s, list);
     for (const f of s.fixups) {
+      if (f.kind === 'got') throw new AsmError(`${f.sym}@GOTPCREL: there is no GOT on Windows (write [rip + ${f.sym}])`, f.line);
       const t = syms.get(f.sym);
       const put = (v: bigint, n: number) => { const u = BigInt.asUintN(n * 8, v); for (let i = 0; i < n; i++) s.data[f.off + i] = Number((u >> BigInt(8 * i)) & 0xffn); };
       // references to local symbols (and all RVAs) go through the section symbol, like MSVC and clang

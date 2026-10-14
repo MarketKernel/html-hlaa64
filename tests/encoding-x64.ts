@@ -52,7 +52,7 @@ add('bt rax, 3', 'bt rcx, 63', 'bt eax, 31', 'bts rax, 1', 'btr r9, 2', 'btc rbx
 // stack, control
 for (const r of regs64) add(`push ${r}`, `pop ${r}`);
 add('push 5', 'push 1000', 'push qword ptr [rax]', 'call rax', 'call r11', 'call qword ptr [rbx + 8]', 'jmp rax', 'jmp qword ptr [rcx]', 'ret', 'ret 8',
-  'nop', 'int3', 'ud2', 'leave', 'xchg rax, rbx', 'xchg rcx, qword ptr [rdx]');
+  'nop', 'int3', 'ud2', 'leave', 'xchg rax, rbx', 'xchg rcx, qword ptr [rdx]', 'syscall', 'hlt');
 for (const cc of ['e', 'ne', 'l', 'le', 'g', 'ge', 'b', 'be', 'a', 'ae', 's', 'ns', 'o', 'no', 'p', 'np']) {
   add(`set${cc} al`, `set${cc} r9b`, `set${cc} sil`, `cmov${cc} rax, rbx`, `cmov${cc} r8, qword ptr [rcx]`, `cmov${cc} eax, edx`);
 }

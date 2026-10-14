@@ -1,5 +1,6 @@
 // C printf formatting over emulator memory. `next()` yields the raw 64-bit
-// argument slots in order (Apple arm64 passes variadic arguments on the stack).
+// argument slots in order (Apple arm64 passes variadic arguments on the stack); `next(true)` asks
+// for a floating point argument (x86-64 System V passes those in xmm registers, apart from the rest).
 import { bitsToF64 } from './cpu.ts';
 
 /** what printf needs of memory: the bytes of a C string */
@@ -9,7 +10,7 @@ export interface CStringMemory { cstring(addr: number): Uint8Array }
  * `llp64`: Windows data model — `long` is 32 bits (`%ld` prints 32 bits; use `%lld` or `%I64d`).
  * Default is LP64 (macOS/Linux): `long` is 64 bits.
  */
-export function formatPrintf(mem: CStringMemory, fmtAddr: number, next: () => bigint, opts: { llp64?: boolean } = {}): number[] {
+export function formatPrintf(mem: CStringMemory, fmtAddr: number, next: (fp?: boolean) => bigint, opts: { llp64?: boolean } = {}): number[] {
   const fmt = mem.cstring(fmtAddr);
   const out: number[] = [];
   const pushStr = (s: string) => { for (const b of new TextEncoder().encode(s)) out.push(b); };
@@ -82,7 +83,7 @@ export function formatPrintf(mem: CStringMemory, fmtAddr: number, next: () => bi
         break;
       }
       case 'f': case 'F': case 'e': case 'E': case 'g': case 'G': case 'a': case 'A': {
-        const v = bitsToF64(next());
+        const v = bitsToF64(next(true));
         const sign = v < 0 || Object.is(v, -0) ? '-' : flags.includes('+') ? '+' : flags.includes(' ') ? ' ' : '';
         const a = Math.abs(v);
         let body: string;

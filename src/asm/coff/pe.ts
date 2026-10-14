@@ -42,6 +42,7 @@ export function linkPE(asmb: XAssembly, opts: PeOptions = {}): PeResult {
   const needStub = new Set<string>();
   for (const s of asmb.sections) {
     for (const f of s.fixups) {
+      if (f.kind === 'got') throw new AsmError(`${f.sym}@GOTPCREL: there is no GOT on Windows (write [rip + ${f.sym}])`, f.line);
       if (syms.has(f.sym)) continue;
       const n = f.sym.startsWith('__imp_') ? f.sym.slice(6) : f.sym;
       if (n === f.sym && f.kind !== 'rel' && f.kind !== 'abs') throw new AsmError(`undefined symbol '${f.sym}'`, f.line);

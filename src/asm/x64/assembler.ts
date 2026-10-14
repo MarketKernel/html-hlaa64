@@ -1,4 +1,4 @@
-// x86-64 assembler pass (Intel syntax, LLVM/COFF dialect): sections, symbols,
+// x86-64 assembler pass (Intel syntax, LLVM dialect, COFF or ELF sections): sections, symbols,
 // branch relaxation (short/near jumps) and Windows unwind info from .seh_* directives.
 import { AsmError, parseSource, parseStringLiteral, parseValue, splitOperands, type Value } from '../parse.ts';
 import { encodeX, parseXOperands, type XFixup } from './encode.ts';
@@ -10,11 +10,12 @@ export const SCN_CODE = 0x20, SCN_IDATA = 0x40, SCN_UDATA = 0x80, SCN_EXEC = 0x2
 export interface XSectFixup {
   off: number;              // offset of the field in the section
   size: 1 | 4 | 8;
-  kind: 'rel' | 'abs' | 'rva';
+  kind: 'rel' | 'abs' | 'rva' | 'got';   // got: rip-relative address of the symbol's GOT entry (ELF)
   sym: string;
   add: bigint;
-  end: number;              // rel: section offset of the end of the instruction (the rip value)
+  end: number;              // rel, got: section offset of the end of the instruction (the rip value)
   line: number;
+  branch?: boolean;         // target of call/jmp/jcc
 }
 
 export interface XSection {
@@ -68,9 +69,10 @@ function nopFill(n: number): number[] {
   return out;
 }
 
-function sectionFor(name: string, flagStr: string | undefined): { flags: number; zerofill: boolean } {
+function sectionFor(name: string, flagStr: string | undefined, type?: string): { flags: number; zerofill: boolean } {
   if (flagStr !== undefined) {
-    const f = flagStr.replace(/"/g, '');
+    // COFF ("dr", "dw", "xr", "bw") or ELF ("a", "aw", "ax", with @nobits for zero-filled data)
+    const f = flagStr.replace(/"/g, '') + (/^[@%]nobits$/.test(type ?? '') ? 'b' : '');
     let flags = SCN_READ;
     if (f.includes('x')) flags |= SCN_CODE | SCN_EXEC;
     if (f.includes('b')) flags |= SCN_UDATA;
@@ -81,6 +83,7 @@ function sectionFor(name: string, flagStr: string | undefined): { flags: number;
   if (name === '.text' || name.startsWith('.text$')) return { flags: SCN_CODE | SCN_EXEC | SCN_READ, zerofill: false };
   if (name === '.bss' || name.startsWith('.bss$')) return { flags: SCN_UDATA | SCN_READ | SCN_WRITE, zerofill: true };
   if (name === '.rdata' || name === '.xdata' || name === '.pdata' || name.startsWith('.rdata$')) return { flags: SCN_IDATA | SCN_READ, zerofill: false };
+  if (name === '.rodata' || name.startsWith('.rodata.')) return { flags: SCN_IDATA | SCN_READ, zerofill: false };
   return { flags: SCN_IDATA | SCN_READ | SCN_WRITE, zerofill: false };
 }
 
@@ -94,10 +97,10 @@ export function assembleX(src: string): XAssembly {
   let curSeh: SehFn | null = null;
   let sehLabel = 0;
 
-  const getSection = (name: string, flagStr?: string) => {
+  const getSection = (name: string, flagStr?: string, type?: string) => {
     let l = lists.get(name);
     if (!l) {
-      const { flags, zerofill } = sectionFor(name, flagStr);
+      const { flags, zerofill } = sectionFor(name, flagStr, type);
       // default alignments as clang uses them: code 16, writable data and bss 4
       const align = flags & SCN_EXEC ? 16 : flags & SCN_WRITE ? 4 : 1;
       l = { sect: { name, flags, align, data: [], size: 0, zerofill, fixups: [], insns: [], addr: 0 }, items: [] };
@@ -140,7 +143,7 @@ export function assembleX(src: string): XAssembly {
         case '.bss': cur = getSection('.bss'); break;
         case '.section': {
           const parts = splitOperands(a);
-          cur = getSection(parts[0], parts[1]);
+          cur = getSection(parts[0], parts[1], parts[2]);
           break;
         }
         case '.globl': case '.global': for (const n of a.split(',')) globals.add(n.trim()); break;
@@ -148,9 +151,13 @@ export function assembleX(src: string): XAssembly {
         case '.p2alignl': case '.size': case '.local': case '.weak': case '.cfi_startproc': case '.cfi_endproc':
           break;
         case '.type': {
-          if (/\b32\b/.test(a)) { /* function */ }
+          // ELF: .type name, @function
+          const p = splitOperands(a);
+          if (/^[@%]function$/.test(p[1] ?? '')) funcs.add(p[0]);
           break;
         }
+        case '.hidden': case '.protected': case '.internal':
+          break;
         case '.p2align': {
           const p2 = Number(parseValue(splitOperands(a)[0], line).add);
           cur.sect.align = Math.max(cur.sect.align, 1 << p2);
@@ -320,6 +327,7 @@ export function assembleX(src: string): XAssembly {
       const rva = f.sym.startsWith('@rva:');
       sect.fixups.push({
         off: base + f.off, size: f.size, kind: rva ? 'rva' : f.kind, sym: rva ? f.sym.slice(5) : f.sym, add: f.add, end, line,
+        ...(f.branch ? { branch: true } : {}),
       });
     };
     let size = 0;
@@ -347,7 +355,7 @@ export function assembleX(src: string): XAssembly {
           else bytes = it.cond === null ? [0xeb, 0] : [0x70 + it.cond, 0];
           if (!it.target.sym) throw new AsmError('jump needs a label', it.line);
           const fsize = it.long ? 4 : 1;
-          sect.fixups.push({ off: start + bytes.length - fsize, size: fsize as 1 | 4, kind: 'rel', sym: it.target.sym, add: it.target.add, end: start + bytes.length, line: it.line });
+          sect.fixups.push({ off: start + bytes.length - fsize, size: fsize as 1 | 4, kind: 'rel', sym: it.target.sym, add: it.target.add, end: start + bytes.length, line: it.line, branch: true });
           sect.insns.push({ off: start, len: bytes.length, line: it.line });
           out.push(...bytes);
           size += bytes.length;

@@ -1,4 +1,4 @@
-# HLA64 — an assembler with syntactic sugar for Apple Silicon, Windows x64 and WebAssembly, written entirely in TypeScript
+# HLA64 — an assembler with syntactic sugar for Apple Silicon, Windows x64, Linux x64 and WebAssembly, written entirely in TypeScript
 
 <!-- languages -->
 <h3 align="center">
@@ -93,9 +93,10 @@ both in Node and **in the browser, offline**:
 | `src/lang` | HLA64 lexer, parser and code generator → AArch64 assembly |
 | `src/asm` | assembler (≈140 mnemonics + all `b.cond`, directives, numeric labels); `.o` object files with relocations, static `.a` and dynamic `.dylib` libraries; Mach-O linker: GOT/stubs for libSystem, dyld rebase/bind opcodes, symbol table, **ad-hoc code signature** (SHA-256 CodeDirectory — without it the kernel won't run an arm64 binary) |
 | `src/emu` | ARM64 emulator: loads the resulting Mach-O, applies the bind opcodes, substitutes a JS libSystem (`printf`, `puts`, `malloc`, `qsort` with a callback, etc.) and executes the machine code |
-| `web/` → `dist/hla64.html` | a single self-contained HTML file: an editor with syntax highlighting, live translation, a machine-code listing with bit-level breakdown, a Mach-O / PE inspector, the emulator console, building a program or a library for C (`.a` / `.dylib` or `.lib` / `.dll` + `.h`) and downloading the result; the platform is switched at the very top |
+| `web/` → `dist/hla64.html` | a single self-contained HTML file: an editor with syntax highlighting, live translation, a machine-code listing with bit-level breakdown, a Mach-O / PE / ELF inspector, the emulator console, building a program or a library for C (`.a` / `.dylib`, `.lib` / `.dll` or `.a` / `.so` + `.h`) and downloading the result; the platform is switched at the very top |
 | `src/lang/x64`, `src/asm/x64`, `src/asm/coff`, `src/emu/x64` | the second platform — **Windows x64**: Win64 code generator, x86-64 assembler (Intel, LLVM dialect), COFF object files, PE linker (`.exe`/`.dll`), static libraries and `.lib` import libraries, x64 emulator with a PE loader. Details — [docs/windows.md](docs/windows.md) |
-| `src/lang/wasm`, `src/asm/wasm`, `src/wasm` | the third platform — **WebAssembly (wasm32)**: code generator for the stack machine (registers are locals, loops are blocks), WAT assembler with type checking, a JavaScript runtime as the system (`printf`, `malloc`, `fopen`… as imports); programs run natively in the browser and in Node and download as `.wasm` + a page with a console. Details — [docs/wasm.md](docs/wasm.md) |
+| `src/lang/x64` (System V), `src/asm/elf`, `src/emu/x64/elf-loader.ts` | **Linux x64**: the same x86-64 code generator with the System V convention and `syscall`, ELF object files, an ELF linker (executables and `.so`, dynamically linked against glibc), GNU `ar` static libraries, ELF loader with a JS glibc in the x64 emulator. Details — [docs/linux.md](docs/linux.md) |
+| `src/lang/wasm`, `src/asm/wasm`, `src/wasm` | **WebAssembly (wasm32)**: code generator for the stack machine (registers are locals, loops are blocks), WAT assembler with type checking, a JavaScript runtime as the system (`printf`, `malloc`, `fopen`… as imports); programs run natively in the browser and in Node and download as `.wasm` + a page with a console. Details — [docs/wasm.md](docs/wasm.md) |
 
 ## Quick start
 
@@ -114,6 +115,8 @@ node src/cli.ts obj app.hla                    # an object file to link with C c
 
 node src/cli.ts run examples/hello.hla --target x64-windows    # Windows x64 (outside Windows — in the x64 emulator)
 node src/cli.ts build examples/hello.hla --target x64-windows  # hello.exe
+node src/cli.ts run examples/hello.hla --target x64-linux      # Linux x64 (outside Linux x86-64 — in the x64 emulator)
+node src/cli.ts build examples/hello.hla --target x64-linux    # hello (ELF, linked against glibc)
 node src/cli.ts run examples/hello.hla --target wasm32         # WebAssembly: run in Node's engine
 node src/cli.ts build examples/hello.hla --target wasm32       # hello.wasm + hello.html (console page) + hello.mjs (Node)
 
@@ -134,7 +137,7 @@ follow the file — deleted and dragged in from disk), **Projects** (your own pr
 platform) and **Examples** (built-in examples; a modified example is marked with a dot and can be
 reset to the original). Projects are stored in this browser's IndexedDB; **Download project .zip**
 downloads all the project's files. A program with `include "std/file.hla"` (the same file functions
-for macOS and Windows) reads the project's files, and the files it writes appear in the panel.
+for macOS, Windows and Linux) reads the project's files, and the files it writes appear in the panel.
 
 Node 24+ is required (it runs `.ts` directly). On the page, the **Download executable** button gives
 you a ready Mach-O; the browser strips the executable bit and sets quarantine, so the page shows
@@ -265,6 +268,9 @@ npm run test:x64-clang   #   … and the same assembly via clang + lld-link
 npm run test:x64-encoding  # 987 x86-64 forms: bit for bit with clang
 npm run test:coff        # COFF object vs. clang, lld-link, own PE linker
 npm run test:x64-lib     # C ↔ HLA64 on Windows: .lib, .dll + import library (clang and lld-link; on Windows — also MSVC and SEH)
+npm run test:linux       # Linux x64: Linux and x64 programs + portable lesson programs in the x64 emulator (on Linux — natively too)
+npm run test:linux-clang #   … and the same assembly via clang + lld (zig cc outside Linux), and our .o linked by lld
+npm run test:linux-lib   # C ↔ HLA64 on Linux: .a, .so (PIE and not, copy relocations), cc -shared from our .o, HLA64 calling C
 npm run test:wasm        # WebAssembly: wasm32 programs + portable programs and lessons in Node's engine (+ binaryen wasm-as if installed)
 npm run check:wasm-page  # the page of a downloaded program in headless Chrome: over http and from disk
 npm run test:all         # everything in a row
@@ -317,9 +323,9 @@ built with `clang`, built with the built-in assembler and run on macOS, and exec
 ## Project structure
 
 ```
-src/lang/      HLA64 translator (frontend.ts — shared part, codegen.ts — AArch64, x64/ — Windows x64, wasm/ — WebAssembly)
-src/asm/       assembler + Mach-O linker; x64/ — x86-64 assembler; coff/ — COFF, PE, .lib; wasm/ — WAT → .wasm
-src/emu/       ARM64 emulator; x64/ — x86-64 emulator and PE loader
+src/lang/      HLA64 translator (frontend.ts — shared part, codegen.ts — AArch64, x64/ — Windows and Linux x64, wasm/ — WebAssembly)
+src/asm/       assembler + Mach-O linker; x64/ — x86-64 assembler; coff/ — COFF, PE, .lib; elf/ — ELF .o, linker, .a, glibc exports; wasm/ — WAT → .wasm
+src/emu/       ARM64 emulator; x64/ — x86-64 emulator, PE and ELF loaders
 src/wasm/      the system of WebAssembly programs: JavaScript runtime, the C functions it gives, the page of a downloaded program
 src/cli.ts     command line
 web/           page sources (template.html, main.ts, worker.ts; sw.js — the PWA service worker)
@@ -327,6 +333,6 @@ assets/        icon (icon.svg) and PWA PNG icons (npm run build:icons regenerate
 dist/hla64.html  the built page (not committed: npm run build:web)
 dist/pages/    PWA for GitHub Pages: index.html, hla64.html, sw.js, manifest, icons
 examples/      examples (.hla + .expected)
-tests/         run.ts, encoding.ts, fuzz.ts, cases/; x64.ts, x64-lib.ts, encoding-x64.ts, coff-x64.ts, x64/; wasm.ts, wasm/
-docs/          language reference, lessons (docs/lessons), Windows x64 (docs/windows.md), WebAssembly (docs/wasm.md)
+tests/         run.ts, encoding.ts, fuzz.ts, cases/; x64.ts, x64-lib.ts, encoding-x64.ts, coff-x64.ts, x64/; linux.ts, linux-lib.ts, linux/; wasm.ts, wasm/
+docs/          language reference, lessons (docs/lessons), Windows x64 (docs/windows.md), Linux x64 (docs/linux.md), WebAssembly (docs/wasm.md)
 ```

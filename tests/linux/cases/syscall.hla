@@ -1,0 +1,19 @@
+// Linux system calls: syscall(number, arguments...) puts the number in rax and up to six arguments
+// in rdi, rsi, rdx, r10, r8, r9, then runs the syscall instruction (the kernel changes rax, rcx, r11).
+// The numbers are Linux's: 1 write, 39 getpid, 231 exit_group.
+rodata msg = "hello from write(2)\n"
+
+fn write(text, len) {
+    return syscall(1, 1, text, len)
+}
+
+fn main() {
+    let n = write(msg, 20)
+    let p = msg
+    let z = 3
+    syscall(1, 1, p + 11, n - 11, z * 2, z, z + 1)     // the extra arguments go to r10, r8, r9
+    let pid = syscall(39)
+    if pid > 0 { write("getpid works\n", 13) }
+    syscall(231, n - 17)                               // exit_group(3): the process ends here
+    write("not reached\n", 12)
+}

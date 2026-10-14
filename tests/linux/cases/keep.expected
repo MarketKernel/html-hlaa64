@@ -1,0 +1,7 @@
+calls in between
+a=7 b=100
+x=1.50 y=2.25
+4 107 28 3.3750
+scale: a C call while v is in xmm6
+scale = 9.00, x = 1.50
+b=106 x=12.0 a=7

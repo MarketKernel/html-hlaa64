@@ -700,10 +700,13 @@ export abstract class CodeGenBase {
     return s?.k === 'alias' && (s as { auto?: number }).auto !== undefined;
   }
 
-  /** a hidden frame slot = e; the slot as an expression */
+  /** a hidden frame slot = e; the slot as an expression (a double stays a double: an f64 slot) */
   hoist(e: Expr): Expr {
     const name = `$h${++this.hoistN}`;
-    this.spillVar(name, this.isUnsigned(e), e.t);
+    if (this.isFloat(e)) {
+      this.declareLocal({ k: 'local', name, ty: { name: 'f64', count: null, t: e.t }, init: null, t: e.t });
+      (this.scopes[this.scopes.length - 1].get(name) as Extract<Sym, { k: 'local' }>).spilled = true;
+    } else this.spillVar(name, this.isUnsigned(e), e.t);
     this.genAssign({ k: 'name', name, t: e.t }, '=', e, e.t);
     this.resetTemps();
     return { k: 'name', name, t: e.t };

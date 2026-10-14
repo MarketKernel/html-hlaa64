@@ -18,6 +18,7 @@ npm-debug.log*
 *.o
 *.a
 *.dylib
+*.so
 *.obj
 *.lib
 *.dll

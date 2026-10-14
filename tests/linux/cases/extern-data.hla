@@ -1,0 +1,15 @@
+// glibc's variables (stdout, stderr) and the addresses of C functions come through the GOT:
+// mov rax, qword ptr [rip + stdout@GOTPCREL] gives the address of the variable
+extern fputs, fflush, fprintf(f, fmt, ...), puts, stdout, stderr
+
+fn main() {
+    let out = u64[&stdout]                 // the FILE * in glibc's stdout
+    fputs("fputs to stdout\n", out)
+    fprintf(out, "fprintf to stdout: %d\n", 42)
+    fprintf(u64[&stderr], "to stderr (not part of the expected output)\n")
+    fflush(out)
+    let f = &puts                          // a C function as a value
+    f("called through a register")
+    let g = puts
+    g("an extern used as a value is its address too")
+}

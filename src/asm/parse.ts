@@ -12,7 +12,8 @@ export class AsmError extends Error {
 // ---------------------------------------------------------------------------
 // expressions (integers and symbol references)
 // ---------------------------------------------------------------------------
-export type Reloc = 'PAGE' | 'PAGEOFF' | 'GOTPAGE' | 'GOTPAGEOFF' | null;
+// PAGE…: Mach-O arm64; GOTPCREL, PLT: ELF x86-64 (`[rip + sym@GOTPCREL]`, `call sym@PLT`)
+export type Reloc = 'PAGE' | 'PAGEOFF' | 'GOTPAGE' | 'GOTPAGEOFF' | 'GOTPCREL' | 'PLT' | null;
 
 /** A value: constant `add` plus optional symbol, with optional @-relocation modifier. */
 export interface Value {
@@ -68,7 +69,7 @@ export function parseReg(t: string): Reg | null {
 export function parseValue(text: string, line: number): Value {
   let s = text.trim();
   let reloc: Reloc = null;
-  const at = /@(PAGE|PAGEOFF|GOTPAGE|GOTPAGEOFF)$/i.exec(s);
+  const at = /@(PAGE|PAGEOFF|GOTPAGE|GOTPAGEOFF|GOTPCREL|PLT)$/i.exec(s);
   if (at) {
     reloc = at[1].toUpperCase() as Reloc;
     s = s.slice(0, at.index).trim();

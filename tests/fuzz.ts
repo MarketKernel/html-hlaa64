@@ -2,8 +2,8 @@
 // Random 64-bit integer expressions over register variables are compiled, assembled
 // with the built-in assembler and executed natively and in the emulator; every
 // result is compared with an independent BigInt evaluator. The same programs are also
-// compiled for x86-64 Windows and executed in the x64 emulator, and for wasm32 and executed
-// by Node's WebAssembly engine.
+// compiled for x86-64 Windows and Linux and executed in the x64 emulator, and for wasm32 and
+// executed by Node's WebAssembly engine.
 //   node tests/fuzz.ts [seed] [programs]
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, chmodSync } from 'node:fs';
@@ -16,6 +16,8 @@ import { compileX64 } from '../src/lang/x64/codegen.ts';
 import { assembleX } from '../src/asm/x64/assembler.ts';
 import { linkPE } from '../src/asm/coff/pe.ts';
 import { runPE } from '../src/emu/x64/pe-loader.ts';
+import { linkElf } from '../src/asm/elf/link.ts';
+import { runElf } from '../src/emu/x64/elf-loader.ts';
 import { compileWasm } from '../src/lang/wasm/codegen.ts';
 import { assembleWasm } from '../src/asm/wasm/assembler.ts';
 import { runWasm } from '../src/wasm/runtime.ts';
@@ -120,6 +122,7 @@ for (let p = 0; p < programs; p++) {
       const probe = ['fn check(got, want, id) {}', 'fn main() {', ...VARS.map((v) => `let ${v} = 1`), `check(${e.s}, 0, 0)`, '}'].join('\n');
       compile(probe);
       compileX64(probe);
+      compileX64(probe, { os: 'linux' });
       compileWasm(probe);
     } catch (err) {
       if (/too complex/.test((err as Error).message)) tooComplex++; else { console.log('compile error:', (err as Error).message, '\n  ', e.s); compileErrors++; }
@@ -151,6 +154,9 @@ for (let p = 0; p < programs; p++) {
   report('emu', emu);
   report('x64', x64.stdout + (x64.error ? `\nx64 emulator: ${x64.error}\n` : ''));
   if (x64.error) console.log(`p${p}: x64 emulator: ${x64.error}`);
+  const linux = runElf(linkElf(assembleX(compileX64(src, { os: 'linux' }).asm)).bytes);
+  report('linux', linux.stdout + (linux.error ? `\nx64 emulator (Linux): ${linux.error}\n` : ''));
+  if (linux.error) console.log(`p${p}: x64 emulator (Linux): ${linux.error}`);
   const wasm = runWasm(assembleWasm(compileWasm(src).asm).bytes);
   report('wasm', wasm.stdout + (wasm.error ? `\nwasm: ${wasm.error}\n` : ''));
   if (native !== emu) console.log(`p${p}: native and emulator outputs differ`);

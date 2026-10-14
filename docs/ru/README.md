@@ -1,4 +1,4 @@
-# HLA64 — ассемблер с синтаксическим сахаром для Apple Silicon, Windows x64 и WebAssembly, целиком на TypeScript
+# HLA64 — ассемблер с синтаксическим сахаром для Apple Silicon, Windows x64, Linux x64 и WebAssembly, целиком на TypeScript
 
 <!-- languages -->
 <h3 align="center">
@@ -91,9 +91,10 @@ SSE-инструкции x86-64 (пока без SIMD-векторов) и ин�
 | `src/lang` | лексер, парсер и генератор кода HLA64 → ассемблер AArch64 |
 | `src/asm` | ассемблер (≈140 мнемоник + все `b.cond`, директивы, числовые метки); объектные файлы `.o` с релокациями, статические `.a` и динамические `.dylib` библиотеки; линковщик Mach-O: GOT/стабы для libSystem, rebase/bind опкоды dyld, таблица символов, **ad-hoc подпись кода** (SHA-256 CodeDirectory — без неё ядро не запустит arm64-бинарник) |
 | `src/emu` | эмулятор ARM64: загружает получившийся Mach-O, применяет bind-опкоды, подставляет libSystem на JS (`printf`, `puts`, `malloc`, `qsort` с обратным вызовом и т. д.) и исполняет машинный код |
-| `web/` → `dist/hla64.html` | один самодостаточный HTML-файл: редактор с подсветкой, живая трансляция, листинг машинного кода с разбором битов, инспектор Mach-O / PE, консоль эмулятора, сборка программы или библиотеки для C (`.a` / `.dylib` или `.lib` / `.dll` + `.h`) и скачивание результата; платформа переключается в самом верху |
+| `web/` → `dist/hla64.html` | один самодостаточный HTML-файл: редактор с подсветкой, живая трансляция, листинг машинного кода с разбором битов, инспектор Mach-O / PE / ELF, консоль эмулятора, сборка программы или библиотеки для C (`.a` / `.dylib`, `.lib` / `.dll` или `.a` / `.so` + `.h`) и скачивание результата; платформа переключается в самом верху |
 | `src/lang/x64`, `src/asm/x64`, `src/asm/coff`, `src/emu/x64` | вторая платформа — **Windows x64**: генератор кода Win64, ассемблер x86-64 (Intel, диалект LLVM), объектные файлы COFF, линковщик PE (`.exe`/`.dll`), статические библиотеки и библиотеки импорта `.lib`, эмулятор x64 с загрузчиком PE. Подробно — [docs/windows.md](windows.md) |
-| `src/lang/wasm`, `src/asm/wasm`, `src/wasm` | третья платформа — **WebAssembly (wasm32)**: генератор кода для стековой машины (регистры — локальные переменные, циклы — блоки), ассемблер WAT с проверкой типов, рантайм на JavaScript как система (`printf`, `malloc`, `fopen`… — импорты); программы исполняются нативно в браузере и в Node и скачиваются как `.wasm` + страница с консолью. Подробно — [docs/wasm.md](wasm.md) |
+| `src/lang/x64` (System V), `src/asm/elf`, `src/emu/x64/elf-loader.ts` | **Linux x64**: тот же генератор кода x86-64 с соглашением System V и `syscall`, объектные файлы ELF, линковщик ELF (исполняемые файлы и `.so`, динамическая линковка к glibc), статические библиотеки GNU `ar`, загрузчик ELF с glibc на JS в эмуляторе x64. Подробно — [docs/linux.md](linux.md) |
+| `src/lang/wasm`, `src/asm/wasm`, `src/wasm` | **WebAssembly (wasm32)**: генератор кода для стековой машины (регистры — локальные переменные, циклы — блоки), ассемблер WAT с проверкой типов, рантайм на JavaScript как система (`printf`, `malloc`, `fopen`… — импорты); программы исполняются нативно в браузере и в Node и скачиваются как `.wasm` + страница с консолью. Подробно — [docs/wasm.md](wasm.md) |
 
 ## Быстрый старт
 
@@ -112,6 +113,8 @@ node src/cli.ts obj app.hla                    # объектный файл, ч
 
 node src/cli.ts run examples/hello.hla --target x64-windows    # Windows x64 (вне Windows — в эмуляторе x64)
 node src/cli.ts build examples/hello.hla --target x64-windows  # hello.exe
+node src/cli.ts run examples/hello.hla --target x64-linux      # Linux x64 (вне Linux x86-64 — в эмуляторе x64)
+node src/cli.ts build examples/hello.hla --target x64-linux    # hello (ELF, связан с glibc)
 node src/cli.ts run examples/hello.hla --target wasm32         # WebAssembly: запуск в движке Node
 node src/cli.ts build examples/hello.hla --target wasm32       # hello.wasm + hello.html (страница с консолью) + hello.mjs (Node)
 
@@ -131,7 +134,7 @@ open dist/hla64.html                           # работает с file://, б
 за файлом, — удалять и перетаскивать с диска), **Projects** (свои проекты для текущей платформы)
 и **Examples** (встроенные примеры; изменённый пример помечен точкой и сбрасывается к оригиналу).
 Проекты хранятся в IndexedDB этого браузера, **Download project .zip** скачивает все файлы проекта.
-Программа с `include "std/file.hla"` (одинаковые функции файлов для macOS и Windows) читает файлы
+Программа с `include "std/file.hla"` (одинаковые функции файлов для macOS, Windows и Linux) читает файлы
 проекта, а записанные ею файлы появляются в панели.
 
 Нужен Node 24+ (запускает `.ts` напрямую). На странице кнопка **Download executable** отдаёт
@@ -261,6 +264,9 @@ npm run test:x64-clang   #   … и тот же ассемблер через cl
 npm run test:x64-encoding  # 987 форм x86-64: бит-в-бит с clang
 npm run test:coff        # COFF-объект против clang, lld-link, свой линковщик PE
 npm run test:x64-lib     # C ↔ HLA64 на Windows: .lib, .dll + библиотека импорта (clang и lld-link; на Windows — ещё MSVC и SEH)
+npm run test:linux       # Linux x64: программы для Linux и x64 + переносимые программы уроков в эмуляторе x64 (на Linux — ещё и нативно)
+npm run test:linux-clang #   … и тот же ассемблер через clang + lld (вне Linux — zig cc), и наш .o, слинкованный lld
+npm run test:linux-lib   # C ↔ HLA64 на Linux: .a, .so (PIE и без, copy relocations), cc -shared из нашего .o, HLA64 вызывает C
 npm run test:wasm        # WebAssembly: программы для wasm32 + переносимые программы и уроки в движке Node (+ binaryen wasm-as, если установлен)
 npm run check:wasm-page  # страница скачанной программы в headless Chrome: по http и с диска
 npm run test:all         # всё подряд
@@ -313,9 +319,9 @@ npm run test:ci          # то, что гоняет CI на Linux (части, 
 ## Структура проекта
 
 ```
-src/lang/      транслятор HLA64 (frontend.ts — общая часть, codegen.ts — AArch64, x64/ — Windows x64, wasm/ — WebAssembly)
-src/asm/       ассемблер + линковщик Mach-O; x64/ — ассемблер x86-64; coff/ — COFF, PE, .lib; wasm/ — WAT → .wasm
-src/emu/       эмулятор ARM64; x64/ — эмулятор x86-64 и загрузчик PE
+src/lang/      транслятор HLA64 (frontend.ts — общая часть, codegen.ts — AArch64, x64/ — Windows и Linux x64, wasm/ — WebAssembly)
+src/asm/       ассемблер + линковщик Mach-O; x64/ — ассемблер x86-64; coff/ — COFF, PE, .lib; elf/ — ELF .o, линковщик, .a, экспорт glibc; wasm/ — WAT → .wasm
+src/emu/       эмулятор ARM64; x64/ — эмулятор x86-64, загрузчики PE и ELF
 src/wasm/      система программ WebAssembly: рантайм на JavaScript, его функции C, страница скачанной программы
 src/cli.ts     командная строка
 web/           исходники страницы (template.html, main.ts, worker.ts; sw.js — service worker PWA)
@@ -323,6 +329,6 @@ assets/        иконка (icon.svg) и PNG-иконки PWA (npm run build:ic
 dist/hla64.html  собранная страница (не коммитится: npm run build:web)
 dist/pages/    PWA для GitHub Pages: index.html, hla64.html, sw.js, манифест, иконки
 examples/      примеры (.hla + .expected)
-tests/         run.ts, encoding.ts, fuzz.ts, cases/; x64.ts, x64-lib.ts, encoding-x64.ts, coff-x64.ts, x64/; wasm.ts, wasm/
-docs/          справочник языка, уроки (docs/lessons), Windows x64 (docs/windows.md), WebAssembly (docs/wasm.md)
+tests/         run.ts, encoding.ts, fuzz.ts, cases/; x64.ts, x64-lib.ts, encoding-x64.ts, coff-x64.ts, x64/; linux.ts, linux-lib.ts, linux/; wasm.ts, wasm/
+docs/          справочник языка, уроки (docs/lessons), Windows x64 (docs/windows.md), Linux x64 (docs/linux.md), WebAssembly (docs/wasm.md)
 ```

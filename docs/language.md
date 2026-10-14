@@ -7,7 +7,7 @@
 </h3>
 <!-- /languages -->
 
-HLA64 is an AArch64 (Apple Silicon, macOS), x86-64 (Windows) and WebAssembly assembler with syntactic sugar,
+HLA64 is an AArch64 (Apple Silicon, macOS), x86-64 (Windows, Linux) and WebAssembly assembler with syntactic sugar,
 not a separate language. Every line of a function is either a **processor instruction**, which goes
 into the listing as is (`csel x0, a, b, gt`, `ldrb w9, [p], #1`), or **sugar**, which the translator
 expands into instructions: `if`, `while`, `for`, expressions `a = b + c * 4`, memory accesses
@@ -354,6 +354,11 @@ syscall(SYS_exit, 0)
 
 Predefined: `SYS_exit, SYS_read, SYS_write, SYS_open, SYS_close, SYS_getpid, SYS_mmap, ...`.
 
+On Linux (`--target x64-linux`) the same names hold Linux's numbers (`SYS_write` is 1, `SYS_exit` 60), so
+a call written with them works on both systems; `syscall` puts the number in `rax` and the arguments in
+`rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9` ([linux.md](linux.md)). Windows has no `syscall()`: its system calls
+are undocumented, the WinAPI is the interface.
+
 ## Built-in functions
 
 | function | code |
@@ -493,8 +498,8 @@ skipped, so every file can include whatever it needs itself. Example:
 ## Files: std/file.hla
 
 A built-in library for reading and writing files. The functions are named and behave **the same on
-macOS and Windows**, so a program using them moves between platforms unchanged — you need neither
-macOS `syscall` nor WinAPI. You don't need to put it in your project or declare the functions with
+macOS, Windows and Linux**, so a program using them moves between platforms unchanged — you need neither
+`syscall` nor WinAPI. You don't need to put it in your project or declare the functions with
 `extern` — `include "std/file.hla"` is enough.
 
 | function | what it does | result |
@@ -593,12 +598,13 @@ The syntax of the original hlaa64 is accepted too: `alias a = X1;`, `set a = b +
 
 ## Platforms
 
-One language, three code generators: AArch64 for macOS (the default on macOS), x86-64 for Windows
-(`--target x64-windows`, the default on Windows) and WebAssembly (`--target wasm32`), which runs in
-the browser and in Node. Everything that doesn't name registers explicitly (`let`, data, structs,
-loops, C calls) carries over unchanged; register names, the built-in assembler and `syscall` are
-specific to each platform. Registers, the Win64 convention and the differences are described in
-[windows.md](windows.md); the registers `r0`–`r31`/`f0`–`f31`, the stack machine, structured control
+One language, three code generators for four platforms: AArch64 for macOS (the default on macOS), x86-64
+for Windows (`--target x64-windows`, the default on Windows) and for Linux (`--target x64-linux`, the
+default on Linux), and WebAssembly (`--target wasm32`), which runs in the browser and in Node. Everything
+that doesn't name registers explicitly (`let`, data, structs, loops, C calls) carries over unchanged;
+register names, the built-in assembler and `syscall` are specific to each platform. Registers, the Win64
+convention and the differences are described in [windows.md](windows.md), the System V convention and
+Linux's ELF files in [linux.md](linux.md); the registers `r0`–`r31`/`f0`–`f31`, the stack machine, structured control
 flow and the JavaScript runtime of WebAssembly — in [wasm.md](wasm.md).
 
 ## Limitations

@@ -1,9 +1,9 @@
 // Files that come with the translator: `include "std/file.hla"` finds them when the project has no
 // file of that name (a project's own std/file.hla wins). They are plain HLA64 without register names,
-// so the same text works on macOS (libSystem) and Windows (msvcrt.dll).
+// so the same text works on macOS (libSystem), Windows (msvcrt.dll) and Linux (glibc).
 
-const FILE_HLA = `// std/file.hla — reading and writing files, the same on macOS and Windows (built into HLA64).
-// Built on the C runtime (fopen/fread/fwrite/fclose exist in libSystem and in msvcrt.dll alike);
+const FILE_HLA = `// std/file.hla — reading and writing files, the same on macOS, Windows and Linux (built into HLA64).
+// Built on the C runtime (fopen/fread/fwrite/fclose exist in libSystem, msvcrt.dll and glibc alike);
 // files are always opened in binary mode, so Windows does not turn \\n into \\r\\n.
 // Results: a byte count, or -1 when the file cannot be opened; file_open returns 0 on failure.
 extern fopen, fclose, fread, fwrite, fseek, ftell

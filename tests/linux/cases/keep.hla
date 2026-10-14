@@ -1,0 +1,29 @@
+// rsi, rdi and every xmm register are free for a C function to change (System V), but HLA64 code
+// keeps the same rules on Linux and on Windows: the translator saves the rsi, rdi and xmm6-xmm15
+// that a function names around each of its calls.
+extern printf(fmt, ...), puts, strlen
+
+fn scale(v: xmm6, k: auto) {          // k: auto, a callee-saved register (a bare parameter stays in rdi)
+    puts("scale: a C call while v is in xmm6")
+    xmm0 = v * float(k)
+}
+
+fn main() {
+    let a: rsi = 7
+    let b: rdi = 100
+    let x: xmm6 = 1.5
+    let y: xmm9 = 2.25
+    puts("calls in between")
+    printf("a=%lld b=%lld\n", a, b)            // rdi and rsi are argument registers of this call
+    printf("x=%.2f y=%.2f\n", x, y)
+    let n = strlen("four")
+    printf("%lld %lld %lld %.4f\n", n, a + b, a * n, x * y)
+    xmm7 = scale(y, 4)
+    printf("scale = %.2f, x = %.2f\n", xmm7, x)
+    for i in 0..3 {
+        let k = strlen("ab")
+        b += k
+        x = x * 2.0
+    }
+    printf("b=%lld x=%.1f a=%lld\n", b, x, a)
+}

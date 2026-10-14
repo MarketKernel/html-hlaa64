@@ -1,0 +1,15 @@
+// counter.hla — a library variable and a table holding its address. A program built from code that is not
+// position independent copies the variable into itself (a copy relocation): the library must then use that
+// copy, through its GOT and in the table.
+export data counter: i64 = 0
+export data where: ptr[1] = [&counter]
+
+export fn bump() {
+    counter++
+}
+
+// 1 when the table points at the variable the library uses
+export fn same() -> i64 {
+    let p = u64[&where]
+    return p == &counter
+}

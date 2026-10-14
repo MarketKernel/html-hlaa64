@@ -11,13 +11,15 @@ export type XOperand =
 
 type Mem = Extract<XOperand, { k: 'mem' }>;
 
-/** A symbolic field: pc-relative (`rel`, relative to the end of the instruction) or absolute. */
+/** A symbolic field: pc-relative (`rel`, relative to the end of the instruction), absolute, or the
+ *  pc-relative address of the symbol's GOT entry (`got`, ELF `[rip + sym@GOTPCREL]`). */
 export interface XFixup {
   off: number;          // offset of the field inside the instruction
   size: 1 | 4 | 8;
-  kind: 'rel' | 'abs';
+  kind: 'rel' | 'abs' | 'got';
   sym: string;
   add: bigint;
+  branch?: boolean;     // the target of call/jmp (ELF: R_X86_64_PLT32 when the symbol is external)
 }
 
 export interface XEncoded {
@@ -95,10 +97,12 @@ function parseMem(body: string, size: Mem['size'], line: number, text: string): 
     const v = parseValue(t, line);
     if (v.sym && n) throw new AsmError(`cannot subtract a symbol in '${text}'`, line);
     if (v.sym && disp.sym) throw new AsmError(`two symbols in '${text}'`, line);
-    disp = { sym: disp.sym ?? v.sym, add: disp.add + (n ? -v.add : v.add), reloc: null };
+    if (v.reloc && v.reloc !== 'GOTPCREL') throw new AsmError(`@${v.reloc} cannot be used in a memory operand: '${text}'`, line);
+    disp = { sym: disp.sym ?? v.sym, add: disp.add + (n ? -v.add : v.add), reloc: disp.reloc ?? v.reloc };
   }
   if (index && index.n === 4) throw new AsmError(`rsp cannot be an index register: '${text}'`, line);
   if (base === 'rip' && index) throw new AsmError(`rip-relative addressing cannot have an index: '${text}'`, line);
+  if (disp.reloc && base !== 'rip') throw new AsmError(`@GOTPCREL needs rip-relative addressing: [rip + sym@GOTPCREL] in '${text}'`, line);
   return { k: 'mem', size, base, index, scale, disp };
 }
 
@@ -154,7 +158,7 @@ class XEnc {
     let rexW = p.w ? 1 : 0, rexR = 0, rexX = 0, rexB = 0;
     let modrm: number | null = null, sib: number | null = null;
     let disp: number[] = [];
-    let dispFix: { sym: string; add: bigint } | null = null;
+    let dispFix: { sym: string; add: bigint; got: boolean } | null = null;
     if (p.reg !== undefined) rexR = (p.reg >> 3) & 1;
     if (p.rm) {
       const reg3 = (p.reg ?? 0) & 7;
@@ -167,7 +171,7 @@ class XEnc {
           modrm = (reg3 << 3) | 5;
           disp = [0, 0, 0, 0];
           if (!m.disp.sym) this.err('rip-relative operand needs a symbol');
-          dispFix = { sym: m.disp.sym, add: m.disp.add };
+          dispFix = { sym: m.disp.sym, add: m.disp.add, got: m.disp.reloc === 'GOTPCREL' };
         } else {
           if (m.disp.sym) this.err(`absolute address of '${m.disp.sym}': use [rip + ${m.disp.sym}]`);
           const d = m.disp.add;
@@ -211,11 +215,12 @@ class XEnc {
       const immOff = bytes.length;
       if (p.imm.v.sym) {
         if (p.imm.size !== 8 && p.imm.size !== 4) this.err('symbolic immediates need 32 or 64 bits');
+        if (p.imm.v.reloc) this.err(`@${p.imm.v.reloc} is not allowed in an immediate`);
         fixups.push({ off: immOff, size: p.imm.size, kind: 'abs', sym: p.imm.v.sym, add: p.imm.v.add });
         bytes.push(...new Array(p.imm.size).fill(0));
       } else bytes.push(...le(p.imm.v.add, p.imm.size));
     }
-    if (dispFix) fixups.push({ off: dispOff, size: 4, kind: 'rel', sym: dispFix.sym, add: dispFix.add });
+    if (dispFix) fixups.push({ off: dispOff, size: 4, kind: dispFix.got ? 'got' : 'rel', sym: dispFix.sym, add: dispFix.add });
     return { bytes, fixups };
   }
 }
@@ -243,7 +248,10 @@ export function encodeX(mn: string, ops: XOperand[], line: number): XEncoded {
     e.count(1);
     const cond = mn === 'jmp' ? null : XCOND[mn.slice(1)];
     const o = ops[0];
-    if (o.k === 'imm') return { bytes: [], fixups: [], jump: { cond, target: o.v } };
+    if (o.k === 'imm') {
+      if (o.v.reloc && o.v.reloc !== 'PLT') e.err(`only @PLT is allowed on a jump target`);
+      return { bytes: [], fixups: [], jump: { cond, target: o.v } };
+    }
     if (cond !== null) e.err('conditional jumps need a label');
     return e.emit({ op: [0xff], reg: 4, rm: e.rm(0) });
   }
@@ -252,7 +260,8 @@ export function encodeX(mn: string, ops: XOperand[], line: number): XEncoded {
     const o = ops[0];
     if (o.k === 'imm') {
       if (!o.v.sym) e.err('call needs a symbol');
-      return { bytes: [0xe8, 0, 0, 0, 0], fixups: [{ off: 1, size: 4, kind: 'rel', sym: o.v.sym, add: o.v.add }] };
+      if (o.v.reloc && o.v.reloc !== 'PLT') e.err(`call ${o.v.sym}@${o.v.reloc}: only @PLT is allowed here`);
+      return { bytes: [0xe8, 0, 0, 0, 0], fixups: [{ off: 1, size: 4, kind: 'rel', sym: o.v.sym, add: o.v.add, branch: true }] };
     }
     return e.emit({ op: [0xff], reg: 2, rm: e.rm(0) });
   }
@@ -462,6 +471,7 @@ export function encodeX(mn: string, ops: XOperand[], line: number): XEncoded {
     case 'pause': return { bytes: [0xf3, 0x90], fixups: [] };
     case 'mfence': return { bytes: [0x0f, 0xae, 0xf0], fixups: [] };
     case 'cpuid': return { bytes: [0x0f, 0xa2], fixups: [] };
+    case 'syscall': return { bytes: [0x0f, 0x05], fixups: [] };
     case 'rdtsc': return { bytes: [0x0f, 0x31], fixups: [] };
     case 'leave': return { bytes: [0xc9], fixups: [] };
 

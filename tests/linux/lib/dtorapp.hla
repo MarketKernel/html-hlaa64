@@ -1,0 +1,6 @@
+// dtorapp.hla — an HLA64 program using a C shared library that has a destructor
+extern printf(fmt, ...), dtor_hello
+
+fn main() {
+    printf("dtor_hello = %lld\n", dtor_hello())
+}

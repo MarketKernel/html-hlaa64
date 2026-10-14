@@ -3,7 +3,7 @@
   "version": "0.3.0",
   "private": true,
   "type": "module",
-  "description": "HLA64: ARM64, x86-64 and WebAssembly assembly with syntactic sugar (write instructions directly, use for/if/expressions where convenient) for macOS, Windows and the browser; translator, assembler, linker and emulator, all in TypeScript",
+  "description": "HLA64: ARM64, x86-64 and WebAssembly assembly with syntactic sugar (write instructions directly, use for/if/expressions where convenient) for macOS, Windows, Linux and the browser; translator, assembler, linker and emulator, all in TypeScript",
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "node tests/run.ts && node tests/pair-memory.ts",
@@ -24,9 +24,12 @@
     "test:coff": "node tests/coff-x64.ts",
     "test:x64-lib": "node tests/x64-lib.ts",
     "test:wasm": "node tests/wasm.ts",
+    "test:linux": "node tests/linux.ts",
+    "test:linux-clang": "node tests/linux.ts --clang",
+    "test:linux-lib": "node tests/linux-lib.ts",
     "check:wasm-page": "node tools/check-wasm-page.ts",
-    "test:ci": "node tests/run.ts && node tests/pair-memory.ts && node tests/lessons.ts && node tests/x64.ts && node tests/wasm.ts && node tests/include.ts && node tests/fuzz.ts 1 4",
-    "test:all": "node tests/run.ts && node tests/pair-memory.ts && node tests/lessons.ts && node tests/x64.ts && node tests/wasm.ts && node tests/include.ts && node tests/fuzz.ts 1 4 && node tests/encoding.ts && node tests/encoding-x64.ts && node tests/coff-x64.ts && node tests/x64-lib.ts",
+    "test:ci": "node tests/run.ts && node tests/pair-memory.ts && node tests/lessons.ts && node tests/x64.ts && node tests/linux.ts && node tests/wasm.ts && node tests/include.ts && node tests/fuzz.ts 1 4",
+    "test:all": "node tests/run.ts && node tests/pair-memory.ts && node tests/lessons.ts && node tests/x64.ts && node tests/linux.ts && node tests/wasm.ts && node tests/include.ts && node tests/fuzz.ts 1 4 && node tests/encoding.ts && node tests/encoding-x64.ts && node tests/coff-x64.ts && node tests/x64-lib.ts && node tests/linux-lib.ts",
     "test:include": "node tests/include.ts"
   },
   "devDependencies": {

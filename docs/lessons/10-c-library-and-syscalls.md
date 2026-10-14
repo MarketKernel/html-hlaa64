@@ -218,6 +218,11 @@ fn main() {
 Hello straight from the kernel!
 ```
 
+The same program works on Linux x86-64 (`--target x64-linux`): there the instruction is `syscall`, the
+number goes in `rax` and the arguments in `rdi`, `rsi`, `rdx`, and `SYS_write`, `SYS_exit` hold Linux's
+numbers (1 and 60 instead of macOS's 4 and 1). Windows has no `syscall()`: programs there talk to the
+system through WinAPI functions.
+
 `write` needs the number of **bytes**. For a string, `len(message)` gives exactly the number of bytes
 without the terminating zero (in UTF-8 a non-Latin letter, such as a Cyrillic one, takes 2 bytes, so a
 string can have fewer characters than bytes). `sizeof(message)` is the same plus one byte for the zero.

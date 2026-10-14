@@ -1,15 +1,21 @@
-// HLA64 → x86-64 assembly for Windows (Win64 ABI, LLVM Intel syntax, COFF).
+// HLA64 → x86-64 assembly (LLVM Intel syntax) for Windows (Win64 ABI, COFF) and Linux (System V ABI, ELF).
 //
 // Conventions:
-//  * r10, r11 are compiler scratch registers; xmm4, xmm5 are FP scratch.
-//  * Arguments: rcx, rdx, r8, r9 / xmm0..xmm3 (positional), the rest on the stack after
-//    the 32-byte shadow space. Result in rax / xmm0.
+//  * r10, r11 are compiler scratch registers; xmm4, xmm5 are FP scratch on Windows, xmm15 down to xmm8 on
+//    Linux (where xmm4-xmm7 carry arguments).
+//  * Windows: arguments in rcx, rdx, r8, r9 / xmm0..xmm3 (positional), the rest on the stack after
+//    the 32-byte shadow space. Linux: integers in rdi, rsi, rdx, rcx, r8, r9 and doubles in xmm0..xmm7,
+//    each class counted on its own, the rest on the stack; `al` = the number of xmm arguments before
+//    a variadic call. Result in rax / xmm0.
 //  * Functions address their frame from rsp (no frame pointer); the outgoing-argument
-//    area is allocated once in the prologue. Unwind info is emitted with .seh_* directives.
-//  * Non-volatile registers (rbx, rbp, rsi, rdi, r12-r15, xmm6-xmm15) the body touches
-//    are saved automatically. `let i = 0` without a register picks one of them.
+//    area is allocated once in the prologue. Windows: unwind info from .seh_* directives.
+//  * Non-volatile registers the body touches are saved automatically: rbx, rbp, rsi, rdi, r12-r15,
+//    xmm6-xmm15 on Windows; rbx, rbp, r12-r15 on Linux. `let i = 0` without a register picks one of them.
+//    So that the same HLA64 code works on both, on Linux rsi, rdi and xmm6-xmm15 that a function names
+//    (and xmm temporaries) are kept across its calls: saved in the frame before a call, restored after.
 //  * extern functions are called directly (`call printf`); the linker turns that into a
-//    jmp [__imp_printf] thunk for DLL functions or a direct call for static C objects.
+//    jmp [__imp_printf] thunk for DLL functions or a direct call for static C objects (Windows), or a
+//    jmp [GOT] stub (Linux). On Linux the address of an extern comes from the GOT (sym@GOTPCREL).
 import { type Token } from '../lexer.ts';
 import { parse } from '../parser.ts';
 import { memSize, type BinOp, type Expr, type Item, type MemType, type Program, type Stmt } from '../ast.ts';
@@ -25,6 +31,15 @@ const BUILTINS = new Set([
 
 const ARG_GPR = ['rcx', 'rdx', 'r8', 'r9'];
 const NONVOL = [3, 6, 7, 12, 13, 14, 15, 5];          // rbx, rsi, rdi, r12-r15, rbp (auto pool order)
+const SYSV_GPR = ['rdi', 'rsi', 'rdx', 'rcx', 'r8', 'r9'];
+const SYSV_NONVOL = [3, 12, 13, 14, 15, 5];           // rbx, r12-r15, rbp
+const SYSCALL_GPR = ['rax', 'rdi', 'rsi', 'rdx', 'r10', 'r8', 'r9'];   // Linux: number, then six arguments
+// the system call numbers of x86-64 Linux, under the names macOS programs use (SYS_write is 4 on macOS, 1 here)
+const LINUX_SYSCALLS: Record<string, number> = {
+  SYS_read: 0, SYS_write: 1, SYS_open: 2, SYS_close: 3, SYS_lseek: 8, SYS_mmap: 9, SYS_mprotect: 10, SYS_munmap: 11,
+  SYS_ioctl: 16, SYS_pipe: 22, SYS_getpid: 39, SYS_fork: 57, SYS_execve: 59, SYS_exit: 60, SYS_wait4: 61, SYS_kill: 62,
+  SYS_chdir: 80, SYS_unlink: 87, SYS_getppid: 110, SYS_exit_group: 231,
+};
 const NAMES64 = ['rax', 'rcx', 'rdx', 'rbx', 'rsp', 'rbp', 'rsi', 'rdi', 'r8', 'r9', 'r10', 'r11', 'r12', 'r13', 'r14', 'r15'];
 const INV: Record<string, string> = { e: 'ne', ne: 'e', l: 'ge', ge: 'l', le: 'g', g: 'le', b: 'ae', ae: 'b', be: 'a', a: 'be', s: 'ns', ns: 's', p: 'np', np: 'p' };
 const PTR: Record<number, string> = { 1: 'byte', 2: 'word', 4: 'dword', 8: 'qword' };
@@ -35,19 +50,23 @@ export function x64IsReg(text: string): boolean {
   return !!r && (r.xmm || r.size === 8 || r.size === 4);
 }
 
+export type X64Os = 'windows' | 'linux';
+
 export interface X64CompileOptions {
   /** add the hla_start entry stub (programs); libraries leave it out */
   entry?: boolean;
+  /** the system: Windows (Win64 ABI, COFF sections) or Linux (System V ABI, ELF sections); Windows by default */
+  os?: X64Os;
 }
 
 export function compileX64(src: string, opts: X64CompileOptions = {}): CompileResult {
   const prog = parse(src, { isReg: x64IsReg });
-  return new X64Gen(src, prog, opts.entry ?? true).run();
+  return new X64Gen(src, prog, opts.entry ?? true, opts.os ?? 'windows').run();
 }
 
-export function compileLibraryX64(src: string, name: string): CompileResult & { header: string } {
+export function compileLibraryX64(src: string, name: string, opts: { os?: X64Os } = {}): CompileResult & { header: string } {
   const prog = parse(src, { isReg: x64IsReg });
-  const cg = new X64Gen(src, prog, false);
+  const cg = new X64Gen(src, prog, false, opts.os ?? 'windows', true);
   const r = cg.run();
   return { ...r, header: cg.header(name) };
 }
@@ -63,25 +82,43 @@ const sameReg = (a: string, b: string) => { const x = xreg(a), y = xreg(b); retu
 const fitsI32 = (v: bigint) => v >= -(1n << 31n) && v < 1n << 31n;
 
 interface X64Fn extends FnState {
-  maxStackArgs: number;     // outgoing stack arguments beyond the 4 register ones
+  maxStackArgs: number;     // outgoing stack argument slots (beyond the register ones)
   stgTop: number;           // staging slots in use (bytes)
   stgMax: number;
   pushDepth: number;
   pushMax: number;
   stackParams: { reg: string; idx: number }[];
   xmmAvoid: Set<number>;    // xmm registers named in the function or by global aliases
+  keep: string[];           // Linux: rsi, rdi, xmm6-xmm15 the function names, kept across its calls
+  keepGlobal: string[];     // Linux: the same registers held by global aliases: kept across calls into C only
 }
+
+/** where an argument goes: a register or an outgoing stack slot */
+type ArgPlace = { k: 'gpr'; r: string } | { k: 'xmm'; n: number } | { k: 'stack'; slot: number };
 
 class X64Gen extends CodeGenBase {
   readonly localPrefix = '.L';
   readonly builtins = BUILTINS;
   entryStub: boolean;
+  linux: boolean;
+  nonvol: number[];         // callee-saved general registers (the auto pool, in order)
   declare fn: X64Fn | null;
 
-  constructor(src: string, prog: Program, entry: boolean) {
-    super(src, prog, {});
+  /** Linux library: exported variables (labels), reached through the GOT */
+  gotData = new Set<string>();
+
+  constructor(src: string, prog: Program, entry: boolean, os: X64Os, library = false) {
+    super(src, prog, os === 'linux' ? LINUX_SYSCALLS : {});
     this.entryStub = entry;
+    this.linux = os === 'linux';
+    this.nonvol = this.linux ? SYSV_NONVOL : NONVOL;
+    // a C program built without PIE copies a shared library's variable into itself (a copy relocation)
+    // and the library must then use that copy: like -fPIC code, it goes through the GOT
+    if (this.linux && library) for (const it of prog.items) if (it.k === 'data' && it.exported && !it.ro) this.gotData.add(this.sym(it.name));
   }
+
+  viaGot(s: Sym | null | undefined): boolean { return !!s && s.k === 'data' && this.gotData.has(s.label); }
+  gotLoad(r64: string, label: string): void { this.emit(`mov ${r64}, qword ptr [rip + ${label}@GOTPCREL]`); }
 
   // ======================================================================
   // target hooks
@@ -92,13 +129,14 @@ class X64Gen extends CodeGenBase {
   isFp(reg: string): boolean { return R(reg).xmm; }
   regBytes(reg: string): number { const r = R(reg); return r.xmm ? 8 : r.size; }
   cTypeOfReg(r: string): string { const x = xreg(r); return !x ? 'int64_t' : x.xmm ? 'double' : x.size === 4 ? 'int32_t' : 'int64_t'; }
-  autoPool(): number[] { return NONVOL; }
+  autoPool(): number[] { return this.nonvol; }
   autoRegName(n: number, bits: 32 | 64): string { return bits === 64 ? NAMES64[n] : v32(NAMES64[n]); }
   zerofill(label: string, size: number, p2: number): string[] { return [`.p2align ${p2}`, `${label}:`, `    .zero ${size}`]; }
   jump(label: string): void { this.emit(`jmp ${label}`); }
   resetTemps(): void { this.temps.clear(); this.ftemps.clear(); }
 
   finish(): string {
+    if (this.linux) return this.finishLinux();
     const out: string[] = ['// Generated by HLA64 (TypeScript) — x86-64 / Windows', '.intel_syntax noprefix', '.text'];
     const main = this.globals.get('main');
     if (this.entryStub && main?.k === 'fn') {
@@ -126,7 +164,33 @@ class X64Gen extends CodeGenBase {
     return out.join('\n') + '\n';
   }
 
+  finishLinux(): string {
+    const out: string[] = ['// Generated by HLA64 (TypeScript) — x86-64 / Linux', '.intel_syntax noprefix', '.text'];
+    const main = this.globals.get('main');
+    if (this.entryStub && main?.k === 'fn') {
+      // the kernel starts the process with rsp at argc, then argv[], NULL, envp[]; glibc is initialized
+      // by the dynamic loader before it jumps here, and exit() flushes stdio. rdx is the loader's _dl_fini:
+      // registered like glibc's own start code does, it runs the destructors of shared libraries at exit
+      out.push('', '// process entry point: run main(argc, argv, envp), then exit through the C library', '.globl hla_start', '.type hla_start,@function', 'hla_start:',
+        '    xor ebp, ebp', '    mov rbx, rsp', '    and rsp, -16', '    test rdx, rdx', '    je .Lhla_start.main',
+        '    mov rdi, rdx', '    xor esi, esi', '    xor edx, edx', '    call __cxa_atexit', '.Lhla_start.main:');
+      if (main.nparams > 0) out.push('    mov rdi, qword ptr [rbx]', '    lea rsi, [rbx + 8]', '    lea rdx, [rsi + 8*rdi + 8]');
+      out.push('    call main', '    mov edi, eax', '    call exit', '    hlt');
+    }
+    out.push(...this.text);
+    const ro = [...this.cstrings, ...this.rodataLines, ...this.literal8];
+    if (ro.length) out.push('', '.section .rodata', ...ro);
+    // read-only data with addresses in it: fixed up at load time in a shared library, so writable until then
+    if (this.constPtrLines.length) out.push('', '.section .data.rel.ro,"aw",@progbits', ...this.constPtrLines);
+    if (this.dataLines.length) out.push('', '.data', ...this.dataLines);
+    if (this.bss.length) out.push('', '.bss', ...this.bss);
+    out.push('', '.section .note.GNU-stack,"",@progbits');
+    // GNU as (gcc) reads `//` after code as a division: such comments become `#` ones; whole-line `//` stays
+    return out.map(hashComment).join('\n') + '\n';
+  }
+
   headerApi(libName: string): { pre: string[]; api: string } {
+    if (this.linux) return super.headerApi(libName);
     const m = libName.toUpperCase().replace(/[^A-Z0-9]/g, '_');
     return {
       pre: [
@@ -143,6 +207,7 @@ class X64Gen extends CodeGenBase {
   }
 
   headerStaticAssert(libName: string, cond: string, msg: string): string {
+    if (this.linux) return super.headerStaticAssert(libName, cond, msg);
     return `${libName.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_STATIC_ASSERT(${cond}, "${msg}");`;
   }
 
@@ -183,33 +248,52 @@ class X64Gen extends CodeGenBase {
     for (const m of fnSrc.matchAll(/\bxmm(\d+)\b/gi)) xmmAvoid.add(Number(m[1]));
     for (const s of this.globals.values()) if (s.k === 'alias' && this.isFp(s.reg)) xmmAvoid.add(this.regNum(s.reg));
     const isMain = it.name === 'main';
+    // Linux: rsi, rdi and xmm6-xmm15 named in the function (or by global aliases) survive its calls
+    const keep: string[] = [], keepGlobal: string[] = [];
+    if (this.linux) {
+      const code = fnSrc.replace(/"(\\.|[^"\\])*"|'(\\.|[^'\\])*'|\/\/.*$/gm, '');     // names in comments and strings do not count
+      const gp = new Set<number>(), xs = new Set<number>(), globalRegs = new Set<string>();
+      for (const m of code.matchAll(/\b(rsi|esi|si|sil|rdi|edi|di|dil)\b/gi)) gp.add(R(m[1]).n);
+      for (const m of code.matchAll(/\bxmm(\d+)\b/gi)) if (Number(m[1]) >= 6) xs.add(Number(m[1]));
+      // a global alias is shared by every function: a called HLA64 function may change it on purpose
+      for (const s of this.globals.values()) {
+        if (s.k !== 'alias') continue;
+        const n = this.regNum(s.reg);
+        if (this.isFp(s.reg) ? n >= 6 : n === 6 || n === 7) globalRegs.add(this.isFp(s.reg) ? `xmm${n}` : NAMES64[n]);
+      }
+      for (const r of [...[...gp].sort().map((n) => NAMES64[n]), ...[...xs].sort((a, b) => a - b).map((n) => `xmm${n}`)]) if (!globalRegs.has(r)) keep.push(r);
+      keepGlobal.push(...globalRegs);
+    }
     this.fn = {
       name: it.name, label: it.name, retLabel: `.L${it.name}.ret`, lines: [], localsSize: 0,
       autoInUse: new Set(), autoAvoid: avoid, loops: [], labels: new Map(), naked: it.naked, isMain,
-      maxStackArgs: 0, stgTop: 0, stgMax: 0, pushDepth: 0, pushMax: 0, stackParams: [], xmmAvoid,
+      maxStackArgs: 0, stgTop: 0, stgMax: 0, pushDepth: 0, pushMax: 0, stackParams: [], xmmAvoid, keep, keepGlobal,
     };
     this.labelN = 0;
     this.collectLabels(it.body);
     this.pushScope();
-    // parameters (positional Win64 assignment)
+    // parameters: Win64 by position; System V by class (integers and doubles counted apart)
     const moves: string[] = [];
+    const place = this.argPlaces(it.params.map((p) => p.ty === 'f32' || p.ty === 'f64' || (p.reg !== null && p.reg !== 'auto' && this.isFp(p.reg))));
     it.params.forEach((p, i) => {
       const fp = p.ty === 'f32' || p.ty === 'f64' || (p.reg !== null && p.reg !== 'auto' && this.isFp(p.reg));
-      if (i >= 4) {
-        // stack parameter: copy it into a register at entry
+      const pl = place[i];
+      if (pl.k === 'stack') {
+        // stack parameter: copy it into a register at entry (Windows: after the 32-byte shadow space)
+        const at = this.linux ? 8 * pl.slot : 8 * i;
         const reg = p.reg && p.reg !== 'auto' ? p.reg : null;
         if (fp) {
-          if (!reg) this.err('floating point parameters after the 4th need an explicit xmm register', p.t);
+          if (!reg) this.err(this.linux ? 'floating point parameters after the 8th need an explicit xmm register' : 'floating point parameters after the 4th need an explicit xmm register', p.t);
           this.scopes[0].set(p.name, { k: 'alias', reg: reg!, unsigned: false });
-          moves.push(`    movsd ${reg}, qword ptr [rsp + %IN%+${8 * i}]`);
+          moves.push(`    movsd ${reg}, qword ptr [rsp + %IN%+${at}]`);
           return;
         }
         const target = this.defineAlias({ name: p.name, reg, unsigned: p.unsigned, t: p.t });
-        moves.push(`    mov ${v64(target)}, qword ptr [rsp + %IN%+${8 * i}]`);
+        moves.push(`    mov ${v64(target)}, qword ptr [rsp + %IN%+${at}]`);
         if (p.ty && memSize(p.ty) < 8) moves.push(this.extendLine(v64(target), p.ty));
         return;
       }
-      const abi = fp ? `xmm${i}` : ARG_GPR[i];
+      const abi = pl.k === 'xmm' ? `xmm${pl.n}` : pl.r;
       if (p.ty && !fp && memSize(p.ty) < 8) moves.push(this.extendLine(abi, p.ty));
       if (p.ty === 'f32') moves.push(`    cvtss2sd ${abi}, ${abi}`);
       if (p.reg === null) {
@@ -244,10 +328,11 @@ class X64Gen extends CodeGenBase {
     for (const m of all.matchAll(/\b(rbx|ebx|bx|bl|rbp|ebp|bp|bpl|rsi|esi|si|sil|rdi|edi|di|dil|r1[2-5][dwb]?)\b/g)) usedGp.add(R(m[1]).n);
     for (const m of all.matchAll(/\bxmm([6-9]|1[0-5])\b/g)) usedX.add(Number(m[1]));
     if (!isMain) for (const s of this.globals.values()) if (s.k === 'alias') (this.isFp(s.reg) ? usedX : usedGp).delete(this.regNum(s.reg));
-    const pushes = [...usedGp].sort((a, b) => a - b).map((n) => NAMES64[n]);
-    const xmms = [...usedX].sort((a, b) => a - b);
-    // frame: [shadow 32][stack args][staging][push slots][locals][xmm saves]
-    const OUT = 32 + 8 * f.maxStackArgs;
+    const pushes = [...usedGp].filter((n) => this.nonvol.includes(n)).sort((a, b) => a - b).map((n) => NAMES64[n]);
+    const xmms = this.linux ? [] : [...usedX].sort((a, b) => a - b);       // System V: no callee-saved xmm
+    const seh = !this.linux;
+    // frame: [shadow 32 (Windows)][stack args][staging][push slots][locals][xmm saves]
+    const OUT = (this.linux ? 0 : 32) + 8 * f.maxStackArgs;
     const STG = OUT;
     const PSH = STG + f.stgMax;
     const LOC = PSH + 8 * f.pushMax;
@@ -256,24 +341,26 @@ class X64Gen extends CodeGenBase {
     while ((8 + 8 * pushes.length + frame) % 16) frame += 8;
     const IN = frame + 8 * pushes.length + 8;
 
-    out.push('.p2align 4', `.seh_proc ${it.name}`, `${it.name}:`);
-    for (const r of pushes) out.push(`    push ${r}`, `    .seh_pushreg ${r}`);
+    out.push('.p2align 4', seh ? `.seh_proc ${it.name}` : `.type ${it.name},@function`, `${it.name}:`);
+    for (const r of pushes) out.push(`    push ${r}`, ...(seh ? [`    .seh_pushreg ${r}`] : []));
     if (frame >= 4096) {
       // Windows commits the stack one guard page at a time: touch every page of a large frame
-      // in order before moving rsp (what __chkstk does), using the volatile r10/r11
+      // in order before moving rsp (what __chkstk does), using the volatile r10/r11; on Linux the
+      // same probes keep a big frame from jumping over the guard gap below the stack
       out.push(`    lea r10, [rsp - ${frame}]`, '    mov r11, rsp', `.L${it.name}.probe:`, '    sub r11, 4096',
         '    test qword ptr [r11], r11', '    cmp r11, r10', `    ja .L${it.name}.probe`);
     }
-    if (frame) out.push(`    sub rsp, ${frame}`, `    .seh_stackalloc ${frame}`);
+    if (frame) out.push(`    sub rsp, ${frame}`, ...(seh ? [`    .seh_stackalloc ${frame}`] : []));
     xmms.forEach((x, i) => out.push(`    movaps xmmword ptr [rsp + ${XMM + 16 * i}], xmm${x}`, `    .seh_savexmm xmm${x}, ${XMM + 16 * i}`));
-    out.push('    .seh_endprologue');
+    if (seh) out.push('    .seh_endprologue');
     const fx = fix({ STG, LOC, IN, PSH });
     out.push(...moves.map(fx));
     out.push(...peephole([...body, `${f.retLabel}:`]).map(fx));
     xmms.forEach((x, i) => out.push(`    movaps xmm${x}, xmmword ptr [rsp + ${XMM + 16 * i}]`));
     if (frame) out.push(`    add rsp, ${frame}`);
     for (const r of [...pushes].reverse()) out.push(`    pop ${r}`);
-    out.push('    ret', '.seh_endproc');
+    out.push('    ret');
+    if (seh) out.push('.seh_endproc');
     const retUsed = out.some((l) => l.includes(f.retLabel) && !l.endsWith(':'));
     this.text.push(...out.filter((l) => retUsed || l !== `${f.retLabel}:`));
     this.fn = null;
@@ -333,7 +420,7 @@ class X64Gen extends CodeGenBase {
   }
 
   allocTemp(bits: 32 | 64, t: Token): string {
-    const extra = this.fn && !this.fn.naked ? NONVOL.filter((n) => !this.fn!.autoInUse.has(n) && !this.fn!.autoAvoid.has(n)).reverse() : [];
+    const extra = this.fn && !this.fn.naked ? this.nonvol.filter((n) => !this.fn!.autoInUse.has(n) && !this.fn!.autoAvoid.has(n)).reverse() : [];
     for (const n of [10, 11, ...extra]) {
       if (!this.temps.has(n)) { this.temps.add(n); return bits === 64 ? NAMES64[n] : v32(NAMES64[n]); }
     }
@@ -342,16 +429,24 @@ class X64Gen extends CodeGenBase {
 
   freeTemp(r: string): void {
     const x = xreg(r);
-    if (x && !x.xmm && this.temps.has(x.n) && (x.n === 10 || x.n === 11 || NONVOL.includes(x.n))) this.temps.delete(x.n);
+    if (x && !x.xmm && this.temps.has(x.n) && (x.n === 10 || x.n === 11 || this.nonvol.includes(x.n))) this.temps.delete(x.n);
   }
 
   isTemp(r: string): boolean {
     const x = xreg(r);
     if (!x || x.xmm) return false;
-    return x.n === 10 || x.n === 11 || (NONVOL.includes(x.n) && this.temps.has(x.n) && !this.fn?.autoInUse.has(x.n));
+    return x.n === 10 || x.n === 11 || (this.nonvol.includes(x.n) && this.temps.has(x.n) && !this.fn?.autoInUse.has(x.n));
   }
 
   allocFTemp(t: Token): string {
+    if (this.linux) {
+      // System V: xmm0-xmm7 carry arguments, so scratch values live in xmm15 down to xmm8 the function does not
+      // name (kept across calls like the named ones, see callKeep)
+      for (const n of [15, 14, 13, 12, 11, 10, 9, 8]) {
+        if (!this.ftemps.has(n) && !this.fn?.xmmAvoid.has(n)) { this.ftemps.add(n); return `xmm${n}`; }
+      }
+      return this.err('floating point expression too complex: split it', t);
+    }
     // xmm5, xmm4, then non-volatile xmm registers the function does not name (saved by the prologue)
     const extra = this.fn && !this.fn.naked ? [15, 14, 13, 12, 11, 10, 9, 8, 7, 6].filter((n) => !this.fn!.xmmAvoid.has(n)) : [];
     for (const n of [5, 4, ...extra]) if (!this.ftemps.has(n)) { this.ftemps.add(n); return `xmm${n}`; }
@@ -410,6 +505,11 @@ class X64Gen extends CodeGenBase {
         const s = this.lookup(e.name);
         if (!s) this.err(`unknown name '${e.name}'`, e.t);
         if (s.k === 'data') {
+          if (this.viaGot(s)) {
+            this.gotLoad(v64(T), s.label);
+            if (!(s.ty.count !== null || s.ty.struct)) this.loadMem(T, s.ty.elem!, `[${v64(T)}]`, e.t);
+            return;
+          }
           if (s.ty.count !== null || s.ty.struct) { this.emit(`lea ${v64(T)}, [rip + ${s.label}]`); return; }
           this.loadMem(T, s.ty.elem!, `[rip + ${s.label}]`, e.t);
           return;
@@ -420,7 +520,7 @@ class X64Gen extends CodeGenBase {
           return;
         }
         if (s.k === 'fn') { this.emit(`lea ${v64(T)}, [rip + ${s.label}]`); return; }
-        if (s.k === 'extern') { this.emit(`lea ${v64(T)}, [rip + ${s.label}]`); return; }
+        if (s.k === 'extern') { this.emit(this.externAddr(v64(T), s.label)); return; }
         return this.err(`'${e.name}' cannot be used as a value`, e.t);
       }
       case 'addr': this.genAddrOf(e, T); return;
@@ -443,7 +543,7 @@ class X64Gen extends CodeGenBase {
         return;
       case 'tern': this.genTernary(e, T); return;
       case 'call': {
-        if (this.isBuiltinCall(e)) { this.genBuiltin(e, T); return; }
+        if (this.isBuiltinCall(e) && e.name !== 'syscall') { this.genBuiltin(e, T); return; }
         this.callGuarded(e, T, () => this.genCall(e));
         if (!sameReg(T, 'rax')) this.emit(`mov ${T}, ${view('rax', bits)}`);
         return;
@@ -456,12 +556,12 @@ class X64Gen extends CodeGenBase {
   callGuarded(e: Expr, T: string | null, f: () => void): void {
     const live = new Set(this.temps), liveF = new Set(this.ftemps);
     if (T) { const x = R(T); if (x.xmm) liveF.delete(x.n); else live.delete(x.n); }
-    // values parked in callee-saved spill registers survive calls
-    for (const n of [...live]) if (NONVOL.includes(n)) live.delete(n);
+    // values parked in callee-saved spill registers survive calls (xmm6+ on Linux: saved around the call)
+    for (const n of [...live]) if (this.nonvol.includes(n)) live.delete(n);
     for (const n of [...liveF]) if (n >= 6) liveF.delete(n);
     if (live.size || liveF.size) this.err('a function call cannot be nested inside a complex expression; assign its result to a register first', e.t);
     const saved = this.temps, savedF = this.ftemps;
-    this.temps = new Set([...saved].filter((n) => NONVOL.includes(n)));
+    this.temps = new Set([...saved].filter((n) => this.nonvol.includes(n)));
     this.ftemps = new Set([...savedF].filter((n) => n >= 6));
     try { f(); } finally { this.temps = saved; this.ftemps = savedF; }
   }
@@ -487,7 +587,12 @@ class X64Gen extends CodeGenBase {
 
   storeMem(src: string, ty: MemType, mode: string): void {
     if (this.isFp(src)) {
-      if (ty === 'f32') { this.emit(`cvtsd2ss xmm5, ${src}`); this.emit(`movss dword ptr ${mode}, xmm5`); }
+      if (ty === 'f32' && this.linux) {
+        const t = this.allocFTemp({ line: 0, col: 0 } as Token);
+        this.emit(`cvtsd2ss ${t}, ${src}`);
+        this.emit(`movss dword ptr ${mode}, ${t}`);
+        this.ftemps.delete(R(t).n);
+      } else if (ty === 'f32') { this.emit(`cvtsd2ss xmm5, ${src}`); this.emit(`movss dword ptr ${mode}, xmm5`); }
       else this.emit(`movsd qword ptr ${mode}, ${src}`);
       return;
     }
@@ -715,7 +820,7 @@ class X64Gen extends CodeGenBase {
   memOperand(e: Expr, bits: 32 | 64): string | null {
     if (!this.fixedAddress(e)) return null;
     const s = this.lookup((e as { name: string }).name) as Extract<Sym, { k: 'local' | 'data' }>;
-    if (s.ty.elemSize * 8 !== bits || s.ty.elem === 'f32' || s.ty.elem === 'f64') return null;
+    if (s.ty.elemSize * 8 !== bits || s.ty.elem === 'f32' || s.ty.elem === 'f64' || this.viaGot(s)) return null;
     const size = bits === 64 ? 'qword' : 'dword';
     return s.k === 'local' ? `${size} ptr [rsp + ${this.localRef(s.off)}]` : `${size} ptr [rip + ${s.label}]`;
   }
@@ -852,6 +957,7 @@ class X64Gen extends CodeGenBase {
         if (s.ty.count !== null && (ic < 0n || ic >= BigInt(s.ty.count))) this.warnings.push(`line ${e.t.line}: index ${ic} is out of bounds for '${e.name}'`);
         const off = Number(ic) * size;
         if (s.k === 'local') return { ty, mode: `[rsp + ${this.localRef(s.off + off)}]`, release };
+        if (this.viaGot(s)) { const b = tmp(); this.gotLoad(b, s.label); return { ty, mode: `[${b}${off ? (off > 0 ? ' + ' + off : ' - ' + -off) : ''}]`, release }; }
         return { ty, mode: `[rip + ${s.label}${off ? (off > 0 ? ' + ' + off : ' - ' + -off) : ''}]`, release };
       }
       // index register (+ constant)
@@ -871,7 +977,7 @@ class X64Gen extends CodeGenBase {
       const dispS = disp ? (disp > 0 ? ` + ${disp}` : ` - ${-disp}`) : '';
       if (s.k === 'local') return { ty, mode: `[rsp + ${scale}*${idx} + ${this.localRef(s.off + disp)}]`, release };
       const b = tmp();
-      this.emit(`lea ${b}, [rip + ${s.label}]`);
+      if (this.viaGot(s)) this.gotLoad(b, s.label); else this.emit(`lea ${b}, [rip + ${s.label}]`);
       return { ty, mode: `[${b} + ${scale}*${idx}${dispS}]`, release };
     }
     if (e.k !== 'mem') return this.err('not a memory reference', e.t);
@@ -929,8 +1035,9 @@ class X64Gen extends CodeGenBase {
     const T64 = v64(T);
     if (x.k === 'name') {
       const s = this.lookup(x.name);
+      if (this.viaGot(s)) { this.gotLoad(T64, (s as { label: string }).label); return; }
       if (s?.k === 'data' || s?.k === 'fn') { this.emit(`lea ${T64}, [rip + ${s.label}]`); return; }
-      if (s?.k === 'extern') { this.emit(`lea ${T64}, [rip + ${s.label}]`); return; }
+      if (s?.k === 'extern') { this.emit(this.externAddr(T64, s.label)); return; }
       if (s?.k === 'local') { this.emit(`lea ${T64}, [rsp + ${this.localRef(s.off)}]`); return; }
       this.err(`cannot take the address of '${x.name}'`, x.t);
     }
@@ -939,21 +1046,24 @@ class X64Gen extends CodeGenBase {
       const s = this.lookup(x.name);
       if (!s || (s.k !== 'data' && s.k !== 'local')) this.err(`'${x.name}' is not an array`, x.t);
       const size = s.ty.elemSize;
-      const base = s.k === 'local' ? `rsp + ${this.localRef(s.off)}` : `rip + ${s.label}`;
+      const got = this.viaGot(s);
+      const base = s.k === 'local' ? `rsp + ${this.localRef(s.off)}` : got ? T64 : `rip + ${s.label}`;
       const ic = this.constEval(x.index);
       if (ic !== null) {
         const off = Number(ic) * size;
+        if (got) this.gotLoad(T64, (s as { label: string }).label);
         this.emit(s.k === 'local' ? `lea ${T64}, [rsp + ${this.localRef(s.off + off)}]` : `lea ${T64}, [${base}${off ? ' + ' + off : ''}]`);
         return;
       }
       const tmp = this.allocTemp(64, x.t);
       this.genExpr(x.index, tmp);
+      const label = (s as { label?: string }).label!;
       if ([1, 2, 4, 8].includes(size)) {
         if (s.k === 'local') this.emit(`lea ${T64}, [rsp + ${size}*${tmp} + ${this.localRef(s.off)}]`);
-        else { this.emit(`lea ${T64}, [rip + ${s.label}]`); this.emit(`lea ${T64}, [${T64} + ${size}*${tmp}]`); }
+        else { if (got) this.gotLoad(T64, label); else this.emit(`lea ${T64}, [rip + ${label}]`); this.emit(`lea ${T64}, [${T64} + ${size}*${tmp}]`); }
       } else {
         this.emit(`imul ${tmp}, ${tmp}, ${size}`);
-        this.emit(`lea ${T64}, [${base}]`);
+        if (got) this.gotLoad(T64, label); else this.emit(`lea ${T64}, [${base}]`);
         this.emit(`add ${T64}, ${tmp}`);
       }
       this.freeTemp(tmp);
@@ -1053,6 +1163,7 @@ class X64Gen extends CodeGenBase {
   targetAccess(target: Expr, src: string | null, t: Token): { mode: string; release: () => void; post: boolean } {
     if (target.k === 'name') {
       const s = this.lookup(target.name) as Extract<Sym, { k: 'data' | 'local' }>;
+      if (this.viaGot(s)) { const b = this.allocTemp(64, t); this.gotLoad(b, (s as { label: string }).label); return { mode: `[${b}]`, release: () => this.freeTemp(b), post: false }; }
       if (s.k === 'data') return { mode: `[rip + ${s.label}]`, release: () => {}, post: false };
       return { mode: `[rsp + ${this.localRef(s.off)}]`, release: () => {}, post: false };
     }
@@ -1062,11 +1173,73 @@ class X64Gen extends CodeGenBase {
   }
 
   // ======================================================================
-  // calls (Win64)
+  // calls (Win64 / System V)
   // ======================================================================
+  /** the address of an extern: Windows `lea` (the linker's thunk or the static C object); Linux through the GOT */
+  externAddr(T64: string, label: string): string {
+    return this.linux ? `mov ${T64}, qword ptr [rip + ${label}@GOTPCREL]` : `lea ${T64}, [rip + ${label}]`;
+  }
+
+  /** where each argument goes; Win64 by position, System V by class */
+  argPlaces(isF: boolean[], gprs: string[] = this.linux ? SYSV_GPR : ARG_GPR): ArgPlace[] {
+    if (!this.linux) return isF.map((f, i) => (i < 4 ? (f ? { k: 'xmm', n: i } : { k: 'gpr', r: gprs[i] }) : { k: 'stack', slot: i - 4 }));
+    let g = 0, x = 0, st = 0;
+    return isF.map((f) => (f ? (x < 8 ? { k: 'xmm', n: x++ } : { k: 'stack', slot: st++ }) : g < gprs.length ? { k: 'gpr', r: gprs[g++] } : { k: 'stack', slot: st++ }));
+  }
+
+  /** xmm registers an expression reads (a later argument must not read one an earlier argument has set) */
+  readsFRegs(e: Expr, out = new Set<number>()): Set<number> {
+    switch (e.k) {
+      case 'name': { const op = this.operand(e); if (op?.k === 'reg' && this.isFp(op.r)) out.add(this.regNum(op.r)); break; }
+      case 'un': this.readsFRegs(e.e, out); break;
+      case 'bin': this.readsFRegs(e.l, out); this.readsFRegs(e.r, out); break;
+      case 'tern': this.readsFRegs(e.c, out); this.readsFRegs(e.a, out); this.readsFRegs(e.b, out); break;
+      case 'call': for (const a of e.args) this.readsFRegs(a, out); break;
+      case 'index': this.readsFRegs(e.index, out); break;
+      case 'mem': this.readsFRegs(e.addr, out); break;
+      case 'addr': this.readsFRegs(e.e, out); break;
+    }
+    return out;
+  }
+
+  /** Linux: rsi, rdi, xmm6-xmm15 that must survive a call (named in the function, or live xmm temporaries);
+   *  `foreign`: a call into C, through a pointer or into the kernel, which also changes global aliases */
+  callKeep(foreign: boolean): string[] {
+    const f = this.fn!;
+    if (!this.linux || f.naked) return [];
+    const keep = [...f.keep, ...(foreign ? f.keepGlobal : [])];
+    for (const n of [...this.ftemps].sort((a, b) => a - b)) if (n >= 6 && !keep.includes(`xmm${n}`)) keep.push(`xmm${n}`);
+    return keep;
+  }
+
+  /** save the registers a call must not change (Linux) in the frame; returns the restore */
+  keepAcross(foreign: boolean): () => void {
+    const keep = this.callKeep(foreign);
+    if (!keep.length) return () => {};
+    const st = this.stage(8 * keep.length);
+    const mv = (r: string, slot: string, load: boolean) =>
+      this.isFp(r) ? (load ? `movsd ${r}, qword ptr ${slot}` : `movsd qword ptr ${slot}, ${r}`) : load ? `mov ${r}, qword ptr ${slot}` : `mov qword ptr ${slot}, ${r}`;
+    this.emit(`// keep ${keep.join(', ')} across the call`);
+    keep.forEach((r, i) => this.emit(mv(r, st.at(8 * i), false)));
+    return () => { keep.forEach((r, i) => this.emit(mv(r, st.at(8 * i), true))); st.release(); };
+  }
+
+  /** Linux syscall(number, args...): rax, then rdi rsi rdx r10 r8 r9; the kernel changes rax, rcx and r11 */
+  genSyscall(e: Extract<Expr, { k: 'call' }>): void {
+    if (e.args.length < 1 || e.args.length > 7) this.err('syscall(number, up to 6 args)', e.t);
+    const restore = this.keepAcross(true);
+    this.setArgs(e.args, null, e.t, SYSCALL_GPR);
+    this.emit('syscall');
+    restore();
+  }
+
   genCall(e: Extract<Expr, { k: 'call' }>): void {
     if (this.isBuiltinCall(e)) {
-      if (e.name === 'syscall') this.err('syscall() is not available on Windows: call WinAPI functions (WriteFile, ExitProcess) instead', e.t);
+      if (e.name === 'syscall') {
+        if (!this.linux) this.err('syscall() is not available on Windows: call WinAPI functions (WriteFile, ExitProcess) instead', e.t);
+        this.genSyscall(e);
+        return;
+      }
       this.genBuiltin(e, 'rax');
       return;
     }
@@ -1083,21 +1256,25 @@ class X64Gen extends CodeGenBase {
     // a function pointer in a scalar frame slot or data variable (e.g. a spilled let): call through memory
     else if (this.fixedAddress({ k: 'name', name: e.name, t: e.t })) {
       target = s!.k === 'local' ? `qword ptr [rsp + ${this.localRef(s!.off)}]` : `qword ptr [rip + ${(s as { label: string }).label}]`;
+      if (this.viaGot(s)) { this.gotLoad('r11', (s as { label: string }).label); this.emit('mov r11, qword ptr [r11]'); target = ''; indirect = 'r11'; }
     }
     else return this.err(`unknown function '${e.name}' (declare C functions with: extern ${e.name})`, e.t);
-    const f = this.fn!;
-    f.maxStackArgs = Math.max(f.maxStackArgs, Math.max(0, e.args.length - 4));
+    const restore = this.keepAcross(s?.k !== 'fn');
     // an indirect target in a volatile register is parked in the frame while arguments are set up
     let callee = indirect ? indirect : target;
     let park: ReturnType<X64Gen['stage']> | null = null;
-    if (indirect && !NONVOL.includes(R(indirect).n)) {
+    if (indirect && !this.nonvol.includes(R(indirect).n)) {
       park = this.stage(8);
       this.emit(`mov qword ptr ${park.at(0)}, ${indirect}`);
       callee = `qword ptr ${park.at(0)}`;
     }
-    this.setArgs(e.args, fixed, e.t);
+    const nx = this.setArgs(e.args, fixed, e.t);
+    // System V: al = the number of xmm registers with arguments, for a variadic callee (and a C function
+    // without a declared signature that gets doubles: it may be variadic)
+    if (this.linux && (fixed !== null || (s?.k !== 'fn' && nx > 0))) this.emit(nx ? `mov eax, ${nx}` : 'xor eax, eax');
     this.emit(`call ${callee}`);
     park?.release();
+    restore();
   }
 
   /** after a nested call, later arguments must not read volatile registers */
@@ -1105,62 +1282,93 @@ class X64Gen extends CodeGenBase {
     let callAt: Expr | null = null;
     for (const a of order) {
       if (callAt) {
-        const regs = [...this.readsRegs(a)].filter((n) => !NONVOL.includes(n));
+        const regs = [...this.readsRegs(a)].filter((n) => !this.nonvol.includes(n) && !this.fn!.keep.includes(NAMES64[n]) && !this.fn!.keepGlobal.includes(NAMES64[n]));
         if (regs.length) this.err(`${NAMES64[regs[0]]} is read after a nested call (${(callAt as { name?: string }).name ?? 'call'}) that clobbers it; copy it to a non-volatile register first`, a.t);
       }
       if (this.hasCall(a)) callAt = a;
     }
   }
 
-  setArgs(args: Expr[], fixed: number | null, t: Token): void {
+  /** put the arguments in place (registers, outgoing stack slots); returns the number of xmm registers used.
+   *  `gprs`: the integer registers in order (a syscall passes all its arguments in registers). */
+  setArgs(args: Expr[], fixed: number | null, t: Token, gprs?: string[]): number {
     const variadicFrom = fixed ?? Infinity;
-    const isF = args.map((a) => this.isFloat(a));
-    const dest = (i: number) => (i < 4 ? (isF[i] ? `xmm${i}` : ARG_GPR[i]) : `qword ptr [rsp + ${32 + 8 * (i - 4)}]`);
+    const isF = args.map((a) => (gprs ? false : this.isFloat(a)));
+    const place = this.argPlaces(isF, gprs);
+    const outArgs = this.linux ? 0 : 32;
+    const slot = (k: number) => `qword ptr [rsp + ${outArgs + 8 * k}]`;
+    const f = this.fn!;
+    f.maxStackArgs = Math.max(f.maxStackArgs, place.filter((p) => p.k === 'stack').length);
+    if (gprs && args.length > gprs.length) this.err(`at most ${gprs.length - 1} arguments`, t);
     this.checkClobber(args);
-    const argRegs = args.map((_, i) => (i < 4 && !isF[i] ? R(ARG_GPR[i]).n : -1));
-    let conflict = args.some((a, i) => i > 0 && this.hasCall(a));
+    const argRegs = place.map((p) => (p.k === 'gpr' ? R(p.r).n : -1));
+    // a nested call anywhere writes the outgoing stack slots this call has filled (stack arguments go first)
+    let conflict = args.some((a, i) => (i > 0 || place.some((p) => p.k === 'stack')) && this.hasCall(a));
     for (let i = 0; i < args.length && !conflict; i++) {
-      if (argRegs[i] < 0) continue;
-      for (let j = i + 1; j < args.length; j++) if (this.readsRegs(args[j]).has(argRegs[i])) conflict = true;
+      const p = place[i];
+      if (p.k === 'stack') continue;
+      // a double already in its argument register is not moved, so it overwrites nothing
+      const op = this.operand(args[i]);
+      if (p.k === 'xmm' && op?.k === 'reg' && sameReg(op.r, `xmm${p.n}`)) continue;
+      for (let j = i + 1; j < args.length; j++) {
+        if (p.k === 'gpr' ? this.readsRegs(args[j]).has(argRegs[i]) : this.readsFRegs(args[j]).has(p.n)) conflict = true;
+      }
     }
-    const dupGpr = (i: number) => { if (isF[i] && i < 4 && i >= variadicFrom) this.emit(`movq ${ARG_GPR[i]}, xmm${i}`); };
+    // r10 (a syscall argument) is also a scratch register: set it last, from a plain value only
+    const r10At = place.findIndex((p) => p.k === 'gpr' && p.r === 'r10');
+    if (r10At >= 0 && !this.operand(args[r10At])) conflict = true;
+    // Win64 variadic: a double also goes in the matching integer register
+    const dupGpr = (i: number) => { const p = place[i]; if (!this.linux && p.k === 'xmm' && i >= variadicFrom) this.emit(`movq ${ARG_GPR[i]}, xmm${p.n}`); };
+    const nx = place.filter((p) => p.k === 'xmm').length;
     if (!conflict) {
       // stack arguments first (they may read argument registers), then registers
-      for (let i = 4; i < args.length; i++) {
+      args.forEach((a, i) => {
+        const p = place[i];
+        if (p.k !== 'stack') return;
         this.resetTemps();
-        if (isF[i]) { const ft = this.allocFTemp(t); this.genFExpr(args[i], ft); this.emit(`movsd ${dest(i)}, ${ft}`); continue; }
-        const op = this.operand(args[i]);
-        if (op?.k === 'imm' && fitsI32(op.v)) { this.emit(`mov ${dest(i)}, ${op.v}`); continue; }
-        const r = op?.k === 'reg' ? v64(op.r) : this.toReg(args[i], this.allocTemp(64, t));
-        this.emit(`mov ${dest(i)}, ${r}`);
-      }
-      for (let i = 0; i < Math.min(4, args.length); i++) {
+        if (isF[i]) { const ft = this.allocFTemp(t); this.genFExpr(a, ft); this.emit(`movsd ${slot(p.slot)}, ${ft}`); return; }
+        const op = this.operand(a);
+        if (op?.k === 'imm' && fitsI32(op.v)) { this.emit(`mov ${slot(p.slot)}, ${op.v}`); return; }
+        const r = op?.k === 'reg' ? v64(op.r) : this.toReg(a, this.allocTemp(64, t));
+        this.emit(`mov ${slot(p.slot)}, ${r}`);
+      });
+      const order = args.map((_, i) => i).filter((i) => i !== r10At);
+      if (r10At >= 0) order.push(r10At);
+      for (const i of order) {
+        const p = place[i];
+        if (p.k === 'stack') continue;
         this.resetTemps();
         const a = args[i];
-        if (isF[i]) { this.genFExpr(a, `xmm${i}`); dupGpr(i); continue; }
-        const d = ARG_GPR[i];
+        if (p.k === 'xmm') { this.genFExpr(a, `xmm${p.n}`); dupGpr(i); continue; }
+        const d = p.r;
         if (a.k === 'call' && !this.isBuiltinCall(a)) { this.genCall(a); if (d !== 'rax') this.emit(`mov ${d}, rax`); continue; }
         const op = this.operand(a);
         if (op?.k === 'reg' && sameReg(op.r, d)) continue;
         this.genExpr(a, op?.k === 'reg' && !is64(op.r) && !this.isFp(op.r) ? v32(d) : d);
       }
-      return;
+      return nx;
     }
     // evaluate everything into staging slots, then distribute
     const st = this.stage(8 * args.length);
     args.forEach((a, i) => {
       this.resetTemps();
       if (isF[i]) { const ft = this.allocFTemp(t); this.genFExpr(a, ft); this.emit(`movsd qword ptr ${st.at(8 * i)}, ${ft}`); return; }
-      if (a.k === 'call' && !this.isBuiltinCall(a)) { this.genCall(a); this.emit(`mov qword ptr ${st.at(8 * i)}, rax`); return; }
+      if (a.k === 'call' && (!this.isBuiltinCall(a) || a.name === 'syscall')) {
+        if (this.isBuiltinCall(a)) this.callGuarded(a, null, () => this.genCall(a)); else this.genCall(a);
+        this.emit(`mov qword ptr ${st.at(8 * i)}, rax`);
+        return;
+      }
       const r = this.toReg(a, this.allocTemp(64, t));
       this.emit(`mov qword ptr ${st.at(8 * i)}, ${v64(r)}`);
     });
     args.forEach((_, i) => {
-      if (i >= 4) { this.emit(`mov r11, qword ptr ${st.at(8 * i)}`); this.emit(`mov ${dest(i)}, r11`); return; }
-      if (isF[i]) { this.emit(`movsd xmm${i}, qword ptr ${st.at(8 * i)}`); dupGpr(i); }
-      else this.emit(`mov ${ARG_GPR[i]}, qword ptr ${st.at(8 * i)}`);
+      const p = place[i];
+      if (p.k === 'stack') { this.emit(`mov r11, qword ptr ${st.at(8 * i)}`); this.emit(`mov ${slot(p.slot)}, r11`); return; }
+      if (p.k === 'xmm') { this.emit(`movsd xmm${p.n}, qword ptr ${st.at(8 * i)}`); dupGpr(i); }
+      else this.emit(`mov ${p.r}, qword ptr ${st.at(8 * i)}`);
     });
     st.release();
+    return nx;
   }
 
   genBuiltin(e: Extract<Expr, { k: 'call' }>, T: string): void {
@@ -1168,8 +1376,11 @@ class X64Gen extends CodeGenBase {
     const n = e.args.length;
     const need = (k: number) => { if (n !== k) this.err(`${e.name}() takes ${k} argument(s)`, e.t); };
     switch (e.name) {
-      case 'syscall': this.err('syscall() is not available on Windows: call WinAPI functions (WriteFile, ExitProcess) instead', e.t);
-      // falls through (unreachable)
+      case 'syscall':
+        if (!this.linux) this.err('syscall() is not available on Windows: call WinAPI functions (WriteFile, ExitProcess) instead', e.t);
+        this.callGuarded(e, T, () => this.genSyscall(e));
+        if (!sameReg(T, 'rax')) this.emit(`mov ${T}, ${view('rax', bits)}`);
+        return;
       case 'sizeof': case 'len': need(1); this.movImm(T, this.sizeofExpr(e.args[0], e.name === 'len', e.t)); return;
       case 'sext8': case 'sext16': case 'sext32': case 'sext': {
         need(1);
@@ -1276,6 +1487,13 @@ class X64Gen extends CodeGenBase {
           return;
         }
         const s = this.lookup(e.name);
+        if (s?.k === 'data' && s.ty.count === null && s.ty.elem && this.viaGot(s)) {
+          const b = this.allocTemp(64, e.t);
+          this.gotLoad(b, s.label);
+          this.loadMem(T, s.ty.elem, `[${b}]`, e.t);
+          this.freeTemp(b);
+          return;
+        }
         if (s?.k === 'data' && s.ty.count === null && s.ty.elem) { this.loadMem(T, s.ty.elem, `[rip + ${s.label}]`, e.t); return; }
         if (s?.k === 'local' && s.ty.count === null && s.ty.elem) { this.loadMem(T, s.ty.elem, `[rsp + ${this.localRef(s.off)}]`, e.t); return; }
         return this.err(`'${e.name}' is not a floating point value`, e.t);
@@ -1388,6 +1606,21 @@ function cc(op: string, unsigned: boolean): string {
     case '>=': return unsigned ? 'ae' : 'ge';
   }
   throw new Error('bad comparison ' + op);
+}
+
+/** `code // note` -> `code # note` (outside string literals); a line that is only a comment or a label keeps `//` */
+function hashComment(line: string): string {
+  let inStr = false;
+  for (let i = 0; i < line.length - 1; i++) {
+    const c = line[i];
+    if (inStr) { if (c === '\\') i++; else if (c === '"') inStr = false; continue; }
+    if (c === '"') { inStr = true; continue; }
+    if (c === '/' && line[i + 1] === '/') {
+      const code = line.slice(0, i).trim();
+      return code === '' || /^[\w.$]+:$/.test(code) ? line : line.slice(0, i) + '#' + line.slice(i + 2);
+    }
+  }
+  return line;
 }
 
 /** substitute frame placeholders (%STG%+n etc.) with real offsets */

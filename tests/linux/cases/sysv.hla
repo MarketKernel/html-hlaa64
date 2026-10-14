@@ -1,0 +1,45 @@
+// The System V calling convention: integer arguments in rdi, rsi, rdx, rcx, r8, r9 and doubles in
+// xmm0-xmm7, each counted on its own, the rest on the stack in order; al = the number of xmm
+// registers before a variadic call.
+extern printf(fmt, ...), qsort
+
+data numbers: i64[8] = [42, -7, 19, 3, 88, 0, -15, 61]
+
+// eight integer parameters: six in registers, two on the stack
+fn sum8(a, b, c, d, e, f, g, h) {
+    return a + b * 2 + c * 3 + d * 4 + e * 5 + f * 6 + g * 7 + h * 8
+}
+
+// integers and doubles interleaved: a, b, c in rdi, rsi, rdx; x, y in xmm0, xmm1
+fn mix(a, x: xmm0, b, y: xmm1, c) {
+    xmm0 = x * float(a) + y * float(b) - float(c)
+}
+
+// ten doubles: eight in xmm registers, two on the stack (explicit registers for those)
+fn dsum(a: xmm0, b: xmm1, c: xmm2, d: xmm3, e: xmm4, f: xmm5, g: xmm6, h: xmm7, i: xmm8, j: xmm9) {
+    xmm0 = a + b + c + d + e + f + g + h + i + j
+}
+
+// a qsort callback: C passes the two element addresses in rdi and rsi
+fn by_value(a, b) {
+    let x = i64[a]
+    let y = i64[b]
+    if x < y { return -1 }
+    if x > y { return 1 }
+    return 0
+}
+
+fn main() {
+    printf("sum8 = %lld\n", sum8(1, 2, 3, 4, 5, 6, 7, 8))
+    xmm0 = mix(2, 1.5, 3, 0.25, 1)                  // a function's double result is taken from xmm0
+    printf("mix = %.2f\n", xmm0)
+    xmm0 = dsum(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0)
+    printf("dsum = %.1f\n", xmm0)
+    // printf with seven integers after the format (two on the stack) and nine doubles (one on the stack)
+    printf("%d %d %d %d %d %d %d\n", 1, 2, 3, 4, 5, 6, 7)
+    printf("%.0f %.0f %.0f %.0f %.0f %.0f %.0f %.0f %.0f\n", 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0)
+    printf("%d %.1f %d %.1f %s\n", 10, 0.5, 20, 1.5, "mixed")
+    qsort(&numbers, 8, 8, &by_value)
+    for i in 0..8 { printf("%lld ", numbers[i]) }
+    printf("\n")
+}

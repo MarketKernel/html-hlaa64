@@ -33,3 +33,5 @@ export function tool(name: 'clang' | 'lld-link' | 'llvm-dlltool' | 'llvm-readobj
   cache.set(name, p);
   return p;
 }
+
+export { linuxCc } from '../../src/linux-toolchain.ts';

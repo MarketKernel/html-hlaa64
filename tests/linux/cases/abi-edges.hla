@@ -1,0 +1,48 @@
+// Corners of the System V convention: doubles 5-8 arrive in xmm4-xmm7 (registers the Windows translator
+// uses as scratch), argument registers read by later arguments, a global register alias changed by a
+// called function, and a nested call among arguments that go on the stack.
+extern printf(fmt, ...)
+
+alias g = rsi                         // shared by every function: a call may change it on purpose
+
+fn six(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64) {
+    xmm0 = a * 2.0 + b + c + d + e * 10.0 + f * 100.0
+}
+
+fn eight(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64, h: f64, i: f64) {
+    xmm0 = a + b * 2.0 + c * 3.0 + d * 4.0 + e * 5.0 + f * 6.0 + h * 7.0 + i * 8.0
+}
+
+fn swap2(x: xmm0, y: xmm1) {
+    xmm0 = x * 10.0 + y
+}
+
+fn inc() {
+    g += 1
+}
+
+fn sum8(a, b, c, d, e, f, h, i) {
+    return a + b + c + d + e + f + h * 1000 + i * 100000
+}
+
+fn one(v) {
+    return v
+}
+
+fn main() {
+    xmm0 = six(1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
+    printf("six = %.0f\n", xmm0)                                   // 2 + 1 + 1 + 1 + 10 + 100 = 115
+    xmm0 = eight(1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
+    printf("eight = %.0f\n", xmm0)                                 // 36
+    xmm8 = 3.0
+    printf("%.0f %.0f %.0f %.0f %.0f %.0f\n", 1.0, 2.0, 3.0, 4.0, xmm8 * 5.0, xmm8 * 6.0)
+    xmm0 = 1.0
+    xmm1 = 2.0
+    xmm0 = swap2(xmm1, xmm0)                                       // arguments swapped: 2 * 10 + 1
+    printf("swap2 = %.0f\n", xmm0)
+    g = 5
+    inc()
+    inc()
+    printf("g = %lld\n", g)                                        // 7
+    printf("sum8 = %lld\n", sum8(one(1), 2, 3, 4, 5, 6, 7, 8))       // 21 + 7000 + 800000
+}

@@ -8,9 +8,11 @@
 //   node src/cli.ts lib     name.hla [-o dir]           C library: name.h, name.o, libname.a, libname.dylib
 //   node src/cli.ts emu     prog.hla [-- args]          run in the built-in emulator (also prog.s,
 //                                                       a Mach-O executable, or prog.exe)
-// --target arm64-macos (default on macOS/Linux) or --target x64-windows (default on Windows):
+// --target arm64-macos (default on macOS), x64-windows (default on Windows) or x64-linux (default on Linux):
 //   x64-windows builds prog.exe / prog.obj, and lib gives name.h, name.obj, name_static.lib,
 //   name.dll and its import library name.lib; run uses the x64 emulator outside Windows.
+//   x64-linux builds an ELF executable prog / prog.o, and lib gives name.h, name.o, libname.a and
+//   libname.so; run uses the x64 emulator outside Linux on x86-64.
 // --target wasm32: compile gives WebAssembly text (.wat), build gives prog.wasm with prog.html (a console
 //   page that runs it) and prog.mjs (runs it in Node); run and emu run it here, in Node's WebAssembly;
 //   asm assembles a .wat file.
@@ -19,13 +21,13 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, basename, dirname } from 'node:path';
 import { compile, compileLibrary } from './lang/codegen.ts';
-import { compileX64, compileLibraryX64 } from './lang/x64/codegen.ts';
+import { compileX64, compileLibraryX64, type X64Os } from './lang/x64/codegen.ts';
 import { compileWasm } from './lang/wasm/codegen.ts';
 import { CompileError } from './lang/lexer.ts';
 import { combineSources, errorOrigin, type Combined } from './lang/include.ts';
 
 function usage(): never {
-  console.error('usage: hla <compile|build|run|asm|obj|lib|emu> <file> [-o out] [--target arm64-macos|x64-windows|wasm32] [--clang] [--zip] [-- program arguments]');
+  console.error('usage: hla <compile|build|run|asm|obj|lib|emu> <file> [-o out] [--target arm64-macos|x64-windows|x64-linux|wasm32] [--clang] [--zip] [-- program arguments]');
   process.exit(2);
 }
 
@@ -41,11 +43,14 @@ const oi = args.indexOf('-o');
 const out = oi >= 0 ? args[oi + 1] : null;
 const useClang = args.includes('--clang');
 const ti = args.indexOf('--target');
-const targetArg = ti >= 0 ? args[ti + 1] : process.platform === 'win32' ? 'x64-windows' : 'arm64-macos';
-// a Windows program (.exe) is x86-64 and a module (.wasm, .wat) WebAssembly whatever the target says
+const targetArg = ti >= 0 ? args[ti + 1] : process.platform === 'win32' ? 'x64-windows' : process.platform === 'linux' ? 'x64-linux' : 'arm64-macos';
+// a Windows program (.exe) is x86-64, an ELF file Linux and a module (.wasm, .wat) WebAssembly whatever the target says
+const isElfFile = (() => { try { const b = readFileSync(file); return b.length >= 4 && b.readUInt32BE(0) === 0x7f454c46; } catch { return false; } })();
 const wasm = /^(wasm|webassembly|web)/i.test(targetArg ?? '') || /\.(wasm|wat)$/i.test(file);
-const x64 = !wasm && (/^(x64|x86[-_]64|win|windows|amd64)/i.test(targetArg ?? '') || /\.exe$/i.test(file));
-if (!x64 && !wasm && !/^(arm64|aarch64|mac)/i.test(targetArg ?? '')) { console.error(`unknown target '${targetArg}' (arm64-macos, x64-windows or wasm32)`); process.exit(2); }
+const linux = !wasm && (/linux|^elf$/i.test(targetArg ?? '') || isElfFile);
+const x64 = !wasm && !linux && (/^(x64|x86[-_]64|win|windows|amd64)/i.test(targetArg ?? '') || /\.exe$/i.test(file));
+if (!x64 && !wasm && !linux && !/^(arm64|aarch64|mac)/i.test(targetArg ?? '')) { console.error(`unknown target '${targetArg}' (arm64-macos, x64-windows, x64-linux or wasm32)`); process.exit(2); }
+const os: X64Os = linux ? 'linux' : 'windows';
 
 function translate(path: string, lib = false): string {
   // the main file and everything it includes (paths relative to the including file)
@@ -55,7 +60,7 @@ function translate(path: string, lib = false): string {
   try {
     c = combineSources(main, (f) => { try { return readFileSync(join(dir, f), 'utf8'); } catch { return null; } });
     const name = main.replace(/\.hla$/, '');
-    const r = lib ? (x64 ? compileLibraryX64(c.text, name) : compileLibrary(c.text, name)) : wasm ? compileWasm(c.text) : x64 ? compileX64(c.text) : compile(c.text);
+    const r = lib ? (x64 || linux ? compileLibraryX64(c.text, name, { os }) : compileLibrary(c.text, name)) : wasm ? compileWasm(c.text) : x64 || linux ? compileX64(c.text, { os }) : compile(c.text);
     if (lib) libHeader = (r as unknown as { header: string }).header;
     for (const w of r.warnings) console.error(`warning: ${c.files.length > 1 ? c.warning(w) : w}`);
     return r.asm;
@@ -223,6 +228,97 @@ async function windows(): Promise<void> {
   }
 }
 
+/** x86-64 Linux: ELF executables, objects and libraries; outside Linux on x86-64 programs run in the x64 emulator */
+async function linuxTarget(): Promise<void> {
+  const E = await import('./asm/elf/index.ts');
+  const guard = <T>(asm: string, f: () => T): T => {
+    try { return f(); } catch (e) { if (e instanceof E.AsmError) asmFail(asm, e); throw e; }
+  };
+  const stem = (f: string) => f.replace(/\.(hla|s|asm)$/, '');
+  const exeFor = (f: string) => out ?? stem(f);
+  const nativeHost = process.platform === 'linux' && process.arch === 'x64';
+  const buildExe = async (asm: string, exe: string) => {
+    if (useClang) {
+      // clang (or gcc) assembles and links against the system's glibc with the same entry point;
+      // outside Linux zig cc -target x86_64-linux-gnu does the same with its own glibc stubs
+      const { linuxCc } = await import('./linux-toolchain.ts');
+      const cc = linuxCc();
+      if (!cc) { console.error(process.platform === 'linux' ? 'no C compiler found (cc, clang or gcc)' : 'zig not found: it builds Linux executables elsewhere (brew install zig)'); process.exit(1); }
+      const s = exe + '.s';
+      writeFileSync(s, asm);
+      const r = spawnSync(cc[0], [...cc.slice(1), '-nostartfiles', '-Wl,-e,hla_start', s, '-o', exe, '-lm'], { stdio: 'inherit' });
+      if (r.status !== 0) { console.error('clang failed'); process.exit(1); }
+      return;
+    }
+    const bin = guard(asm, () => E.assembleExecutableElf(asm));
+    writeFileSync(exe, bin);
+    chmodSync(exe, 0o755);
+    if (args.includes('--zip')) {
+      const { zipExecutable } = await import('../web/zip.ts');
+      writeFileSync(exe + '.zip', zipExecutable(basename(exe), bin));
+      console.error(`wrote ${exe}.zip (executable bit preserved)`);
+    }
+  };
+  // shared libraries the program needs: next to it (like LD_LIBRARY_PATH=.)
+  const libsNear = (path: string) => (name: string) => { try { return new Uint8Array(readFileSync(join(dirname(path), name))); } catch { return null; } };
+  const emulate = async (bin: Uint8Array, near: string) => {
+    const { runElf } = await import('./emu/x64/elf-loader.ts');
+    const r = runElf(bin, { args: progArgs, files: diskFiles, libs: libsNear(near), onOutput: (t, st) => (st === 1 ? process.stdout : process.stderr).write(t) });
+    if (r.error) console.error(`\nemulator: ${r.error}`);
+    console.error(`[x64 emulator: ${r.steps} instructions, exit ${r.exitCode}]`);
+    process.exit(r.exitCode ?? 1);
+  };
+  const source = () => (file.endsWith('.hla') ? translate(file) : readFileSync(file, 'utf8'));
+  switch (cmd) {
+    case 'compile': { const asm = translate(file); if (out) writeFileSync(out, asm); else process.stdout.write(asm); return; }
+    case 'build': case 'asm': await buildExe(source(), exeFor(file)); return;
+    case 'run': {
+      if (isElfFile) {
+        if (nativeHost) { const r = spawnSync(file.includes('/') ? file : './' + file, progArgs, { stdio: 'inherit' }); process.exit(r.status ?? 1); }
+        return emulate(new Uint8Array(readFileSync(file)), file);
+      }
+      const asm = source();
+      if (!nativeHost) { console.error('(not on Linux x86-64: running in the x64 emulator)'); return emulate(guard(asm, () => E.assembleExecutableElf(asm)), file); }
+      const dir = mkdtempSync(join(tmpdir(), 'hla-'));
+      const exe = join(dir, basename(stem(file)));
+      await buildExe(asm, exe);
+      const r = spawnSync(exe, progArgs, { stdio: 'inherit' });
+      process.exit(r.status ?? (r.signal ? 128 : 1));
+    }
+    case 'emu': {
+      if (isElfFile) return emulate(new Uint8Array(readFileSync(file)), file);   // an executable built elsewhere
+      const asm = source();
+      return emulate(guard(asm, () => E.assembleExecutableElf(asm)), file);
+    }
+    case 'obj': {
+      const asm = source();
+      const obj = guard(asm, () => E.writeElfObject(E.assembleX(asm)));
+      const target = out ?? stem(file) + '.o';
+      writeFileSync(target, obj.bytes);
+      console.error(`${target}: exports ${obj.exports.join(' ') || '(nothing)'}${obj.imports.length ? `; needs ${obj.imports.join(' ')}` : ''}`);
+      return;
+    }
+    case 'lib': {
+      const name = basename(file).replace(/\.hla$/, '');
+      const dir = out ?? '.';
+      const asm = translate(file, true);
+      const lib = guard(asm, () => E.buildLinuxLibrary(asm, name));
+      const files: [string, Uint8Array | string][] = [
+        [`${name}.h`, libHeader], [`${name}.o`, lib.obj], [`lib${name}.a`, lib.staticLib], [`lib${name}.so`, lib.so],
+      ];
+      mkdirSync(dir, { recursive: true });
+      for (const [f, data] of files) writeFileSync(join(dir, f), data);
+      console.error(`exported: ${lib.exports.join(', ')}`);
+      if (lib.imports.length) console.error(`lib${name}.so takes ${lib.imports.join(', ')} from the program that loads it`);
+      console.error(`wrote ${files.map(([f]) => join(dir, f)).join(', ')}`);
+      console.error(`static:  cc main.c lib${name}.a -o app`);
+      console.error(`dynamic: cc main.c -L. -l${name} -Wl,-rpath,'$ORIGIN' -o app`);
+      return;
+    }
+    default: usage();
+  }
+}
+
 /** WebAssembly: a module and the page that runs it; run here in Node's engine with the JavaScript runtime */
 async function webassembly(): Promise<void> {
   const { assembleWasm, AsmError } = await import('./asm/wasm/assembler.ts');
@@ -267,6 +363,7 @@ async function webassembly(): Promise<void> {
 }
 
 if (wasm) { await webassembly(); process.exit(0); }
+if (linux) { await linuxTarget(); process.exit(0); }
 if (x64) { await windows(); process.exit(0); }
 
 switch (cmd) {

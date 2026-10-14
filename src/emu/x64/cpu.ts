@@ -24,6 +24,13 @@ export class X64 {
   steps = 0;
   limit = 200_000_000;
   thunks = new Map<number, (c: X64) => void>();
+  /** calling convention of call(): Windows x64 or System V (Linux) */
+  abi: 'win64' | 'sysv' = 'win64';
+  /** the `syscall` instruction (Linux); rcx and r11 are already clobbered as the CPU does */
+  onSyscall: ((c: X64) => void) | null = null;
+  /** fs / gs segment bases (Linux: fs is the thread pointer — TLS, the stack protector's canary at fs:0x28) */
+  fsBase = 0n;
+  gsBase = 0n;
 
   constructor(mem: Memory) { this.mem = mem; }
 
@@ -116,17 +123,26 @@ export class X64 {
     }
   }
 
-  /** Call guest code from a host function (Win64 convention, re-entrant). */
+  /** Call guest code from a host function (Win64 or System V convention, re-entrant). */
   call(addr: number, args: bigint[], ret: number): bigint {
     const savedRip = this.rip, savedRsp = this.rsp;
-    const regs = [1, 2, 8, 9];
+    const sysv = this.abi === 'sysv';
+    const regs = sysv ? [7, 6, 2, 1, 8, 9] : [1, 2, 8, 9];
     args.forEach((a, i) => (this.r[regs[i]] = a & M64));
-    let sp = ((this.rsp - 128n) & ~15n) - 32n;   // aligned + shadow space
+    let sp = ((this.rsp - 128n) & ~15n) - (sysv ? 0n : 32n);   // aligned (below the red zone) + Win64 shadow space
     sp -= 8n;
     this.rsp = sp;
     this.mem.set64(Number(sp), BigInt(ret));
     this.rip = addr;
+    // the callee must preserve the callee-saved registers, as C code relies on them
+    const kept = sysv ? [3, 5, 12, 13, 14, 15] : [3, 5, 6, 7, 12, 13, 14, 15];
+    const before = kept.map((n) => this.r[n]);
+    const xbefore = sysv ? [] : [6, 7, 8, 9, 10, 11, 12, 13, 14, 15].map((n) => [this.xlo[n], this.xhi[n]]);
     this.run(ret);
+    const names = ['rax', 'rcx', 'rdx', 'rbx', 'rsp', 'rbp', 'rsi', 'rdi', 'r8', 'r9', 'r10', 'r11', 'r12', 'r13', 'r14', 'r15'];
+    kept.forEach((n, i) => { if (this.r[n] !== before[i]) throw new EmuError(`the function at 0x${addr.toString(16)} called from C changed ${names[n]}, a callee-saved register`, -1); });
+    xbefore.forEach(([lo, hi], i) => { if (this.xlo[6 + i] !== lo || this.xhi[6 + i] !== hi) throw new EmuError(`the function at 0x${addr.toString(16)} called from C changed xmm${6 + i}, a callee-saved register`, -1); });
+    if (this.rsp !== sp + 8n) throw new EmuError(`the function at 0x${addr.toString(16)} called from C returned with a different rsp`, -1);
     this.rip = savedRip;
     this.rsp = savedRsp;
     return this.r[0];
@@ -139,13 +155,14 @@ export class X64 {
 function decode(m: Memory, pc: number): Exec {
   let p = pc;
   const u8 = () => m.u8(p++);
-  let opsize = false, rep: 0 | 0xf2 | 0xf3 = 0;
+  let opsize = false, rep: 0 | 0xf2 | 0xf3 = 0, seg = 0;
   // legacy prefixes
   for (;;) {
     const b = m.u8(p);
     if (b === 0x66) { opsize = true; p++; }
     else if (b === 0xf2 || b === 0xf3) { rep = b; p++; }
-    else if (b === 0x2e || b === 0x3e || b === 0x26 || b === 0x36 || b === 0x64 || b === 0x65 || b === 0xf0) p++;
+    else if (b === 0x64 || b === 0x65) { seg = b; p++; }
+    else if (b === 0x2e || b === 0x3e || b === 0x26 || b === 0x36 || b === 0xf0) p++;
     else break;
   }
   let rex = 0;
@@ -178,7 +195,10 @@ function decode(m: Memory, pc: number): Exec {
     const ea = ripRel
       ? () => BigInt(end + disp)
       : (c: X64) => ((base >= 0 ? c.r[base] : 0n) + (index >= 0 ? c.r[index] * BigInt(scale) : 0n) + BigInt(disp)) & M64;
-    const e: E = ripRel ? { mem: () => end + disp, ea } : { mem: (c) => Number(ea(c)), ea };
+    // fs: / gs: add the segment base to the address of the access (lea computes the offset alone)
+    const segBase = seg === 0x64 ? (c: X64) => c.fsBase : seg === 0x65 ? (c: X64) => c.gsBase : null;
+    const e: E = segBase ? { mem: (c) => Number((ea(c) + segBase(c)) & M64), ea }
+      : ripRel ? { mem: () => end + disp, ea } : { mem: (c) => Number(ea(c)), ea };
     return { reg, e };
   };
   const imm = (size: number): bigint => {
@@ -362,7 +382,15 @@ function decode(m: Memory, pc: number): Exec {
     }
     switch (op2) {
       case 0x0b: return () => { throw new EmuError('ud2', pc); };
+      case 0x05: return fin((c) => {
+        if (!c.onSyscall) throw new EmuError('syscall: system calls are not available on this platform', pc);
+        c.r[1] = BigInt(end);           // rcx = return address, r11 = rflags
+        c.r[11] = 0x202n;
+        c.onSyscall(c);
+      });
       case 0x1f: { modrm(); return fin(() => {}); }
+      // hint space: endbr64 / endbr32 (f3 0f 1e fa / fb, gcc -fcf-protection) and rdssp-style hints run as nops
+      case 0x1e: { modrm(); return fin(() => {}); }
       case 0x31: return fin((c) => { const t = BigInt(c.steps); c.r[0] = t & M32; c.r[2] = (t >> 32n) & M32; });
       case 0xa2: return fin((c) => { c.r[0] = 0n; c.r[3] = 0n; c.r[1] = 0n; c.r[2] = 0n; });
       case 0xaf: { const { reg, e } = modrm(); return fin((c) => { const full = sx(c.get(reg, osz, hasRex), osz) * sx(rd(c, e, osz), osz); const res = BigInt.asUintN(osz * 8, full); c.cf = c.of = sx(res, osz) !== full; c.set(reg, osz, res, hasRex); }); }
